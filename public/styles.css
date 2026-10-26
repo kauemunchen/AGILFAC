@@ -207,3 +207,4 @@ fieldset { border: 1px solid rgba(148, 163, 184, .35); border-radius: 10px; padd
   .label-card-head { padding-bottom: 6px !important; }
   .label-card .label-barcode { margin-top: auto !important; }
 }
+@media print { .top-bar, .menu-toggle, #menu-toggle { display: none !important; } }
