@@ -1724,6 +1724,7 @@ function renderSuperAdminPanel(query = {}, values = {}, error = '', notice = '')
         <div class="full actions"><button class="btn" type="submit">Criar empresa e banco</button></div>
       </form>
     </section>
+    ${renderSuperAdminBackupsSection()}
     <section class="panel">
       <h3 style="margin-top:0;">Empresas provisionadas</h3>
       ${companies.length ? `<div class="table-wrapper"><table><thead><tr><th>Empresa</th><th>Slug</th><th>Banco</th><th>Usuários</th></tr></thead><tbody>${companies.map(company => `
@@ -1738,6 +1739,56 @@ function renderSuperAdminPanel(query = {}, values = {}, error = '', notice = '')
   `;
   const top = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>Superadmin - AgilFac</title><link rel="stylesheet" href="/public/styles.css" /></head><body><div class="layout"><aside class="sidebar"><h1>Superadmin</h1><nav><a href="/superadmin" class="active">Empresas</a></nav><div class="sidebar-note"><strong>Painel estrutural</strong><p>Use este ambiente para criar novas empresas e provisionar bases isoladas.</p><form method="post" action="/superadmin/logout" style="margin-top:12px;"><button class="btn secondary" type="submit">Sair</button></form></div></aside><main class="content">${notice ? `<div class="alert success">${escapeHtml(notice)}</div>` : ''}${error ? `<div class="alert error">${escapeHtml(error)}</div>` : ''}${content}</main></div></body></html>`;
   return top;
+}
+
+// T0.8 — Backups disponíveis para download (somente superadmin; arquivos criptografados)
+const BACKUP_DIR = path.join(ROOT, 'backups');
+const BACKUP_FILE_RE = /^agilfac-[0-9_-]+\.tar\.gz\.enc$/;
+
+function listBackupFiles() {
+  const out = [];
+  for (const sub of ['', 'mensal']) {
+    const dir = path.join(BACKUP_DIR, sub);
+    if (!fs.existsSync(dir)) continue;
+    for (const name of fs.readdirSync(dir)) {
+      if (!BACKUP_FILE_RE.test(name)) continue;
+      const stat = fs.statSync(path.join(dir, name));
+      out.push({ kind: sub || 'diario', name, size: stat.size, mtime: stat.mtime });
+    }
+  }
+  return out.sort((a, b) => b.mtime - a.mtime);
+}
+
+function renderSuperAdminBackupsSection() {
+  const files = listBackupFiles();
+  return `
+    <section class="panel">
+      <h3 style="margin-top:0;">Backups</h3>
+      <p class="hint">Cópia diária às 02:00 de todos os bancos, criptografada (AES-256). Guardados no servidor: 30 diários + 12 mensais. Baixe periodicamente para o seu computador.</p>
+      ${files.length ? `<div class="table-wrapper"><table><thead><tr><th>Arquivo</th><th>Tipo</th><th>Gerado em</th><th>Tamanho</th><th></th></tr></thead><tbody>${files.map(f => `
+        <tr>
+          <td>${escapeHtml(f.name)}</td>
+          <td>${f.kind === 'mensal' ? 'Mensal' : 'Diário'}</td>
+          <td>${escapeHtml(nowPt(f.mtime.toISOString()))}</td>
+          <td>${fmtNum(f.size / 1024 / 1024, 2)} MB</td>
+          <td><a class="btn secondary" href="/superadmin/backups/download?kind=${f.kind}&file=${encodeURIComponent(f.name)}">Baixar</a></td>
+        </tr>`).join('')}</tbody></table></div>` : '<p class="hint">Nenhum backup gerado ainda.</p>'}
+    </section>`;
+}
+
+function handleSuperAdminBackupDownload(query, res) {
+  const name = String(query.file || '');
+  const sub = query.kind === 'mensal' ? 'mensal' : '';
+  if (!BACKUP_FILE_RE.test(name)) return sendHtml(res, 'Arquivo inválido.', 400);
+  const filePath = path.join(BACKUP_DIR, sub, name);
+  if (!fs.existsSync(filePath)) return sendHtml(res, 'Arquivo não encontrado.', 404);
+  res.writeHead(200, {
+    'Content-Type': 'application/octet-stream',
+    'Content-Disposition': `attachment; filename="${name}"`,
+    'Content-Length': fs.statSync(filePath).size,
+    'Cache-Control': 'no-store'
+  });
+  fs.createReadStream(filePath).pipe(res);
 }
 
 function handleSuperAdminCreateCompany(form, res) {
@@ -9031,6 +9082,11 @@ const server = http.createServer(async (req, res) => {
       const session = getSuperAdminSession(req);
       if (!session) return redirect(res, '/superadmin/login');
       if (req.method === 'GET') return sendHtml(res, renderSuperAdminPanel(query, {}, query.error || '', query.notice || ''));
+    }
+    if (req.method === 'GET' && pathname === '/superadmin/backups/download') {
+      const session = getSuperAdminSession(req);
+      if (!session) return redirect(res, '/superadmin/login');
+      return handleSuperAdminBackupDownload(query, res);
     }
     if (req.method === 'POST' && pathname === '/superadmin/companies') {
       const session = getSuperAdminSession(req);
