@@ -26,7 +26,12 @@ const MASTER_SCHEMA_PATH = path.join(ROOT, 'database', 'master-schema.sql');
 const AVAILABLE_MINUTES_DAY = 528;
 const SESSION_COOKIE = 'agilfac_session';
 const SUPERADMIN_SESSION_COOKIE = 'agilfac_superadmin_session';
-const SESSION_TTL_DAYS = 30;
+const SESSION_TTL_DAYS = 7;
+// T0.6 — segurança de acesso
+const SESSION_IDLE_HOURS = 12;
+const PASSWORD_MIN_LENGTH = 8;
+const LOGIN_MAX_FAILURES = 5;
+const LOGIN_WINDOW_MINUTES = 15;
 const ROLE_LABELS = { adm: 'Administrador', operacional: 'Operacional', resultados: 'Resultados', apontamento: 'Apontamento' };
 const REVERSAL_TYPES = { op: 'Cadastro de OP', production: 'Lançamento diário', shipment: 'Embarque' };
 const CELL_ALLOWED_ROLES = new Set(['adm', 'operacional']);
@@ -111,9 +116,58 @@ function upgradeCompanyUserRoleConstraint() {
   masterDb.exec('PRAGMA foreign_keys = ON');
 }
 
+function migrateMasterSecurity() {
+  ensureColumn(masterDb, 'company_users', 'must_change_password', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(masterDb, 'company_users', 'last_login_at', 'TEXT');
+  ensureColumn(masterDb, 'sessions', 'last_seen_at', 'TEXT');
+  masterDb.exec(`
+    CREATE TABLE IF NOT EXISTS login_attempts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      scope TEXT NOT NULL,
+      company_slug TEXT,
+      username TEXT,
+      ip TEXT,
+      user_agent TEXT,
+      success INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_login_attempts_lookup ON login_attempts (scope, ip, company_slug, username, created_at);
+  `);
+}
+
+function getClientIp(req) {
+  const forwarded = String(req?.headers?.['x-forwarded-for'] || '').split(',')[0].trim();
+  return forwarded || req?.socket?.remoteAddress || '';
+}
+
+function isSecureRequest(req) {
+  return String(req?.headers?.['x-forwarded-proto'] || '').toLowerCase() === 'https' || Boolean(req?.socket?.encrypted);
+}
+
+function isLoginBlocked(scope, req, companySlug, username) {
+  const row = masterDb.prepare(`
+    SELECT COUNT(*) AS n FROM login_attempts
+    WHERE scope = ? AND success = 0 AND ip = ? AND COALESCE(company_slug, '') = ? AND LOWER(COALESCE(username, '')) = LOWER(?)
+      AND created_at >= datetime('now', ?)
+  `).get(scope, getClientIp(req), String(companySlug || ''), String(username || ''), `-${LOGIN_WINDOW_MINUTES} minutes`);
+  return Number(row?.n || 0) >= LOGIN_MAX_FAILURES;
+}
+
+function recordLoginAttempt(scope, req, companySlug, username, success) {
+  masterDb.prepare(`
+    INSERT INTO login_attempts (scope, company_slug, username, ip, user_agent, success)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(scope, String(companySlug || ''), String(username || '').slice(0, 120), getClientIp(req), String(req?.headers?.['user-agent'] || '').slice(0, 300), success ? 1 : 0);
+}
+
+function validateNewPassword(password) {
+  if (String(password || '').length < PASSWORD_MIN_LENGTH) throw new Error(`A senha precisa ter pelo menos ${PASSWORD_MIN_LENGTH} caracteres.`);
+}
+
 function migrateMasterDatabase() {
   upgradeCompanyUserRoleConstraint();
   repairMasterSessionsForeignKey();
+  migrateMasterSecurity();
   masterDb.exec(`
     CREATE TABLE IF NOT EXISTS super_admins (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -229,8 +283,8 @@ function bootstrapMasterData() {
   if (!adminExists) {
     generatedPassword = process.env.AGILFAC_BOOTSTRAP_PASSWORD || crypto.randomBytes(6).toString('base64url');
     masterDb.prepare(`
-      INSERT INTO company_users (company_id, username, full_name, password_hash, role, is_active, updated_at)
-      VALUES (?, 'admin', 'Administrador inicial', ?, 'adm', 1, CURRENT_TIMESTAMP)
+      INSERT INTO company_users (company_id, username, full_name, password_hash, role, is_active, must_change_password, updated_at)
+      VALUES (?, 'admin', 'Administrador inicial', ?, 'adm', 1, 1, CURRENT_TIMESTAMP)
     `).run(company.id, hashPassword(generatedPassword));
 
     const credentialsPath = path.join(DATA_DIR, 'bootstrap-admin.txt');
@@ -278,7 +332,7 @@ function findCompanyByLogin(value) {
 
 function authenticateCompanyUser(companyId, username, password) {
   const user = masterDb.prepare(`
-    SELECT id, company_id, username, full_name, password_hash, role, is_active
+    SELECT id, company_id, username, full_name, password_hash, role, is_active, must_change_password
     FROM company_users
     WHERE company_id = ? AND LOWER(username) = LOWER(?) AND is_active = 1
     LIMIT 1
@@ -319,7 +373,9 @@ function getSessionContext(req) {
       u.username,
       u.full_name,
       u.role,
-      u.is_active AS user_is_active
+      u.is_active AS user_is_active,
+      u.must_change_password,
+      COALESCE(s.last_seen_at, s.created_at) AS last_seen_at
     FROM sessions s
     JOIN companies c ON c.id = s.company_id
     JOIN company_users u ON u.id = s.company_user_id
@@ -330,6 +386,14 @@ function getSessionContext(req) {
   if (row.user_is_active !== 1 || new Date(row.expires_at).getTime() <= Date.now()) {
     destroySession(token);
     return null;
+  }
+  const lastSeen = new Date(String(row.last_seen_at).includes('T') ? row.last_seen_at : `${String(row.last_seen_at).replace(' ', 'T')}Z`).getTime();
+  if (Number.isFinite(lastSeen) && Date.now() - lastSeen > SESSION_IDLE_HOURS * 60 * 60 * 1000) {
+    destroySession(token);
+    return null;
+  }
+  if (!Number.isFinite(lastSeen) || Date.now() - lastSeen > 60 * 1000) {
+    masterDb.prepare('UPDATE sessions SET last_seen_at = ? WHERE session_token = ?').run(new Date().toISOString(), token);
   }
   const company = {
     id: row.company_id,
@@ -345,7 +409,8 @@ function getSessionContext(req) {
       id: row.user_id,
       username: row.username,
       full_name: row.full_name,
-      role: row.role
+      role: row.role,
+      must_change_password: Number(row.must_change_password || 0) === 1
     },
     role: row.role,
     tenantDb: getTenantDbForCompany(company)
@@ -402,9 +467,9 @@ function getSuperAdminSession(req) {
   };
 }
 
-function setSuperAdminSessionCookie(res, token, expiresAt) {
+function setSuperAdminSessionCookie(res, token, expiresAt, req = null) {
   const maxAge = Math.max(0, Math.floor((new Date(expiresAt).getTime() - Date.now()) / 1000));
-  appendSetCookie(res, `${SUPERADMIN_SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/superadmin; HttpOnly; Max-Age=${maxAge}; SameSite=Lax`);
+  appendSetCookie(res, `${SUPERADMIN_SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/superadmin; HttpOnly; Max-Age=${maxAge}; SameSite=Strict${isSecureRequest(req) ? '; Secure' : ''}`);
 }
 
 function clearSuperAdminSessionCookie(res) {
@@ -437,7 +502,7 @@ function createTenantCompany({ name, slug, adminUsername, adminPassword }) {
   if (!normalizedName) throw new Error('Informe o nome da empresa.');
   if (!normalizedSlug) throw new Error('Informe o identificador da empresa.');
   if (!normalizedAdminUsername) throw new Error('Informe o usuário administrador.');
-  if (String(adminPassword || '').length < 6) throw new Error('A senha inicial precisa ter pelo menos 6 caracteres.');
+  validateNewPassword(adminPassword);
   const exists = masterDb.prepare('SELECT id FROM companies WHERE LOWER(slug) = LOWER(?) LIMIT 1').get(normalizedSlug);
   if (exists) throw new Error('Já existe uma empresa com esse identificador.');
 
@@ -462,8 +527,8 @@ function createTenantCompany({ name, slug, adminUsername, adminPassword }) {
   `).run(normalizedSlug, normalizedName, tenantRelativePath);
 
   masterDb.prepare(`
-    INSERT INTO company_users (company_id, username, full_name, password_hash, role, is_active, updated_at)
-    VALUES (?, ?, 'Administrador inicial', ?, 'adm', 1, CURRENT_TIMESTAMP)
+    INSERT INTO company_users (company_id, username, full_name, password_hash, role, is_active, must_change_password, updated_at)
+    VALUES (?, ?, 'Administrador inicial', ?, 'adm', 1, 1, CURRENT_TIMESTAMP)
   `).run(result.lastInsertRowid, normalizedAdminUsername, hashPassword(adminPassword));
 
   return { id: Number(result.lastInsertRowid), name: normalizedName, slug: normalizedSlug, db_path: tenantRelativePath };
@@ -478,19 +543,22 @@ function createCompanyUser({ companyId, username, fullName, password, role }) {
   if (!normalizedUsername) throw new Error('Informe o usuário.');
   if (!normalizedFullName) throw new Error('Informe o nome completo do usuário.');
   if (!normalizedRole) throw new Error('Perfil inválido.');
-  if (String(password || '').length < 6) throw new Error('A senha precisa ter pelo menos 6 caracteres.');
+  validateNewPassword(password);
   const exists = masterDb.prepare('SELECT id FROM company_users WHERE company_id = ? AND LOWER(username) = LOWER(?) LIMIT 1').get(company.id, normalizedUsername);
   if (exists) throw new Error('Já existe um usuário com esse login nessa empresa.');
   masterDb.prepare(`
-    INSERT INTO company_users (company_id, username, full_name, password_hash, role, is_active, updated_at)
-    VALUES (?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+    INSERT INTO company_users (company_id, username, full_name, password_hash, role, is_active, must_change_password, updated_at)
+    VALUES (?, ?, ?, ?, ?, 1, 1, CURRENT_TIMESTAMP)
   `).run(company.id, normalizedUsername, normalizedFullName, hashPassword(password), normalizedRole);
 }
 
-function updateCompanyUserPassword({ userId, password }) {
-  if (String(password || '').length < 6) throw new Error('A nova senha precisa ter pelo menos 6 caracteres.');
-  const result = masterDb.prepare('UPDATE company_users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(hashPassword(password), Number(userId));
+// Redefinição pelo administrador: usuário é obrigado a trocar no próximo login
+function updateCompanyUserPassword({ userId, password, mustChange = true }) {
+  validateNewPassword(password);
+  const result = masterDb.prepare('UPDATE company_users SET password_hash = ?, must_change_password = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(hashPassword(password), mustChange ? 1 : 0, Number(userId));
   if (!result.changes) throw new Error('Usuário não encontrado.');
+  // Derruba as sessões abertas do usuário
+  masterDb.prepare('DELETE FROM sessions WHERE company_user_id = ?').run(Number(userId));
 }
 
 const mimeTypes = {
@@ -1403,9 +1471,9 @@ function appendSetCookie(res, cookieValue) {
   res.setHeader('Set-Cookie', values);
 }
 
-function setSessionCookie(res, token, expiresAt) {
+function setSessionCookie(res, token, expiresAt, req = null) {
   const maxAge = Math.max(0, Math.floor((new Date(expiresAt).getTime() - Date.now()) / 1000));
-  appendSetCookie(res, `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; Max-Age=${maxAge}; SameSite=Lax`);
+  appendSetCookie(res, `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; Max-Age=${maxAge}; SameSite=Lax${isSecureRequest(req) ? '; Secure' : ''}`);
 }
 
 function clearSessionCookie(res) {
@@ -1496,22 +1564,64 @@ function renderLoginPage(values = {}, error = '', notice = '') {
   </html>`;
 }
 
-function handleLogin(form, res) {
+function handleLogin(form, res, req = null) {
   const companyValue = String(form.company || '').trim();
   const username = String(form.username || '').trim();
   const password = String(form.password || '');
   const returnTo = String(form.returnTo || '/').trim() || '/';
+  const companyKey = companyValue.toLowerCase();
+  if (isLoginBlocked('company', req, companyKey, username)) {
+    recordLoginAttempt('company', req, companyKey, username, false);
+    return sendHtml(res, renderLoginPage({ company: companyValue, username, returnTo }, `Muitas tentativas. Aguarde ${LOGIN_WINDOW_MINUTES} minutos e tente novamente.`), 429);
+  }
   const company = findCompanyByLogin(companyValue);
-  if (!company) {
-    return sendHtml(res, renderLoginPage({ company: companyValue, username, returnTo }, 'Empresa não encontrada.'), 401);
-  }
-  const user = authenticateCompanyUser(company.id, username, password);
+  const user = company ? authenticateCompanyUser(company.id, username, password) : null;
   if (!user) {
-    return sendHtml(res, renderLoginPage({ company: companyValue, username, returnTo }, 'Usuário ou senha inválidos.'), 401);
+    recordLoginAttempt('company', req, companyKey, username, false);
+    return sendHtml(res, renderLoginPage({ company: companyValue, username, returnTo }, 'Empresa, usuário ou senha inválidos.'), 401);
   }
+  recordLoginAttempt('company', req, companyKey, username, true);
+  masterDb.prepare('UPDATE company_users SET last_login_at = ? WHERE id = ?').run(new Date().toISOString(), user.id);
   const session = createSession(company, user);
-  setSessionCookie(res, session.token, session.expiresAt);
-  redirect(res, returnTo.startsWith('/') ? returnTo : '/');
+  setSessionCookie(res, session.token, session.expiresAt, req);
+  if (Number(user.must_change_password || 0) === 1) return redirect(res, '/conta/senha');
+  const safeReturn = returnTo.startsWith('/') && !returnTo.startsWith('//') ? returnTo : '/';
+  redirect(res, safeReturn);
+}
+
+function renderChangePasswordPage(auth, error = '', notice = '') {
+  const forced = auth?.user?.must_change_password;
+  const content = `
+    <section class="page-header"><div><h2>Trocar senha</h2><p>${forced ? 'Por segurança, defina uma senha pessoal antes de continuar.' : 'Defina uma nova senha de acesso.'}</p></div></section>
+    <form class="panel stack-form" method="post" action="/conta/senha" style="max-width:420px">
+      <label>Senha atual<input type="password" name="current_password" required autocomplete="current-password" /></label>
+      <label>Nova senha<input type="password" name="new_password" required minlength="${PASSWORD_MIN_LENGTH}" autocomplete="new-password" /></label>
+      <label>Confirmar nova senha<input type="password" name="confirm_password" required minlength="${PASSWORD_MIN_LENGTH}" autocomplete="new-password" /></label>
+      <p class="hint">Mínimo de ${PASSWORD_MIN_LENGTH} caracteres. Não use a senha temporária.</p>
+      <div class="actions"><button class="btn" type="submit">Salvar nova senha</button></div>
+    </form>
+    ${forced ? '<form method="post" action="/logout"><button class="btn secondary" type="submit">Sair</button></form>' : ''}
+  `;
+  return pageLayout({ title: 'Trocar senha', content, error, notice, role: auth?.role || 'adm' });
+}
+
+function handleChangePassword(form, res, auth) {
+  const current = String(form.current_password || '');
+  const next = String(form.new_password || '');
+  const confirm = String(form.confirm_password || '');
+  const row = masterDb.prepare('SELECT password_hash FROM company_users WHERE id = ?').get(auth.user.id);
+  if (!row || !verifyPassword(current, row.password_hash)) return sendHtml(res, renderChangePasswordPage(auth, 'Senha atual incorreta.'), 422);
+  if (next !== confirm) return sendHtml(res, renderChangePasswordPage(auth, 'A confirmação não confere com a nova senha.'), 422);
+  if (next === current) return sendHtml(res, renderChangePasswordPage(auth, 'A nova senha precisa ser diferente da atual.'), 422);
+  try {
+    validateNewPassword(next);
+  } catch (error) {
+    return sendHtml(res, renderChangePasswordPage(auth, error.message), 422);
+  }
+  masterDb.prepare('UPDATE company_users SET password_hash = ?, must_change_password = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(hashPassword(next), auth.user.id);
+  // Encerra outras sessões do usuário, mantém a atual
+  masterDb.prepare('DELETE FROM sessions WHERE company_user_id = ? AND session_token <> ?').run(auth.user.id, auth.token);
+  redirect(res, '/?notice=' + encodeURIComponent('Senha alterada com sucesso.'));
 }
 
 function handleLogout(req, res) {
@@ -1555,15 +1665,21 @@ function renderSuperAdminLoginPage(values = {}, error = '', notice = '') {
   </html>`;
 }
 
-function handleSuperAdminLogin(form, res) {
+function handleSuperAdminLogin(form, res, req = null) {
   const username = String(form.username || '').trim();
   const password = String(form.password || '');
+  if (isLoginBlocked('superadmin', req, '', username)) {
+    recordLoginAttempt('superadmin', req, '', username, false);
+    return sendHtml(res, renderSuperAdminLoginPage({ username }, `Muitas tentativas. Aguarde ${LOGIN_WINDOW_MINUTES} minutos.`), 429);
+  }
   const admin = authenticateSuperAdmin(username, password);
   if (!admin) {
+    recordLoginAttempt('superadmin', req, '', username, false);
     return sendHtml(res, renderSuperAdminLoginPage({ username }, 'Usuário ou senha inválidos.'), 401);
   }
+  recordLoginAttempt('superadmin', req, '', username, true);
   const session = createSuperAdminSession(admin);
-  setSuperAdminSessionCookie(res, session.token, session.expiresAt);
+  setSuperAdminSessionCookie(res, session.token, session.expiresAt, req);
   redirect(res, '/superadmin');
 }
 
@@ -1846,6 +1962,7 @@ function renderRoleSwitcher(role) {
       <div><strong>${escapeHtml(auth.company.name)}</strong></div>
       <div class="hint">Usuário: ${escapeHtml(auth.user.full_name || auth.user.username)}</div>
       <div class="hint">Perfil: ${escapeHtml(ROLE_LABELS[role] || role)}</div>
+      <a class="hint" href="/conta/senha">Trocar minha senha</a>
       <form method="post" action="/logout" style="margin-top:12px;">
         <button class="btn secondary" type="submit">Sair</button>
       </form>
@@ -8765,7 +8882,7 @@ const server = http.createServer(async (req, res) => {
       if (session) return redirect(res, '/superadmin');
       return sendHtml(res, renderSuperAdminLoginPage({ username: query.username || '' }, query.error || '', query.notice || ''));
     }
-    if (req.method === 'POST' && pathname === '/superadmin/login') return handleSuperAdminLogin(await parseBody(req), res);
+    if (req.method === 'POST' && pathname === '/superadmin/login') return handleSuperAdminLogin(await parseBody(req), res, req);
     if (req.method === 'POST' && pathname === '/superadmin/logout') return handleSuperAdminLogout(req, res);
     if (pathname === '/superadmin' || pathname === '/superadmin/') {
       const session = getSuperAdminSession(req);
@@ -8783,7 +8900,7 @@ const server = http.createServer(async (req, res) => {
       if (auth) return redirect(res, '/');
       return sendHtml(res, renderLoginPage({ returnTo: query.returnTo || '', company: query.company || '', username: query.username || '' }, query.error || '', query.notice || ''));
     }
-    if (req.method === 'POST' && pathname === '/login') return handleLogin(await parseBody(req), res);
+    if (req.method === 'POST' && pathname === '/login') return handleLogin(await parseBody(req), res, req);
     if (req.method === 'POST' && pathname === '/logout') return handleLogout(req, res);
 
     const auth = getSessionContext(req);
@@ -8791,6 +8908,10 @@ const server = http.createServer(async (req, res) => {
 
     return requestContext.run({ auth, tenantDb: auth.tenantDb }, async () => {
       const role = getRequestRole();
+
+      if (req.method === 'GET' && pathname === '/conta/senha') return sendHtml(res, renderChangePasswordPage(auth, query.error || '', query.notice || ''));
+      if (req.method === 'POST' && pathname === '/conta/senha') return handleChangePassword(await parseBody(req), res, auth);
+      if (auth.user.must_change_password) return redirect(res, '/conta/senha');
 
       if (req.method === 'GET' && pathname === '/api/op-preview') {
         const preview = getOpQuickPreview(query.op_number || '');
