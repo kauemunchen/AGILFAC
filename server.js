@@ -7261,6 +7261,71 @@ function renderEmployeeForm(values = {}, error = '') {
   return pageLayout({ title: 'Novo colaborador', content, error, role: 'adm' });
 }
 
+// Envio em sequência do resultado do período por WhatsApp (uma conversa por clique)
+function renderEmployeeWhatsAppQueuePage(role = 'adm') {
+  const all = db.prepare('SELECT * FROM employees').all()
+    .filter(emp => describeEmployeeStatus(emp) === 'Ativo')
+    .sort((a, b) => String(a.full_name).localeCompare(String(b.full_name), 'pt-BR', { sensitivity: 'base' }));
+  const context = getEmployeeResultContext(all);
+  const queue = [];
+  const withoutPhone = [];
+  for (const emp of all) {
+    const message = buildEmployeeResultMessage(emp, context);
+    if (!emp.phone) { withoutPhone.push(emp); continue; }
+    if (!message) continue;
+    queue.push({ id: emp.id, name: emp.full_name, phone: formatPhone(emp.phone), url: `https://wa.me/55${emp.phone}?text=${encodeURIComponent(message)}` });
+  }
+  const storageKey = `agilfac_wa_${context.range.start}_${context.cutoff}`;
+  const content = `
+    <section class="page-header"><div><h2>Enviar resultado por WhatsApp</h2><p>Período ${formatDatePtBr(context.range.start)} a ${formatDatePtBr(context.range.end)}, até ${formatDatePtBr(context.cutoff)}. Clique em <strong>Abrir próxima</strong>, envie no WhatsApp e volte aqui.</p></div><a class="btn secondary" href="/employees">Voltar</a></section>
+    <section class="panel wa-queue">
+      <div class="wa-queue-head">
+        <button class="btn" type="button" data-wa-next>Abrir próxima</button>
+        <span class="active-count-pill" data-wa-progress>0 de ${queue.length}</span>
+        <button class="btn secondary" type="button" data-wa-reset>Recomeçar</button>
+      </div>
+      <table class="table-zebra">
+        <thead><tr><th>Colaboradora</th><th>WhatsApp</th><th>Situação</th><th></th></tr></thead>
+        <tbody>
+          ${queue.map(item => `<tr data-wa-row="${item.id}"><td>${escapeHtml(item.name)}</td><td>${escapeHtml(item.phone)}</td><td data-wa-status><span class="status-tag off">Pendente</span></td><td><button class="btn secondary" type="button" data-wa-open="${item.id}">Abrir</button></td></tr>`).join('') || '<tr><td colspan="4">Nenhuma colaboradora ativa com telefone cadastrado.</td></tr>'}
+        </tbody>
+      </table>
+      ${withoutPhone.length ? `<p class="hint">Sem telefone cadastrado (${withoutPhone.length}): ${withoutPhone.map(emp => escapeHtml(emp.full_name)).join(', ')}.</p>` : ''}
+    </section>
+    <script>
+      (() => {
+        const queue = ${JSON.stringify(queue.map(({ id, url }) => ({ id, url })))};
+        const key = ${JSON.stringify(storageKey)};
+        let sent = new Set();
+        try { sent = new Set(JSON.parse(localStorage.getItem(key) || '[]')); } catch (_) {}
+        const save = () => { try { localStorage.setItem(key, JSON.stringify([...sent])); } catch (_) {} };
+        const progress = document.querySelector('[data-wa-progress]');
+        const nextBtn = document.querySelector('[data-wa-next]');
+        const render = () => {
+          queue.forEach(item => {
+            const cell = document.querySelector('[data-wa-row="' + item.id + '"] [data-wa-status]');
+            if (cell) cell.innerHTML = sent.has(item.id) ? '<span class="status-tag ok">Aberto</span>' : '<span class="status-tag off">Pendente</span>';
+          });
+          progress.textContent = sent.size + ' de ' + queue.length;
+          const done = queue.every(item => sent.has(item.id));
+          nextBtn.textContent = done ? 'Todas abertas ✓' : 'Abrir próxima';
+          nextBtn.disabled = done;
+        };
+        const open = item => {
+          window.open(item.url, 'agilfac_whatsapp');
+          sent.add(item.id); save(); render();
+        };
+        nextBtn.addEventListener('click', () => { const item = queue.find(q => !sent.has(q.id)); if (item) open(item); });
+        document.querySelectorAll('[data-wa-open]').forEach(btn => btn.addEventListener('click', () => {
+          const item = queue.find(q => String(q.id) === btn.dataset.waOpen); if (item) open(item);
+        }));
+        document.querySelector('[data-wa-reset]').addEventListener('click', () => { if (confirm('Marcar todas como pendentes de novo?')) { sent.clear(); save(); render(); } });
+        render();
+      })();
+    </script>`;
+  return pageLayout({ title: 'Enviar resultado por WhatsApp', content, role });
+}
+
 function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
   // Ativas primeiro; desligadas/inativas no fim. Cada grupo em ordem alfabética.
   const employees = db.prepare('SELECT * FROM employees').all().sort((a, b) => {
@@ -7274,7 +7339,7 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
   const editingId = Number(query.edit || 0);
   const showForm = query.new === '1' || Boolean(error);
   const content = `
-    <section class="page-header"><div><h2>Colaboradores <span class="active-count-pill">${activeCount} ativas</span></h2><p>Base de apoio para lançamentos diários.</p></div><a class="btn" href="/employees?new=1">Novo colaborador</a></section>
+    <section class="page-header"><div><h2>Colaboradores <span class="active-count-pill">${activeCount} ativas</span></h2><p>Base de apoio para lançamentos diários.</p></div><div class="actions"><a class="btn secondary" href="/employees/whatsapp-resultados">Enviar resultado para todas</a><a class="btn" href="/employees?new=1">Novo colaborador</a></div></section>
     ${showForm ? `
     <section class="panel">
       <h3>Cadastro de colaborador</h3>
@@ -9283,6 +9348,7 @@ const server = http.createServer(async (req, res) => {
 
       if (req.method === 'GET' && pathname === '/employees') return sendHtml(res, renderEmployeeList(query, {}, '', role));
       if (req.method === 'GET' && pathname === '/employees/new') return redirect(res, '/employees');
+      if (req.method === 'GET' && pathname === '/employees/whatsapp-resultados') return sendHtml(res, renderEmployeeWhatsAppQueuePage(role));
       if (req.method === 'POST' && pathname === '/employees') return handleCreateEmployee(await parseBody(req), res);
 
       const employeeUpdateMatch = pathname.match(/^\/employees\/(\d+)$/);
