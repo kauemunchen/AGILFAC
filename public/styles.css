@@ -246,3 +246,29 @@ fieldset { border: 1px solid rgba(148, 163, 184, .35); border-radius: 10px; padd
   .two-columns, .dashboard-columns, .closure-actions-grid, .closure-report-grid { grid-template-columns: minmax(0, 1fr) !important; }
   .two-columns > *, .dashboard-columns > * { min-width: 0; }
 }
+/* T1.4 — fila em dias */
+.queue-card { display: grid; grid-template-columns: minmax(200px, 1fr) 3fr; gap: 16px; align-items: center; border-left: 6px solid #3b82f6; }
+.queue-card.queue-high { border-left-color: #ef4444; }
+.queue-card.queue-low { border-left-color: #f59e0b; }
+.queue-card.queue-ok { border-left-color: #10b981; }
+.queue-main span { display: block; color: #607089; font-size: 13px; }
+.queue-main strong { display: block; font-size: 30px; margin: 4px 0; }
+.queue-main small { color: #607089; }
+.queue-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.queue-stats div { background: #f8fbff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 10px; }
+.queue-stats span { display: block; font-size: 12px; color: #607089; }
+.queue-stats strong { display: block; font-size: 20px; margin-top: 2px; }
+.queue-stats small { display: block; font-size: 11px; color: #7b8798; }
+@media (max-width: 900px) { .queue-card { grid-template-columns: 1fr; } .queue-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+/* T1.7 — menu agrupado */
+.nav-group { width: 100%; border-top: 1px solid rgba(255, 255, 255, .08); padding-top: 4px; }
+.nav-group:first-of-type { border-top: 0; }
+.nav-group summary { list-style: none; cursor: pointer; font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; color: #64748b; text-align: center; padding: 6px 2px 4px; user-select: none; }
+.nav-group summary::-webkit-details-marker { display: none; }
+.nav-group summary::after { content: ' ▾'; }
+.nav-group:not([open]) summary::after { content: ' ▸'; }
+.nav-group summary:hover { color: #cbd5e1; }
+.nav-group a { margin-bottom: 4px; }
+.employees-filter { align-items: flex-end; margin-bottom: 14px; }
+.employees-filter label:first-child { max-width: 360px; }
+.employees-filter .checkbox-line { flex: 0 0 auto; min-width: 0; flex-direction: row; align-items: center; padding-bottom: 10px; }

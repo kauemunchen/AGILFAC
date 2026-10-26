@@ -2193,6 +2193,46 @@ function renderRoleSwitcher(role) {
   `;
 }
 
+// T1.7 — Menu agrupado (Produção, Expedição, Financeiro, Pessoas, Configurações), grupos recolhíveis
+const NAV_GROUPS = [
+  { key: 'producao', label: 'Produção', hrefs: ['/', '/acompanhamento/diario', '/productions/hourly', '/productions/new', '/ops/new', '/ops', '/labels/entry', '/op-extra-times'] },
+  { key: 'expedicao', label: 'Expedição', hrefs: ['/shipments/new', '/shipments', '/labels/shipment'] },
+  { key: 'financeiro', label: 'Financeiro', hrefs: ['/billing-reconciliation', '/closures', '/premios/producao', '/cells/report', '/cells/closures'] },
+  { key: 'pessoas', label: 'Pessoas', hrefs: ['/employees'] },
+  { key: 'config', label: 'Configurações', hrefs: ['/cadastros', '/parametros', '/admin/access', '/estornos'] }
+];
+
+function renderNavLink(item) {
+  return `<a href="${item.href}" ${item.active ? 'class="active"' : ''}><span class="nav-icon">${item.icon}</span><span class="nav-label">${escapeHtml(item.label)}</span></a>`;
+}
+
+function renderGroupedNav(navItems) {
+  if (navItems.length <= 6) return navItems.map(renderNavLink).join('');
+  const used = new Set();
+  const groups = NAV_GROUPS.map(group => {
+    const items = group.hrefs.map(href => navItems.find(item => item.href === href)).filter(Boolean);
+    items.forEach(item => used.add(item.href));
+    return { ...group, items };
+  }).filter(group => group.items.length);
+  const rest = navItems.filter(item => !used.has(item.href));
+  if (rest.length) groups.push({ key: 'outros', label: 'Outros', items: rest });
+  return groups.map(group => `
+    <details class="nav-group" data-nav-group="${group.key}" open>
+      <summary>${escapeHtml(group.label)}</summary>
+      ${group.items.map(renderNavLink).join('')}
+    </details>`).join('') + `<script>
+    (() => {
+      let state = {};
+      try { state = JSON.parse(localStorage.getItem('agilfac_nav') || '{}'); } catch (_) {}
+      document.querySelectorAll('[data-nav-group]').forEach(el => {
+        const key = el.dataset.navGroup;
+        if (state[key] === false && !el.querySelector('a.active')) el.open = false;
+        el.addEventListener('toggle', () => { state[key] = el.open; try { localStorage.setItem('agilfac_nav', JSON.stringify(state)); } catch (_) {} });
+      });
+    })();
+  </script>`;
+}
+
 function pageLayout({ title, content, notice = '', error = '', role = 'adm' }) {
   const navItems = isLancadorRole(role)
     ? [
@@ -2255,7 +2295,7 @@ function pageLayout({ title, content, notice = '', error = '', role = 'adm' }) {
       <aside class="sidebar app-sidebar" id="app-sidebar">
         <div class="sidebar-brand">AgilFac</div>
         <nav>
-          ${navItems.map(item => `<a href="${item.href}" ${item.active ? 'class="active"' : ''}><span class="nav-icon">${item.icon}</span><span class="nav-label">${escapeHtml(item.label)}</span></a>`).join('')}
+          ${renderGroupedNav(navItems)}
         </nav>
       </aside>
       <main class="content app-content">
@@ -5786,6 +5826,63 @@ function getShipmentDetail(id) {
   return { shipment, items };
 }
 
+// ===================== FILA EM DIAS (T1.4) =====================
+// Fila = Σ saldo × F21 das OPs em aberto (verde, amarela, rosa). Capacidade = média de minutos
+// lançados por dia útil nos últimos 10 dias úteis. Dias de fila = fila ÷ capacidade.
+function addBusinessDays(fromIso, count) {
+  const cursor = new Date(`${fromIso}T00:00:00Z`);
+  let added = 0;
+  let guard = 0;
+  while (added < count && guard < 3650) {
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+    if (isBusinessDay(iso(cursor))) added += 1;
+    guard += 1;
+  }
+  return iso(cursor);
+}
+
+function getQueueForecast() {
+  const open = getOpList({}).filter(op => ['verde', 'amarelo', 'rosa'].includes(op.status_color) && !op.shipped_at && !isReturnedWithoutProductionLifecycle(op.lifecycle_type));
+  const queueMinutes = round2(open.reduce((sum, op) => sum + Math.max(Number(op.remaining_quantity || 0), 0) * Number(op.minutes_f21 || 0), 0));
+  const queuePieces = open.reduce((sum, op) => sum + Math.max(Number(op.remaining_quantity || 0), 0), 0);
+  const days = [];
+  const cursor = new Date(`${today()}T00:00:00Z`);
+  let guard = 0;
+  while (days.length < 10 && guard < 120) {
+    cursor.setUTCDate(cursor.getUTCDate() - 1);
+    if (isBusinessDay(iso(cursor))) days.push(iso(cursor));
+    guard += 1;
+  }
+  const produced = days.length ? db.prepare(`
+    SELECT COALESCE(SUM(p.produced_minutes), 0) AS minutes
+    FROM op_daily_productions p JOIN ops o ON o.id = p.op_id
+    WHERE p.is_reversed = 0 AND COALESCE(o.is_reversed, 0) = 0 AND p.production_date BETWEEN ? AND ?
+  `).get(days[days.length - 1], days[0]).minutes : 0;
+  const dailyCapacity = days.length ? round2(Number(produced || 0) / days.length) : 0;
+  const queueDays = dailyCapacity > 0 ? round2(queueMinutes / dailyCapacity) : null;
+  const finishDate = queueDays !== null ? addBusinessDays(today(), Math.ceil(queueDays)) : '';
+  return { openOps: open.length, queuePieces, queueMinutes, dailyCapacity, queueDays, finishDate, sampleDays: days.length };
+}
+
+function renderQueueForecastCard() {
+  const f = getQueueForecast();
+  const level = f.queueDays === null ? '' : (f.queueDays > 15 ? 'queue-high' : (f.queueDays < 5 ? 'queue-low' : 'queue-ok'));
+  return `
+    <section class="panel section-gap queue-card ${level}">
+      <div class="queue-main">
+        <span>Fila atual</span>
+        <strong>${f.queueDays === null ? 'Sem base' : `${fmtNum(f.queueDays, 1)} dias úteis`}</strong>
+        <small>${f.finishDate ? `Término estimado: ${formatDatePtBr(f.finishDate)}` : 'Sem produção nos últimos 10 dias úteis para estimar.'}</small>
+      </div>
+      <div class="queue-stats">
+        <div><span>OPs em aberto</span><strong>${f.openOps}</strong></div>
+        <div><span>Peças na fila</span><strong>${fmtNum(f.queuePieces, 0)}</strong></div>
+        <div><span>Minutos na fila</span><strong>${fmtNum(f.queueMinutes, 0)}</strong></div>
+        <div><span>Capacidade/dia</span><strong>${fmtNum(f.dailyCapacity, 0)} min</strong><small>média dos últimos ${f.sampleDays} dias úteis</small></div>
+      </div>
+    </section>`;
+}
+
 function renderDashboard(query, role = 'adm') {
   const defaultMonthBase = getPeriodRange('month', today()).start;
   const currentDay = today();
@@ -5871,6 +5968,8 @@ function renderDashboard(query, role = 'adm') {
         <p>Leitura em tempo real do que já foi lançado hoje por hora.</p>
       </div>
     </section>
+
+    ${renderQueueForecastCard()}
 
     <section class="panel section-gap" id="hourly-dashboard-panel">
       <div class="panel-header"><h3>Resultado do dia — lançamentos por hora</h3><span class="hint">Leitura em tempo real do que já foi lançado hoje por hora.</span></div>
@@ -5979,7 +6078,7 @@ function renderDashboard(query, role = 'adm') {
             <p>${companyAction}</p>
           </div>
           <p class="subtle-note"><strong>Período:</strong> ${escapeHtml(formatDatePtBr(employeeData.range.start))} até ${escapeHtml(formatDatePtBr(employeeData.range.end))} · minutos e base contados até o corte (último dia útil anterior), igual ao Acompanhamento diário.</p>
-          <p class="subtle-note">Filtro exclusivo para resultados de colaboradores: ${escapeHtml(employeeData.range.start)} até ${escapeHtml(employeeData.range.end)}.${selectedEmployeeId ? ` Colaborador filtrado: ${escapeHtml(employeeOptions.find(item => item.id === selectedEmployeeId)?.full_name || '')}.` : ''}</p>
+          <p class="subtle-note">Filtro exclusivo para resultados de colaboradores: ${escapeHtml(formatDatePtBr(employeeData.range.start))} até ${escapeHtml(formatDatePtBr(employeeData.range.end))}.${selectedEmployeeId ? ` Colaborador filtrado: ${escapeHtml(employeeOptions.find(item => item.id === selectedEmployeeId)?.full_name || '')}.` : ''}</p>
         </section>
 
         <section class="panel section-gap tracking-panel-highlight">
@@ -6044,7 +6143,7 @@ function renderDashboard(query, role = 'adm') {
             <input type="hidden" name="employee_id" value="${escapeHtml(selectedEmployeeId ? String(selectedEmployeeId) : '')}" />
             <button class="btn" type="submit">Aplicar filtro Mostruário</button>
           </form>
-          <p class="hint">${mostruarioCustomFilter ? `Embarques filtrados de ${escapeHtml(mostruarioData.range.start)} até ${escapeHtml(mostruarioData.range.end)}.` : `Resultados filtrados de ${escapeHtml(mostruarioData.range.start)} até ${escapeHtml(mostruarioData.range.end)}.`}</p>
+          <p class="hint">${mostruarioCustomFilter ? `Embarques filtrados de ${escapeHtml(formatDatePtBr(mostruarioData.range.start))} até ${escapeHtml(formatDatePtBr(mostruarioData.range.end))}.` : `Resultados filtrados de ${escapeHtml(formatDatePtBr(mostruarioData.range.start))} até ${escapeHtml(formatDatePtBr(mostruarioData.range.end))}.`}</p>
           <div class="cards">
             <article class="card status-card bg-green"><span>Verde (a produzir)</span><strong>${fmtNum(mostruarioData.cards.greenSewingMinutes, 2)}</strong><small>Minutos</small></article>
             <article class="card status-card bg-yellow"><span>Amarelo (com pendência)</span><strong>${fmtNum(mostruarioData.cards.yellowSewingMinutes, 2)}</strong><small>Minutos</small></article>
@@ -6070,7 +6169,7 @@ function renderDashboard(query, role = 'adm') {
             <input type="hidden" name="employee_id" value="${escapeHtml(selectedEmployeeId ? String(selectedEmployeeId) : '')}" />
             <button class="btn" type="submit">Aplicar filtro Produção</button>
           </form>
-          <p class="hint">${producaoCustomFilter ? `Embarques filtrados de ${escapeHtml(producaoData.range.start)} até ${escapeHtml(producaoData.range.end)}.` : `Resultados filtrados de ${escapeHtml(producaoData.range.start)} até ${escapeHtml(producaoData.range.end)}.`}</p>
+          <p class="hint">${producaoCustomFilter ? `Embarques filtrados de ${escapeHtml(formatDatePtBr(producaoData.range.start))} até ${escapeHtml(formatDatePtBr(producaoData.range.end))}.` : `Resultados filtrados de ${escapeHtml(formatDatePtBr(producaoData.range.start))} até ${escapeHtml(formatDatePtBr(producaoData.range.end))}.`}</p>
           <div class="cards">
             <article class="card status-card bg-green"><span>Verde (a produzir)</span><strong>${fmtNum(producaoData.cards.greenSewingMinutes, 2)}</strong><small>Minutos</small></article>
             <article class="card status-card bg-yellow"><span>Amarelo (com pendência)</span><strong>${fmtNum(producaoData.cards.yellowSewingMinutes, 2)}</strong><small>Minutos</small></article>
@@ -7736,18 +7835,32 @@ function renderEmployeeWhatsAppQueuePage(role = 'adm') {
 
 function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
   // Ativas primeiro; desligadas/inativas no fim. Cada grupo em ordem alfabética.
-  const employees = db.prepare('SELECT * FROM employees').all().sort((a, b) => {
+  const search = String(query.q || '').trim().toLowerCase();
+  const showInactive = query.status === 'todas';
+  const allEmployees = db.prepare('SELECT * FROM employees').all();
+  const employees = allEmployees.filter(emp => {
+    if (!showInactive && describeEmployeeStatus(emp) !== 'Ativo' && Number(query.edit || 0) !== emp.id) return false;
+    if (!search) return true;
+    return String(emp.full_name || '').toLowerCase().includes(search) || String(emp.registration_code || '').toLowerCase().includes(search);
+  }).sort((a, b) => {
     const ia = describeEmployeeStatus(a) === 'Ativo' ? 0 : 1;
     const ib = describeEmployeeStatus(b) === 'Ativo' ? 0 : 1;
     return ia - ib || String(a.full_name).localeCompare(String(b.full_name), 'pt-BR', { sensitivity: 'base' });
   });
   const scheduleNames = new Map(getWorkSchedules().map(item => [item.id, item.name]));
-  const activeCount = employees.filter(emp => describeEmployeeStatus(emp) === 'Ativo').length;
+  const activeCount = allEmployees.filter(emp => describeEmployeeStatus(emp) === 'Ativo').length;
+  const inactiveCount = allEmployees.length - activeCount;
   const resultContext = getEmployeeResultContext(employees);
   const editingId = Number(query.edit || 0);
   const showForm = query.new === '1' || Boolean(error);
   const content = `
     <section class="page-header"><div><h2>Colaboradores <span class="active-count-pill">${activeCount} ativas</span></h2><p>Base de apoio para lançamentos diários.</p></div><div class="actions"><a class="btn secondary" href="/employees/whatsapp-resultados">Enviar resultado para todas</a><a class="btn" href="/employees?new=1">Novo colaborador</a></div></section>
+    <form class="panel inline-form employees-filter" method="get" action="/employees">
+      <label>Buscar<input name="q" value="${escapeHtml(query.q || '')}" placeholder="Nome ou registro" autocomplete="off" /></label>
+      <label class="checkbox-line"><input type="checkbox" name="status" value="todas" ${showInactive ? 'checked' : ''} onchange="this.form.submit()" /> Mostrar desligadas (${inactiveCount})</label>
+      <button class="btn" type="submit">Buscar</button>
+      ${search || showInactive ? '<a class="btn secondary" href="/employees">Limpar</a>' : ''}
+    </form>
     ${showForm ? `
     <section class="panel">
       <h3>Cadastro de colaborador</h3>
@@ -8614,7 +8727,6 @@ function renderOpDetailPage(id, query = {}, role = 'adm') {
       </div>
     </section>
 
-    ${renderWithoutIndustrializationShortcut(op, role, `/ops/${op.id}`, false)}
 
     <div class="two-columns">
       <section class="panel">
