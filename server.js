@@ -1000,6 +1000,39 @@ function migrateDatabase(tenantDb = db) {
   `);
 
   migrateWorkSchedulesAndPrizeFlag(tenantDb);
+  migrateOpNumberSuffix(tenantDb);
+}
+
+// Migração única: OPs com 7 dígitos ganham "-001" (ex.: 1801772 -> 1801772-001),
+// inclusive nas cópias do número em embarques e fechamentos de célula.
+// Se já existir a versão com "-001", não altera (fica registrado como conflito).
+function migrateOpNumberSuffix(tenantDb) {
+  if (tenantDb.prepare("SELECT 1 FROM app_settings WHERE key = 'migration_op_suffix_v1'").get()) return;
+  const hasTable = name => Boolean(tenantDb.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
+  const rows = tenantDb.prepare("SELECT id, TRIM(op_number) AS op_number FROM ops WHERE TRIM(op_number) GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9]'").all();
+  const upOp = tenantDb.prepare('UPDATE ops SET op_number = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?');
+  const upShip = hasTable('shipment_items') ? tenantDb.prepare('UPDATE shipment_items SET op_number = ? WHERE op_id = ?') : null;
+  const upCell = hasTable('cell_closure_items') ? tenantDb.prepare('UPDATE cell_closure_items SET op_number = ? WHERE op_id = ?') : null;
+  const exists = tenantDb.prepare('SELECT id FROM ops WHERE TRIM(op_number) = ? COLLATE NOCASE');
+  let fixed = 0;
+  const conflicts = [];
+  tenantDb.exec('BEGIN');
+  try {
+    for (const row of rows) {
+      const target = `${row.op_number}-001`;
+      if (exists.get(target)) { conflicts.push(row.op_number); continue; }
+      upOp.run(target, row.id);
+      if (upShip) upShip.run(target, row.id);
+      if (upCell) upCell.run(target, row.id);
+      fixed += 1;
+    }
+    tenantDb.prepare("INSERT INTO app_settings (key, value, updated_at) VALUES ('migration_op_suffix_v1', ?, CURRENT_TIMESTAMP)")
+      .run(JSON.stringify({ fixed, conflicts, at: new Date().toISOString() }));
+    tenantDb.exec('COMMIT');
+  } catch (error) {
+    tenantDb.exec('ROLLBACK');
+    console.error('Falha ao completar -001 nas OPs:', error.message);
+  }
 }
 
 // T0.3/T0.4 — Jornadas de trabalho e flag "conta para prêmio" nos lançamentos.
