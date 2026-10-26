@@ -7204,7 +7204,7 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
       <p class="hint">Se as datas ficarem em branco, o sistema trata o colaborador como ativo em todo o período dos relatórios até que sejam preenchidas.</p>
     </section>` : ''}
     <section class="panel">
-      <table>
+      <table class="table-zebra employees-table">
         <thead><tr><th>Registro</th><th>Nome</th><th>Nascimento</th><th>Início</th><th>Rescisão</th><th>Status</th><th>Função</th><th>Jornada</th><th>Observações</th><th>Ações</th></tr></thead>
         <tbody>
           ${employees.map(emp => {
@@ -7226,7 +7226,8 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
                 </td>
               </tr>`;
             }
-            return `<tr><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td>${escapeHtml(nowPt(emp.birth_date))}</td><td>${escapeHtml(nowPt(emp.start_date))}</td><td>${escapeHtml(nowPt(emp.termination_date))}</td><td>${escapeHtml(describeEmployeeStatus(emp))}</td><td>${escapeHtml(emp.job_role || '-')}</td><td>${escapeHtml(scheduleNames.get(emp.work_schedule_id) || 'Sem jornada')}</td><td>${escapeHtml(emp.notes || '-')}</td><td><a href="/employees?edit=${emp.id}">Editar</a></td></tr>`;
+            const status = describeEmployeeStatus(emp);
+            return `<tr class="${status === 'Ativo' ? 'is-active' : 'is-inactive'}"><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td>${escapeHtml(nowPt(emp.birth_date))}</td><td>${escapeHtml(nowPt(emp.start_date))}</td><td>${escapeHtml(nowPt(emp.termination_date))}</td><td><span class="status-tag ${status === 'Ativo' ? 'ok' : 'off'}">${escapeHtml(status)}</span></td><td>${escapeHtml(emp.job_role || '-')}</td><td>${escapeHtml(scheduleNames.get(emp.work_schedule_id) || 'Sem jornada')}</td><td>${escapeHtml(emp.notes || '-')}</td><td><a href="/employees?edit=${emp.id}">Editar</a></td></tr>`;
           }).join('') || '<tr><td colspan="10">Nenhum colaborador cadastrado.</td></tr>'}
         </tbody>
       </table>
