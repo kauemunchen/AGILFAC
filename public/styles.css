@@ -272,3 +272,23 @@ fieldset { border: 1px solid rgba(148, 163, 184, .35); border-radius: 10px; padd
 .employees-filter { align-items: flex-end; margin-bottom: 14px; }
 .employees-filter label:first-child { max-width: 360px; }
 .employees-filter .checkbox-line { flex: 0 0 auto; min-width: 0; flex-direction: row; align-items: center; padding-bottom: 10px; }
+/* Alertas Telegram */
+.alerts-form { display: flex; flex-direction: column; gap: 14px; }
+.alerts-link { background: #f8fbff; border: 1px dashed #93c5fd; border-radius: 12px; padding: 12px; font-size: 14px; }
+.alerts-link code { background: #e0e7ff; padding: 2px 8px; border-radius: 6px; font-weight: 700; }
+.alerts-chats { margin: 10px 0 0; padding-left: 18px; }
+.alerts-chats li { margin: 4px 0; }
+.alerts-chats .btn { min-height: 0; padding: 3px 10px; font-size: 12px; margin-left: 8px; }
+.alerts-group { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px; }
+.alert-rule { border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px; display: flex; flex-direction: column; gap: 4px; }
+.alert-param { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #394759; }
+.alert-param input { width: 80px; min-height: 0; padding: 4px 8px; }
+.alert-bots { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 12px; }
+.alert-bot { border: 1px solid #cbd5e1; border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.alert-bot h4 { margin: 0; }
+.alert-rule-head { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+.alert-aud { display: flex; gap: 10px; font-weight: 700; font-size: 13px; white-space: nowrap; }
+.alert-aud label { display: flex; align-items: center; gap: 3px; }
+.alert-bot > label:not(.checkbox-line) { display: flex; flex-direction: column; gap: 4px; align-items: stretch; }
+.alert-bot > label:not(.checkbox-line) input { width: 100%; }
+.alerts-form .form-grid .checkbox-line { flex-direction: row; align-items: center; gap: 8px; align-self: end; padding-bottom: 10px; }

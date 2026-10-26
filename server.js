@@ -1012,6 +1012,7 @@ function migrateDatabase(tenantDb = db) {
   migrateWorkSchedulesAndPrizeFlag(tenantDb);
   migrateOpNumberSuffix(tenantDb);
   migrateOpNumberSuffixReversedConflicts(tenantDb);
+  ensureAlertTables(tenantDb);
 }
 
 // Segunda etapa (v2): quando a versão "-001" já existe mas está ESTORNADA, ela é renomeada
@@ -7264,6 +7265,683 @@ function handleToggleWorkSchedule(id, res, role) {
 }
 // ===============================================================
 
+// ===================== ALERTAS TELEGRAM (T2.1 / T2.2) =====================
+// Cada empresa usa o próprio bot (token em Parâmetros), vincula grupos/conversas com
+// "/vincular CÓDIGO" e marca quais alertas quer receber. Um worker roda a cada minuto.
+const APP_BASE_URL = String(process.env.APP_BASE_URL || 'https://app.agilfac.com.br').replace(/\/+$/, '');
+const TELEGRAM_API_BASE = String(process.env.TELEGRAM_API_BASE || 'https://api.telegram.org').replace(/\/+$/, '');
+
+// Catálogo: frequência "hourly" (de hora em hora na janela, sem repetir o mesmo item no dia),
+// "daily" (uma vez por dia, no horário do resumo) ou "event" (avisa assim que acontece).
+const ALERT_CATALOG = [
+  { key: 'cell_stuck', group: 'Produção', label: 'OP parada em célula', help: 'OP com saldo em célula há N dias ou mais.', freq: 'hourly', defaultOn: true, param: { key: 'days', label: 'dias', def: 3 } },
+  { key: 'delivery_late', group: 'Produção', label: 'Entrega atrasada', help: 'OP não embarcada com data de entrega vencida.', freq: 'daily', defaultOn: true },
+  { key: 'delivery_soon', group: 'Produção', label: 'Entrega próxima', help: 'OP não embarcada que vence em até N dias.', freq: 'daily', defaultOn: true, param: { key: 'days', label: 'dias', def: 2 } },
+  { key: 'no_delivery_date', group: 'Produção', label: 'OP sem data de entrega', help: 'Quantas OPs em aberto ainda estão sem data de entrega.', freq: 'daily', defaultOn: false },
+  { key: 'op_idle', group: 'Produção', label: 'OP verde sem movimento', help: 'OP a produzir sem nenhum lançamento há N dias desde a entrada.', freq: 'daily', defaultOn: false, param: { key: 'days', label: 'dias', def: 5 } },
+  { key: 'ready_not_shipped', group: 'Produção', label: 'OP finalizada aguardando embarque', help: 'OP azul sem embarque há N dias desde o último lançamento.', freq: 'daily', defaultOn: false, param: { key: 'days', label: 'dias', def: 2 } },
+  { key: 'occurrence_open', group: 'Produção', label: 'Ocorrência aberta', help: 'Ocorrência de OP sem conclusão há N dias.', freq: 'daily', defaultOn: false, param: { key: 'days', label: 'dias', def: 2 } },
+  { key: 'quality_issue', group: 'Qualidade', label: 'Peças com problema registradas', help: 'Avisa a cada novo registro de peça com problema.', freq: 'event', defaultOn: false },
+  { key: 'reject_rate', group: 'Qualidade', label: 'Taxa de reprovação alta', help: 'Peças com problema ÷ peças produzidas no período acima de X%.', freq: 'daily', defaultOn: false, param: { key: 'percent', label: '%', def: 1 } },
+  { key: 'no_launch', group: 'Pessoas', label: 'Colaboradora sem lançamento', help: 'Ativa, sem lançamento, sem ausência e sem justificativa no último dia útil.', freq: 'daily', defaultOn: true },
+  { key: 'below_target', group: 'Pessoas', label: 'Colaboradoras abaixo da meta', help: 'Lista quem está abaixo da meta até o corte.', freq: 'daily', defaultOn: false },
+  { key: 'company_below_target', group: 'Pessoas', label: 'Empresa abaixo da meta', help: 'Eficiência geral até o corte abaixo da meta.', freq: 'daily', defaultOn: true },
+  { key: 'pending_closure', group: 'Pessoas', label: 'Pendências no fechamento', help: 'Dias úteis sem lançamento e sem tratativa no período acima de N.', freq: 'daily', defaultOn: false, param: { key: 'count', label: 'dias pendentes', def: 10 } },
+  { key: 'off_schedule', group: 'Pessoas', label: 'Lançamentos fora do prêmio', help: 'Lançamentos de ontem marcados como "não conta para prêmio".', freq: 'daily', defaultOn: false },
+  { key: 'birthday', group: 'Pessoas', label: 'Aniversariantes do dia', help: 'Colaboradoras ativas fazendo aniversário hoje.', freq: 'daily', defaultOn: false },
+  { key: 'shipment_created', group: 'Expedição e financeiro', label: 'Embarque registrado', help: 'Avisa a cada novo embarque, com OPs e minutos.', freq: 'event', defaultOn: false },
+  { key: 'unbilled', group: 'Expedição e financeiro', label: 'Embarcadas sem cobrança', help: 'OPs embarcadas há N dias ou mais e ainda não cobradas.', freq: 'daily', defaultOn: false, param: { key: 'days', label: 'dias', def: 7 } },
+  { key: 'reversal', group: 'Sistema', label: 'Estornos realizados', help: 'Avisa a cada estorno de OP, lançamento ou embarque, com o motivo.', freq: 'event', defaultOn: false },
+  { key: 'login_blocked', group: 'Sistema', label: 'Login bloqueado', help: 'Bloqueio por excesso de tentativas de senha nesta empresa.', freq: 'event', defaultOn: false },
+  { key: 'daily_summary', group: 'Resumos e relatórios', label: 'Resumo gerencial diário', help: 'Minutos de ontem, eficiência até o corte, abaixo da meta, entregas, células paradas e fila.', freq: 'summary', defaultOn: true },
+  { key: 'op_agenda', group: 'Resumos e relatórios', label: 'Agenda do dia (operacional)', help: 'O que precisa ser feito hoje: entregas de hoje e amanhã, OPs paradas em célula, prontas para embarcar e quem ficou sem lançamento.', freq: 'summary', defaultOn: true },
+  { key: 'weekly_report', group: 'Resumos e relatórios', label: 'Relatório semanal', help: 'Toda segunda: produção da semana anterior, embarques, eficiência do período, melhores e piores resultados.', freq: 'weekly', defaultOn: true }
+];
+
+// Dois bots: "gestor" (relatórios e visão gerencial) e "op" (operacional: avisos do dia a dia).
+// Se o bot operacional não tiver token próprio, usa o mesmo bot do gestor (em grupos diferentes).
+const ALERT_AUDIENCES = [
+  { key: 'gestor', label: 'Gestor', title: 'Bot do gestor', desc: 'Relatórios, análises e informações gerenciais.', tokenKey: 'telegram_bot_token', chatsKey: 'telegram_chats', codeKey: 'telegram_link_code', codePrefix: 'GES' },
+  { key: 'op', label: 'Operacional', title: 'Bot operacional', desc: 'Avisos antecipados, alertas e disparos para o trabalho do dia a dia.', tokenKey: 'telegram_bot_token_op', chatsKey: 'telegram_chats_op', codeKey: 'telegram_link_code_op', codePrefix: 'OPE' }
+];
+const ALERT_AUDIENCE_DEFAULTS = {
+  gestor: new Set(['below_target', 'company_below_target', 'daily_summary', 'delivery_late', 'login_blocked', 'pending_closure', 'reject_rate', 'reversal', 'unbilled', 'weekly_report']),
+  op: new Set(['birthday', 'cell_stuck', 'delivery_late', 'delivery_soon', 'no_delivery_date', 'no_launch', 'occurrence_open', 'off_schedule', 'op_agenda', 'op_idle', 'quality_issue', 'ready_not_shipped', 'shipment_created'])
+};
+
+const ALERT_SETTING_DEFAULTS = {
+  telegram_bot_token: '',
+  telegram_bot_token_op: '',
+  telegram_chats: '[]',
+  telegram_chats_op: '[]',
+  telegram_link_code: '',
+  telegram_link_code_op: '',
+  alerts_enabled: '0',
+  alerts_start_hour: '7',
+  alerts_end_hour: '19',
+  alerts_summary_hour: '7',
+  alerts_weekdays_only: '1'
+};
+
+function getAlertSetting(key) {
+  const row = db.prepare('SELECT value FROM app_settings WHERE key = ?').get(key);
+  if (row && row.value !== null && row.value !== undefined) return String(row.value);
+  if (key in ALERT_SETTING_DEFAULTS) return ALERT_SETTING_DEFAULTS[key];
+  const m = key.match(/^alert_(gestor|op|param)_(.+)$/);
+  if (m) {
+    const rule = ALERT_CATALOG.find(r => r.key === m[2]);
+    if (!rule) return '';
+    return m[1] === 'param' ? String(rule.param?.def ?? '') : (ALERT_AUDIENCE_DEFAULTS[m[1]].has(rule.key) ? '1' : '0');
+  }
+  return '';
+}
+
+function setAlertSetting(key, value) {
+  db.prepare(`INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`).run(key, String(value));
+}
+
+function getAudience(key) {
+  return ALERT_AUDIENCES.find(a => a.key === key) || ALERT_AUDIENCES[0];
+}
+
+function getTelegramChats(aud = 'gestor') {
+  try { return JSON.parse(getAlertSetting(getAudience(aud).chatsKey) || '[]').filter(c => c && c.id); } catch (_) { return []; }
+}
+
+function getAudienceToken(aud) {
+  const own = getAlertSetting(getAudience(aud).tokenKey);
+  return own || (aud === 'op' ? getAlertSetting('telegram_bot_token') : '');
+}
+
+function ensureTelegramLinkCode(aud = 'gestor') {
+  const a = getAudience(aud);
+  let code = getAlertSetting(a.codeKey);
+  if (!code) {
+    code = `${a.codePrefix}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+    setAlertSetting(a.codeKey, code);
+  }
+  return code;
+}
+
+function maskToken(token) {
+  const t = String(token || '');
+  return t ? `${t.slice(0, 6)}••••••${t.slice(-4)}` : '';
+}
+
+function tgEscape(text) {
+  return String(text ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+async function telegramCall(token, method, payload = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch(`${TELEGRAM_API_BASE}/bot${token}/${method}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!data.ok) throw new Error(data.description || `HTTP ${response.status}`);
+    return data.result;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function sendTelegramToAll(text, aud = 'gestor') {
+  const token = getAudienceToken(aud);
+  const chats = getTelegramChats(aud);
+  if (!token || !chats.length) return 0;
+  let sent = 0;
+  for (const chat of chats) {
+    try {
+      await telegramCall(token, 'sendMessage', { chat_id: chat.id, text: text.slice(0, 4000), parse_mode: 'HTML', disable_web_page_preview: true });
+      sent += 1;
+    } catch (error) {
+      console.error(`Telegram (${getCompanyName()}) falhou para ${chat.title || chat.id}:`, error.message);
+    }
+  }
+  return sent;
+}
+
+function opLink(op) {
+  return `<a href="${APP_BASE_URL}/ops/${op.id}">${tgEscape(op.op_number)}</a>`;
+}
+
+function listLines(items, max = 15) {
+  const lines = items.slice(0, max);
+  if (items.length > max) lines.push(`… e mais ${items.length - max}`);
+  return lines.join('\n');
+}
+
+function lastBusinessDayBefore(isoDate) {
+  return getPreviousBusinessDay(isoDate);
+}
+
+function getActiveEmployees() {
+  return db.prepare('SELECT * FROM employees').all().filter(emp => describeEmployeeStatus(emp) === 'Ativo');
+}
+
+function getTargetSnapshot() {
+  // Período que contém o último dia útil fechado (no 1º dia de um período novo, mostra o anterior)
+  const lastDay = getPreviousBusinessDay(today());
+  const range = getPeriodRange('month', lastDay);
+  const cutoff = [range.end, lastDay].sort()[0];
+  const employees = getActiveEmployees();
+  if (cutoff < range.start) return { range, cutoff, rows: [], total: { minutes: 0, base: 0, pct: 0 } };
+  const counted = getCountedProductionByEmployee(range.start, cutoff, employees);
+  const rows = employees.map(emp => {
+    const minutes = round2(counted.get(emp.id)?.minutes || 0);
+    const eff = calculateEmployeeEfficiency(emp, minutes, range.start, range.end, cutoff);
+    return { emp, minutes, base: eff.available_minutes, pct: eff.efficiency_percent };
+  }).filter(r => r.base > 0);
+  const minutes = rows.reduce((s, r) => s + r.minutes, 0);
+  const base = rows.reduce((s, r) => s + r.base, 0);
+  return { range, cutoff, rows, total: { minutes: round2(minutes), base: round2(base), pct: base > 0 ? round2((minutes / base) * 100) : 0 } };
+}
+
+function openOpsWhere() {
+  return "o.is_reversed = 0 AND o.shipped_at IS NULL AND o.status_color <> 'vermelho' AND COALESCE(o.lifecycle_type, 'normal') = 'normal'";
+}
+
+function paramOf(ruleKey) {
+  const rule = ALERT_CATALOG.find(r => r.key === ruleKey);
+  const n = Number(String(getAlertSetting(`alert_param_${ruleKey}`)).replace(',', '.'));
+  return Number.isFinite(n) && n >= 0 ? n : Number(rule?.param?.def || 0);
+}
+
+// Cada regra devolve uma lista de { ref, text }. "ref" evita repetir o mesmo aviso no mesmo dia.
+const ALERT_RULES = {
+  cell_stuck() {
+    const days = paramOf('cell_stuck');
+    const limit = addDaysIso(today(), -days);
+    return db.prepare(`
+      SELECT o.id, o.op_number, c.name AS cell_name, t.sent_at, (t.quantity_sent - t.quantity_returned) AS open_qty
+      FROM op_cell_transfers t JOIN ops o ON o.id = t.op_id JOIN sewing_cells c ON c.id = t.cell_id
+      WHERE t.quantity_sent > t.quantity_returned AND t.sent_at <= ? AND o.is_reversed = 0
+      ORDER BY t.sent_at
+    `).all(limit).map(r => {
+      const d = Math.round((new Date(`${today()}T00:00:00Z`) - new Date(`${r.sent_at.slice(0, 10)}T00:00:00Z`)) / 86400000);
+      return { ref: `${r.id}:${r.sent_at}`, text: `🩷 OP ${opLink(r)} na célula <b>${tgEscape(r.cell_name)}</b> há ${d} dias (${r.open_qty} pç em aberto)` };
+    });
+  },
+  delivery_late() {
+    const rows = db.prepare(`SELECT o.id, o.op_number, o.delivery_date, o.brand FROM ops o WHERE ${openOpsWhere()} AND o.delivery_date IS NOT NULL AND o.delivery_date <> '' AND o.delivery_date < ? ORDER BY o.delivery_date`).all(today());
+    return rows.length ? [{ ref: 'all', text: `🔴 <b>${rows.length} OP(s) com entrega atrasada</b>\n${listLines(rows.map(r => `• ${opLink(r)} · ${tgEscape(r.brand || '-')} · venceu ${formatDatePtBr(r.delivery_date)}`))}` }] : [];
+  },
+  delivery_soon() {
+    const days = paramOf('delivery_soon');
+    const rows = db.prepare(`SELECT o.id, o.op_number, o.delivery_date, o.brand FROM ops o WHERE ${openOpsWhere()} AND o.delivery_date BETWEEN ? AND ? ORDER BY o.delivery_date`).all(today(), addDaysIso(today(), days));
+    return rows.length ? [{ ref: 'all', text: `🟠 <b>${rows.length} OP(s) vencem em até ${days} dia(s)</b>\n${listLines(rows.map(r => `• ${opLink(r)} · ${tgEscape(r.brand || '-')} · ${formatDatePtBr(r.delivery_date)}`))}` }] : [];
+  },
+  no_delivery_date() {
+    const n = db.prepare(`SELECT COUNT(*) AS n FROM ops o WHERE ${openOpsWhere()} AND (o.delivery_date IS NULL OR o.delivery_date = '')`).get().n;
+    return n ? [{ ref: 'all', text: `📅 ${n} OP(s) em aberto sem data de entrega. <a href="${APP_BASE_URL}/ops?deadline=sem_data">Ver lista</a>` }] : [];
+  },
+  op_idle() {
+    const days = paramOf('op_idle');
+    const rows = db.prepare(`
+      SELECT o.id, o.op_number, o.entry_date FROM ops o
+      WHERE ${openOpsWhere()} AND o.status_color = 'verde' AND o.entry_date <= ?
+        AND NOT EXISTS (SELECT 1 FROM op_daily_productions p WHERE p.op_id = o.id AND p.is_reversed = 0)
+      ORDER BY o.entry_date`).all(addDaysIso(today(), -days));
+    return rows.length ? [{ ref: 'all', text: `🟢 <b>${rows.length} OP(s) sem nenhum lançamento há ${days}+ dias</b>\n${listLines(rows.map(r => `• ${opLink(r)} · entrada ${formatDatePtBr(r.entry_date)}`))}` }] : [];
+  },
+  ready_not_shipped() {
+    const days = paramOf('ready_not_shipped');
+    const rows = db.prepare(`
+      SELECT o.id, o.op_number, MAX(p.production_date) AS last_date FROM ops o
+      LEFT JOIN op_daily_productions p ON p.op_id = o.id AND p.is_reversed = 0
+      WHERE o.is_reversed = 0 AND o.status_color = 'azul' AND o.shipped_at IS NULL
+      GROUP BY o.id HAVING COALESCE(MAX(p.production_date), o.entry_date) <= ?`).all(addDaysIso(today(), -days));
+    return rows.length ? [{ ref: 'all', text: `🔵 <b>${rows.length} OP(s) finalizada(s) aguardando embarque</b>\n${listLines(rows.map(r => `• ${opLink(r)}${r.last_date ? ` · último lançamento ${formatDatePtBr(r.last_date)}` : ''}`))}` }] : [];
+  },
+  occurrence_open() {
+    const days = paramOf('occurrence_open');
+    const rows = db.prepare(`
+      SELECT oc.id, oc.description, oc.opened_at, o.id AS op_id, o.op_number FROM op_occurrences oc JOIN ops o ON o.id = oc.op_id
+      WHERE oc.is_concluded = 0 AND date(oc.opened_at) <= ? ORDER BY oc.opened_at`).all(addDaysIso(today(), -days));
+    return rows.length ? [{ ref: 'all', text: `⚠️ <b>${rows.length} ocorrência(s) aberta(s) há ${days}+ dias</b>\n${listLines(rows.map(r => `• ${opLink({ id: r.op_id, op_number: r.op_number })}: ${tgEscape(String(r.description).slice(0, 80))}`))}` }] : [];
+  },
+  quality_issue() {
+    const mark = getAlertSetting('alert_mark_quality_issue');
+    if (mark === '') { setAlertSetting('alert_mark_quality_issue', db.prepare('SELECT COALESCE(MAX(id), 0) AS n FROM op_problem_items').get().n); return []; }
+    const last = Number(mark);
+    const rows = db.prepare(`SELECT pi.id, pi.quantity, pi.reason, o.id AS op_id, o.op_number FROM op_problem_items pi JOIN ops o ON o.id = pi.op_id WHERE pi.id > ? ORDER BY pi.id`).all(last);
+    if (rows.length) setAlertSetting('alert_mark_quality_issue', rows[rows.length - 1].id);
+    return rows.map(r => ({ ref: `pi${r.id}`, text: `🧷 Peça com problema: ${r.quantity} pç na OP ${opLink({ id: r.op_id, op_number: r.op_number })} · ${tgEscape(String(r.reason).slice(0, 100))}` }));
+  },
+  reject_rate() {
+    const limit = paramOf('reject_rate');
+    const range = getPeriodRange('month', today());
+    const problems = db.prepare('SELECT COALESCE(SUM(quantity), 0) AS n FROM op_problem_items WHERE problem_date BETWEEN ? AND ?').get(range.start, range.end).n;
+    const produced = db.prepare('SELECT COALESCE(SUM(produced_quantity), 0) AS n FROM op_daily_productions WHERE is_reversed = 0 AND production_date BETWEEN ? AND ?').get(range.start, range.end).n;
+    const rate = produced > 0 ? round2((problems / produced) * 100) : 0;
+    return rate > limit ? [{ ref: 'all', text: `🧷 Taxa de reprovação do período em <b>${fmtNum(rate, 2)}%</b> (limite ${fmtNum(limit, 2)}%): ${problems} pç com problema em ${fmtNum(produced, 0)} produzidas.` }] : [];
+  },
+  no_launch() {
+    const day = lastBusinessDayBefore(today());
+    const employees = getActiveEmployees().filter(emp => getEmployeeBusinessDaysInRange(emp, day, day).length);
+    const launched = new Set(db.prepare('SELECT DISTINCT employee_id FROM op_daily_productions WHERE is_reversed = 0 AND production_date = ?').all(day).map(r => r.employee_id));
+    const absent = new Set(db.prepare('SELECT employee_id FROM employee_absences WHERE absence_date = ?').all(day).map(r => r.employee_id));
+    const justified = new Set(db.prepare('SELECT employee_id FROM employee_daily_closures WHERE work_date = ?').all(day).map(r => r.employee_id));
+    const missing = employees.filter(e => !launched.has(e.id) && !absent.has(e.id) && !justified.has(e.id));
+    return missing.length ? [{ ref: day, text: `👤 <b>${missing.length} colaboradora(s) sem lançamento em ${formatDatePtBr(day)}</b> (sem ausência ou justificativa)\n${listLines(missing.map(e => `• ${tgEscape(e.full_name)}`))}\n<a href="${APP_BASE_URL}/closures">Tratar no fechamento</a>` }] : [];
+  },
+  below_target() {
+    const snap = getTargetSnapshot();
+    const below = snap.rows.filter(r => r.pct < targetPercent()).sort((a, b) => a.pct - b.pct);
+    return below.length ? [{ ref: 'all', text: `📉 <b>${below.length} colaboradora(s) abaixo de ${tp()}%</b> até ${formatDatePtBr(snap.cutoff)}\n${listLines(below.map(r => `• ${tgEscape(r.emp.full_name)}: ${fmtNum(r.pct, 1)}%`))}` }] : [];
+  },
+  company_below_target() {
+    const snap = getTargetSnapshot();
+    return snap.total.base > 0 && snap.total.pct < targetPercent()
+      ? [{ ref: 'all', text: `🏭 Eficiência da empresa em <b>${fmtNum(snap.total.pct, 2)}%</b> até ${formatDatePtBr(snap.cutoff)}, abaixo da meta de ${tp()}%.` }]
+      : [];
+  },
+  pending_closure() {
+    const limit = paramOf('pending_closure');
+    const range = getPeriodRange('month', today());
+    const end = [range.end, getPreviousBusinessDay(today())].sort()[0];
+    if (end < range.start) return [];
+    const data = getMonthlyClosureData(range.start, 'custom', '', range.start, end);
+    const pending = Number(data?.totals?.pending || 0);
+    return pending > limit ? [{ ref: 'all', text: `📋 ${pending} dia(s) pendente(s) no fechamento do período (limite ${limit}). <a href="${APP_BASE_URL}/closures">Abrir fechamento</a>` }] : [];
+  },
+  off_schedule() {
+    const day = lastBusinessDayBefore(today());
+    const rows = db.prepare(`
+      SELECT e.full_name, o.op_number, p.produced_minutes FROM op_daily_productions p
+      JOIN employees e ON e.id = p.employee_id JOIN ops o ON o.id = p.op_id
+      WHERE p.is_reversed = 0 AND COALESCE(p.counts_for_prize, 1) = 0 AND p.production_date BETWEEN ? AND ?`).all(day, addDaysIso(today(), -1));
+    return rows.length ? [{ ref: 'all', text: `⏱️ <b>${rows.length} lançamento(s) fora do prêmio</b> desde ${formatDatePtBr(day)}\n${listLines(rows.map(r => `• ${tgEscape(r.full_name)} · OP ${tgEscape(r.op_number)} · ${fmtNum(r.produced_minutes, 0)} min`))}` }] : [];
+  },
+  birthday() {
+    const mmdd = today().slice(5);
+    const rows = getActiveEmployees().filter(e => String(e.birth_date || '').slice(5) === mmdd);
+    return rows.length ? [{ ref: 'all', text: `🎂 Aniversário hoje: ${rows.map(e => `<b>${tgEscape(e.full_name)}</b>`).join(', ')}` }] : [];
+  },
+  shipment_created() {
+    const mark = getAlertSetting('alert_mark_shipment_created');
+    if (mark === '') { setAlertSetting('alert_mark_shipment_created', db.prepare('SELECT COALESCE(MAX(id), 0) AS n FROM shipments').get().n); return []; }
+    const last = Number(mark);
+    const rows = db.prepare('SELECT id, shipment_number, shipment_date, total_ops, sewing_minutes FROM shipments WHERE id > ? AND COALESCE(is_reversed, 0) = 0 ORDER BY id').all(last);
+    if (rows.length) setAlertSetting('alert_mark_shipment_created', rows[rows.length - 1].id);
+    return rows.map(r => ({ ref: `sh${r.id}`, text: `🚚 Embarque <b>${tgEscape(r.shipment_number)}</b> em ${formatDatePtBr(r.shipment_date)}: ${r.total_ops} OP(s), ${fmtNum(r.sewing_minutes, 0)} min de costura.` }));
+  },
+  unbilled() {
+    const days = paramOf('unbilled');
+    const rows = db.prepare(`SELECT o.id, o.op_number, o.shipped_at FROM ops o WHERE o.is_reversed = 0 AND o.shipped_at IS NOT NULL AND COALESCE(o.is_billed, 0) = 0 AND COALESCE(o.lifecycle_type, 'normal') = 'normal' AND date(o.shipped_at) <= ? ORDER BY o.shipped_at`).all(addDaysIso(today(), -days));
+    return rows.length ? [{ ref: 'all', text: `💵 <b>${rows.length} OP(s) embarcada(s) há ${days}+ dias sem cobrança</b>\n${listLines(rows.map(r => `• ${opLink(r)} · embarque ${formatDatePtBr(String(r.shipped_at).slice(0, 10))}`))}` }] : [];
+  },
+  reversal() {
+    const since = getAlertSetting('alert_mark_reversal');
+    const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    setAlertSetting('alert_mark_reversal', now);
+    if (!since) return [];
+    const ops = db.prepare('SELECT id, op_number, reversed_reason, reversed_at FROM ops WHERE is_reversed = 1 AND reversed_at > ? AND reversed_at <= ?').all(since, now)
+      .map(r => ({ ref: `rop${r.id}`, text: `↩️ OP ${tgEscape(r.op_number)} estornada. Motivo: ${tgEscape(r.reversed_reason || '-')}` }));
+    const prods = db.prepare(`SELECT p.id, o.op_number, e.full_name, p.reversed_reason FROM op_daily_productions p JOIN ops o ON o.id = p.op_id LEFT JOIN employees e ON e.id = p.employee_id WHERE p.is_reversed = 1 AND p.reversed_at > ? AND p.reversed_at <= ?`).all(since, now)
+      .map(r => ({ ref: `rp${r.id}`, text: `↩️ Lançamento estornado: OP ${tgEscape(r.op_number)} · ${tgEscape(r.full_name || '-')}. Motivo: ${tgEscape(r.reversed_reason || '-')}` }));
+    const ships = db.prepare('SELECT id, shipment_number, reversed_reason FROM shipments WHERE is_reversed = 1 AND reversed_at > ? AND reversed_at <= ?').all(since, now)
+      .map(r => ({ ref: `rs${r.id}`, text: `↩️ Embarque ${tgEscape(r.shipment_number)} estornado. Motivo: ${tgEscape(r.reversed_reason || '-')}` }));
+    return [...ops, ...prods, ...ships];
+  },
+  login_blocked() {
+    const company = getRequestAuth()?.company;
+    if (!company) return [];
+    const since = getAlertSetting('alert_mark_login_blocked');
+    const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    setAlertSetting('alert_mark_login_blocked', now);
+    if (!since) return [];
+    const rows = masterDb.prepare(`
+      SELECT username, ip, COUNT(*) AS n FROM login_attempts
+      WHERE scope = 'company' AND success = 0 AND company_slug = ? AND created_at > ? AND created_at <= ?
+      GROUP BY username, ip HAVING COUNT(*) >= ?`).all(String(company.slug).toLowerCase(), since, now, LOGIN_MAX_FAILURES);
+    return rows.map(r => ({ ref: `lb${r.username}:${r.ip}`, text: `🔐 Login bloqueado: usuário <b>${tgEscape(r.username)}</b>, ${r.n} tentativas erradas (IP ${tgEscape(r.ip)}).` }));
+  }
+};
+
+function buildDailySummary() {
+  const yesterday = lastBusinessDayBefore(today());
+  const minutesYesterday = db.prepare(`
+    SELECT COALESCE(SUM(p.produced_minutes), 0) AS m, COALESCE(SUM(p.produced_quantity), 0) AS q
+    FROM op_daily_productions p JOIN ops o ON o.id = p.op_id WHERE ${COUNTED_PRODUCTION_WHERE} AND p.production_date = ?`).get(yesterday);
+  const snap = getTargetSnapshot();
+  const due = db.prepare(`SELECT COUNT(*) AS n FROM ops o WHERE ${openOpsWhere()} AND o.delivery_date BETWEEN ? AND ?`).get(today(), addDaysIso(today(), 3)).n;
+  const late = db.prepare(`SELECT COUNT(*) AS n FROM ops o WHERE ${openOpsWhere()} AND o.delivery_date IS NOT NULL AND o.delivery_date <> '' AND o.delivery_date < ?`).get(today()).n;
+  const cells = db.prepare('SELECT COUNT(DISTINCT op_id) AS n FROM op_cell_transfers WHERE quantity_sent > quantity_returned AND sent_at <= ?').get(addDaysIso(today(), -paramOf('cell_stuck'))).n;
+  const below = snap.rows.filter(r => r.pct < targetPercent()).length;
+  let queue = null;
+  try { queue = getQueueForecast(); } catch (_) {}
+  return [
+    `☀️ <b>Bom dia! Resumo ${tgEscape(getCompanyName())}</b> · ${formatDatePtBr(today())}`,
+    '',
+    `• Produção de ${formatDatePtBr(yesterday)}: <b>${fmtNum(minutesYesterday.m, 0)} min</b> (${fmtNum(minutesYesterday.q, 0)} pç)`,
+    `• Eficiência até ${formatDatePtBr(snap.cutoff)}: <b>${fmtNum(snap.total.pct, 2)}%</b> (meta ${tp()}%)`,
+    `• Colaboradoras abaixo da meta: ${below} de ${snap.rows.length}`,
+    `• Entregas: ${late} atrasada(s), ${due} vencem em até 3 dias`,
+    `• OPs paradas em célula (${paramOf('cell_stuck')}+ dias): ${cells}`,
+    queue && queue.queueDays !== null ? `• Fila: ${fmtNum(queue.queueDays, 1)} dias úteis (término ${formatDatePtBr(queue.finishDate)})` : '',
+    '',
+    `<a href="${APP_BASE_URL}/">Abrir o AgilFac</a>`
+  ].filter(line => line !== '').join('\n');
+}
+
+
+function buildOpAgenda() {
+  const tomorrow = addBusinessDays(today(), 1);
+  const dueToday = db.prepare(`SELECT o.id, o.op_number, o.brand FROM ops o WHERE ${openOpsWhere()} AND o.delivery_date = ? ORDER BY o.op_number`).all(today());
+  const dueTomorrow = db.prepare(`SELECT o.id, o.op_number, o.brand FROM ops o WHERE ${openOpsWhere()} AND o.delivery_date > ? AND o.delivery_date <= ? ORDER BY o.op_number`).all(today(), tomorrow);
+  const late = db.prepare(`SELECT COUNT(*) AS n FROM ops o WHERE ${openOpsWhere()} AND o.delivery_date IS NOT NULL AND o.delivery_date <> '' AND o.delivery_date < ?`).get(today()).n;
+  const ready = db.prepare("SELECT COUNT(*) AS n FROM ops WHERE is_reversed = 0 AND status_color = 'azul' AND shipped_at IS NULL").get().n;
+  const cells = db.prepare(`
+    SELECT c.name, COUNT(DISTINCT t.op_id) AS n FROM op_cell_transfers t JOIN sewing_cells c ON c.id = t.cell_id
+    WHERE t.quantity_sent > t.quantity_returned AND t.sent_at <= ? GROUP BY c.name ORDER BY n DESC`).all(addDaysIso(today(), -paramOf('cell_stuck')));
+  const noLaunch = (ALERT_RULES.no_launch()[0]?.text || '').split('\n').length - 2;
+  const lines = [
+    `📋 <b>Agenda do dia · ${tgEscape(getCompanyName())}</b> · ${formatDatePtBr(today())}`,
+    '',
+    dueToday.length ? `🔴 <b>Entregar hoje (${dueToday.length}):</b>\n${listLines(dueToday.map(r => `• ${opLink(r)} · ${tgEscape(r.brand || '-')}`), 10)}` : '✅ Nenhuma entrega vencendo hoje',
+    dueTomorrow.length ? `🟠 <b>Próximo dia útil (${dueTomorrow.length}):</b>\n${listLines(dueTomorrow.map(r => `• ${opLink(r)} · ${tgEscape(r.brand || '-')}`), 10)}` : '',
+    late ? `⛔ ${late} OP(s) já atrasada(s)` : '',
+    ready ? `🔵 ${ready} OP(s) prontas aguardando embarque` : '',
+    cells.length ? `🩷 Células com OP parada (${paramOf('cell_stuck')}+ dias): ${cells.map(c => `${tgEscape(c.name)} (${c.n})`).join(', ')}` : '',
+    noLaunch > 0 ? `👤 ${noLaunch} colaboradora(s) sem lançamento no último dia útil` : '',
+    '',
+    `<a href="${APP_BASE_URL}/">Abrir o AgilFac</a>`
+  ];
+  return lines.filter(Boolean).join('\n');
+}
+
+function buildWeeklyReport() {
+  const end = addDaysIso(today(), -1);
+  const start = addDaysIso(today(), -7);
+  const prod = db.prepare(`
+    SELECT COALESCE(SUM(p.produced_minutes), 0) AS m, COALESCE(SUM(p.produced_quantity), 0) AS q
+    FROM op_daily_productions p JOIN ops o ON o.id = p.op_id WHERE ${COUNTED_PRODUCTION_WHERE} AND p.production_date BETWEEN ? AND ?`).get(start, end);
+  const ships = db.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(total_ops), 0) AS ops, COALESCE(SUM(sewing_minutes), 0) AS m FROM shipments WHERE COALESCE(is_reversed, 0) = 0 AND shipment_date BETWEEN ? AND ?').get(start, end);
+  const unbilled = db.prepare("SELECT COUNT(*) AS n FROM ops WHERE is_reversed = 0 AND shipped_at IS NOT NULL AND COALESCE(is_billed, 0) = 0 AND COALESCE(lifecycle_type, 'normal') = 'normal'").get().n;
+  const snap = getTargetSnapshot();
+  const sorted = [...snap.rows].sort((a, b) => b.pct - a.pct);
+  const top = sorted.slice(0, 5);
+  const bottom = sorted.slice(-5).reverse().filter(r => !top.includes(r));
+  const below = snap.rows.filter(r => r.pct < targetPercent()).length;
+  return [
+    `📊 <b>Relatório semanal · ${tgEscape(getCompanyName())}</b>`,
+    `Semana ${formatDatePtBr(start)} a ${formatDatePtBr(end)}`,
+    '',
+    `• Produção: <b>${fmtNum(prod.m, 0)} min</b> (${fmtNum(prod.q, 0)} pç)`,
+    `• Embarques: ${ships.n} (${ships.ops} OPs, ${fmtNum(ships.m, 0)} min de costura)`,
+    `• OPs embarcadas aguardando cobrança: ${unbilled}`,
+    `• Eficiência do período até ${formatDatePtBr(snap.cutoff)}: <b>${fmtNum(snap.total.pct, 2)}%</b> (meta ${tp()}%) · ${below} de ${snap.rows.length} abaixo da meta`,
+    top.length ? `\n🏆 <b>Melhores</b>\n${top.map(r => `• ${tgEscape(r.emp.full_name)}: ${fmtNum(r.pct, 1)}%`).join('\n')}` : '',
+    bottom.length ? `\n⚠️ <b>Precisam de atenção</b>\n${bottom.map(r => `• ${tgEscape(r.emp.full_name)}: ${fmtNum(r.pct, 1)}%`).join('\n')}` : '',
+    '',
+    `<a href="${APP_BASE_URL}/closures">Ver fechamento</a>`
+  ].filter(line => line !== '').join('\n');
+}
+
+const SUMMARY_BUILDERS = { daily_summary: () => buildDailySummary(), op_agenda: () => buildOpAgenda(), weekly_report: () => buildWeeklyReport() };
+
+function ensureAlertTables(tenantDb) {
+  tenantDb.exec(`
+    CREATE TABLE IF NOT EXISTS alert_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      rule TEXT NOT NULL,
+      ref TEXT NOT NULL,
+      alert_date TEXT NOT NULL,
+      sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (rule, ref, alert_date)
+    )
+  `);
+}
+
+function currentBrHour() {
+  return Number(BUSINESS_HOUR_FMT.format(new Date()));
+}
+
+function audienceReady(aud) {
+  return Boolean(getAudienceToken(aud) && getTelegramChats(aud).length);
+}
+
+// Roda as regras marcadas desta empresa, para cada bot (gestor / operacional).
+// force=true ignora horário e repetição (botão "Enviar teste agora").
+async function runTenantAlerts({ force = false, only = null } = {}) {
+  ensureAlertTables(getActiveDb());
+  if (getAlertSetting('alerts_enabled') !== '1' && !force) return { sent: 0, messages: 0 };
+  const audiences = ALERT_AUDIENCES.map(a => a.key).filter(a => (!only || only === a) && audienceReady(a));
+  if (!audiences.length) return { sent: 0, messages: 0 };
+  const hour = currentBrHour();
+  const start = Number(getAlertSetting('alerts_start_hour'));
+  const end = Number(getAlertSetting('alerts_end_hour'));
+  const summaryHour = Number(getAlertSetting('alerts_summary_hour'));
+  const dayKey = today();
+  const weekdayOk = getAlertSetting('alerts_weekdays_only') !== '1' || isBusinessDay(dayKey);
+  const inWindow = force || (weekdayOk && hour >= start && hour <= end);
+  const hourKey = `${dayKey}T${String(hour).padStart(2, '0')}`;
+  const ranHour = getAlertSetting('alerts_last_hour_run') === hourKey;
+  const dailyDue = force || (weekdayOk && hour >= summaryHour && getAlertSetting('alerts_last_daily_run') !== dayKey);
+  const isMonday = new Date(`${dayKey}T12:00:00Z`).getUTCDay() === 1;
+  const weeklyDue = force || (isMonday && hour >= summaryHour && getAlertSetting('alerts_last_weekly_run') !== dayKey);
+  const already = db.prepare('SELECT 1 FROM alert_log WHERE rule = ? AND ref = ? AND alert_date = ?');
+  const logIt = db.prepare('INSERT OR IGNORE INTO alert_log (rule, ref, alert_date) VALUES (?, ?, ?)');
+  const outbox = Object.fromEntries(audiences.map(a => [a, []]));
+
+  for (const rule of ALERT_CATALOG) {
+    const targets = audiences.filter(a => getAlertSetting(`alert_${a}_${rule.key}`) === '1');
+    if (!targets.length) continue;
+    const due = rule.freq === 'summary' ? dailyDue
+      : rule.freq === 'weekly' ? weeklyDue
+      : rule.freq === 'event' ? inWindow // fora do horário os eventos ficam guardados para a próxima janela
+      : rule.freq === 'hourly' ? (inWindow && (force || !ranHour))
+      : dailyDue;
+    if (!due) continue;
+    if (SUMMARY_BUILDERS[rule.key]) {
+      let text = '';
+      try { text = SUMMARY_BUILDERS[rule.key](); } catch (error) { console.error(`Resumo ${rule.key} (${getCompanyName()}):`, error.message); continue; }
+      targets.forEach(a => outbox[a].push(text));
+      continue;
+    }
+    let items = [];
+    try { items = ALERT_RULES[rule.key]() || []; } catch (error) { console.error(`Alerta ${rule.key} (${getCompanyName()}):`, error.message); continue; }
+    for (const a of targets) {
+      const logKey = `${a}:${rule.key}`;
+      const fresh = force ? items : items.filter(item => !already.get(logKey, String(item.ref), dayKey));
+      if (!fresh.length) continue;
+      if (!force) fresh.forEach(item => logIt.run(logKey, String(item.ref), dayKey));
+      outbox[a].push(fresh.map(item => item.text).join('\n'));
+    }
+  }
+  if (!force) {
+    if (inWindow) setAlertSetting('alerts_last_hour_run', hourKey);
+    if (dailyDue) setAlertSetting('alerts_last_daily_run', dayKey);
+    if (weeklyDue) setAlertSetting('alerts_last_weekly_run', dayKey);
+  }
+  let sent = 0;
+  let messages = 0;
+  for (const a of audiences) {
+    for (const message of outbox[a]) { messages += 1; sent += await sendTelegramToAll(message, a); }
+  }
+  return { sent, messages };
+}
+
+// Lê mensagens recebidas por cada bot: "/vincular CÓDIGO" cadastra o grupo/conversa no bot certo.
+async function pollTenantTelegram() {
+  const byToken = new Map();
+  for (const a of ALERT_AUDIENCES) {
+    const token = getAudienceToken(a.key);
+    if (!token) continue;
+    if (!byToken.has(token)) byToken.set(token, []);
+    byToken.get(token).push(a);
+  }
+  for (const [token, audiences] of byToken) {
+    const offsetKey = `telegram_offset_${crypto.createHash('sha256').update(token).digest('hex').slice(0, 10)}`;
+    const offset = Number(getAlertSetting(offsetKey) || 0);
+    const updates = await telegramCall(token, 'getUpdates', { offset, timeout: 0, allowed_updates: ['message'] });
+    for (const update of updates) {
+      setAlertSetting(offsetKey, update.update_id + 1);
+      const msg = update.message;
+      if (!msg || !msg.text || !msg.chat) continue;
+      const text = String(msg.text).trim();
+      if (!/^\/(vincular|start)(@\w+)?\b/i.test(text)) continue;
+      const chat = msg.chat;
+      const typed = (text.split(/\s+/)[1] || '').toUpperCase();
+      const target = audiences.find(a => ensureTelegramLinkCode(a.key) === typed);
+      if (target) {
+        const chats = getTelegramChats(target.key).filter(c => String(c.id) !== String(chat.id));
+        chats.push({ id: chat.id, title: chat.title || [chat.first_name, chat.last_name].filter(Boolean).join(' ') || chat.username || String(chat.id), type: chat.type, linked_at: new Date().toISOString() });
+        setAlertSetting(target.chatsKey, JSON.stringify(chats));
+        await telegramCall(token, 'sendMessage', { chat_id: chat.id, text: `✅ Conversa vinculada ao ${target.title.toLowerCase()} de ${getCompanyName()}.` }).catch(() => {});
+      } else {
+        await telegramCall(token, 'sendMessage', { chat_id: chat.id, text: 'Para receber os alertas do AgilFac, envie: /vincular CÓDIGO (o código aparece em Parâmetros → Alertas Telegram).' }).catch(() => {});
+      }
+    }
+  }
+}
+
+let alertWorkerBusy = false;
+async function runAlertWorker() {
+  if (alertWorkerBusy) return;
+  alertWorkerBusy = true;
+  try {
+    const companies = masterDb.prepare('SELECT * FROM companies WHERE is_active = 1').all();
+    for (const company of companies) {
+      let tenantDb;
+      try { tenantDb = getTenantDbForCompany(company); } catch (_) { continue; }
+      await requestContext.run({ tenantDb, auth: { company, user: null, role: 'adm' } }, async () => {
+        try { await pollTenantTelegram(); } catch (error) { if (!/Conflict|terminated/i.test(error.message)) console.error(`Telegram polling (${company.slug}):`, error.message); }
+        try { await runTenantAlerts(); } catch (error) { console.error(`Alertas (${company.slug}):`, error.message); }
+      });
+    }
+  } catch (error) {
+    console.error('Worker de alertas:', error.message);
+  } finally {
+    alertWorkerBusy = false;
+  }
+}
+
+if (process.env.AGILFAC_DISABLE_ALERTS !== '1') {
+  setTimeout(() => runAlertWorker().catch(() => {}), Number(process.env.AGILFAC_ALERT_FIRST_MS || 15000)).unref();
+  setInterval(() => runAlertWorker().catch(() => {}), Number(process.env.AGILFAC_ALERT_INTERVAL_MS || 60000)).unref();
+}
+
+// ----- tela (seção dentro de Parâmetros) -----
+function renderAlertsSection() {
+  const groups = [...new Set(ALERT_CATALOG.map(r => r.group))];
+  const freqLabel = { hourly: 'verifica de hora em hora', daily: 'diário', event: 'avisa na hora', summary: 'diário', weekly: 'segundas-feiras' };
+  const botCards = ALERT_AUDIENCES.map(a => {
+    const own = getAlertSetting(a.tokenKey);
+    const chats = getTelegramChats(a.key);
+    const code = ensureTelegramLinkCode(a.key);
+    const usingShared = a.key === 'op' && !own && getAlertSetting('telegram_bot_token');
+    return `
+      <div class="alert-bot">
+        <h4>${escapeHtml(a.title)}</h4>
+        <p class="hint">${escapeHtml(a.desc)}</p>
+        <label>Token do bot (criado no @BotFather)
+          <input type="password" name="${a.tokenKey}" autocomplete="off" placeholder="${own ? `Salvo: ${escapeHtml(maskToken(own))} — em branco mantém` : (a.key === 'op' ? 'Opcional: em branco usa o bot do gestor' : '123456789:AA...')}" />
+        </label>
+        ${own ? `<label class="checkbox-line"><input type="checkbox" name="clear_${a.tokenKey}" value="1" /> Remover este token</label>` : ''}
+        ${usingShared ? '<p class="hint">Usando o mesmo bot do gestor — vincule outro grupo com o código abaixo.</p>' : ''}
+        <div class="alerts-link">Adicione o bot ao grupo (ou abra a conversa com ele) e envie <code>/vincular ${escapeHtml(code)}</code>. Em até 1 minuto aparece aqui.
+          <ul class="alerts-chats">
+            ${chats.map(c => `<li>${escapeHtml(c.title)} <span class="hint">(${escapeHtml(c.type || '')})</span> <button class="btn secondary" type="submit" name="remove_chat" value="${a.key}|${escapeHtml(String(c.id))}" formnovalidate>Remover</button></li>`).join('') || '<li class="hint">Nenhuma conversa vinculada.</li>'}
+          </ul>
+        </div>
+        <button class="btn secondary" type="submit" name="action" value="test_${a.key}">Enviar teste para ${escapeHtml(a.label.toLowerCase())}</button>
+      </div>`;
+  }).join('');
+  return `
+    <section class="panel" id="alertas">
+      <h3>Alertas Telegram</h3>
+      <form method="post" action="/parametros/alertas" class="alerts-form">
+        <label class="checkbox-line"><input type="checkbox" name="alerts_enabled" value="1" ${getAlertSetting('alerts_enabled') === '1' ? 'checked' : ''} /> <strong>Alertas ligados</strong></label>
+        <div class="alert-bots">${botCards}</div>
+        <div class="form-grid">
+          <label>Enviar a partir de (hora)<input type="number" name="alerts_start_hour" min="0" max="23" value="${escapeHtml(getAlertSetting('alerts_start_hour'))}" /></label>
+          <label>Até (hora)<input type="number" name="alerts_end_hour" min="0" max="23" value="${escapeHtml(getAlertSetting('alerts_end_hour'))}" /></label>
+          <label>Hora dos resumos e alertas diários<input type="number" name="alerts_summary_hour" min="0" max="23" value="${escapeHtml(getAlertSetting('alerts_summary_hour'))}" /></label>
+          <label class="checkbox-line"><input type="checkbox" name="alerts_weekdays_only" value="1" ${getAlertSetting('alerts_weekdays_only') === '1' ? 'checked' : ''} /> Só em dias úteis</label>
+        </div>
+        <p class="hint">Marque em cada alerta quem recebe: <strong>G</strong> = bot do gestor, <strong>O</strong> = bot operacional.</p>
+        ${groups.map(group => `
+          <fieldset class="alerts-group"><legend>${escapeHtml(group)}</legend>
+            ${ALERT_CATALOG.filter(r => r.group === group).map(rule => `
+              <div class="alert-rule">
+                <div class="alert-rule-head">
+                  <strong>${escapeHtml(rule.label)}</strong>
+                  <span class="alert-aud">
+                    ${ALERT_AUDIENCES.map(a => `<label title="${escapeHtml(a.title)}"><input type="checkbox" name="alert_${a.key}_${rule.key}" value="1" ${getAlertSetting(`alert_${a.key}_${rule.key}`) === '1' ? 'checked' : ''} /> ${a.key === 'gestor' ? 'G' : 'O'}</label>`).join('')}
+                  </span>
+                </div>
+                ${rule.param ? `<label class="alert-param">${rule.param.key === 'percent' ? 'acima de' : rule.param.key === 'count' ? 'mais de' : 'a partir de'} <input type="number" name="alert_param_${rule.key}" min="0" step="${rule.param.key === 'percent' ? '0.1' : '1'}" value="${escapeHtml(getAlertSetting(`alert_param_${rule.key}`))}" /> ${escapeHtml(rule.param.label)}</label>` : ''}
+                <small class="hint">${escapeHtml(rule.help)} · ${freqLabel[rule.freq]}</small>
+              </div>`).join('')}
+          </fieldset>`).join('')}
+        <div class="actions"><button class="btn" type="submit">Salvar alertas</button></div>
+      </form>
+    </section>`;
+}
+
+async function handleSaveAlerts(form, res, role) {
+  if (!isAdminRole(role)) return requireAdmin(null, res, role);
+  const isOn = v => (Array.isArray(v) ? v.includes('1') : v === '1');
+  const back = msg => redirect(res, `/parametros?notice=${encodeURIComponent(msg)}#alertas`);
+  const fail = msg => redirect(res, `/parametros?error=${encodeURIComponent(msg)}#alertas`);
+  if (form.remove_chat) {
+    const [audKey, chatId] = String(form.remove_chat).split('|');
+    const a = getAudience(audKey);
+    setAlertSetting(a.chatsKey, JSON.stringify(getTelegramChats(a.key).filter(c => String(c.id) !== String(chatId))));
+    return back('Conversa removida.');
+  }
+  let tokenMsg = '';
+  for (const a of ALERT_AUDIENCES) {
+    if (form[`clear_${a.tokenKey}`] === '1') { setAlertSetting(a.tokenKey, ''); continue; }
+    const newToken = String(form[a.tokenKey] || '').trim();
+    if (!newToken) continue;
+    if (!/^\d{5,}:[A-Za-z0-9_-]{20,}$/.test(newToken)) return fail(`${a.title}: token inválido. Copie o token completo enviado pelo @BotFather.`);
+    try {
+      const me = await telegramCall(newToken, 'getMe');
+      setAlertSetting(a.tokenKey, newToken);
+      tokenMsg += ` ${a.title}: @${me.username || 'bot'} validado.`;
+    } catch (error) {
+      return fail(`${a.title}: o Telegram recusou o token (${error.message}).`);
+    }
+  }
+  setAlertSetting('alerts_enabled', isOn(form.alerts_enabled) ? '1' : '0');
+  setAlertSetting('alerts_weekdays_only', form.alerts_weekdays_only === '1' ? '1' : '0');
+  for (const key of ['alerts_start_hour', 'alerts_end_hour', 'alerts_summary_hour']) {
+    const n = Math.round(Number(form[key]));
+    if (form[key] !== undefined && form[key] !== '' && Number.isFinite(n) && n >= 0 && n <= 23) setAlertSetting(key, n);
+  }
+  for (const rule of ALERT_CATALOG) {
+    for (const a of ALERT_AUDIENCES) setAlertSetting(`alert_${a.key}_${rule.key}`, isOn(form[`alert_${a.key}_${rule.key}`]) ? '1' : '0');
+    if (rule.param) {
+      const n = Number(String(form[`alert_param_${rule.key}`] ?? '').replace(',', '.'));
+      if (form[`alert_param_${rule.key}`] !== '' && Number.isFinite(n) && n >= 0) setAlertSetting(`alert_param_${rule.key}`, n);
+    }
+  }
+  const test = String(form.action || '').match(/^test_(gestor|op)$/);
+  if (test) {
+    const a = getAudience(test[1]);
+    if (!getAudienceToken(a.key)) return fail(`Salve o token do ${a.title.toLowerCase()} antes de testar.`);
+    if (!getTelegramChats(a.key).length) return fail(`Vincule ao menos um grupo ou conversa no ${a.title.toLowerCase()} antes de testar.`);
+    try {
+      await sendTelegramToAll(`🔔 Teste do ${tgEscape(a.title.toLowerCase())} — ${tgEscape(getCompanyName())}. Abaixo, os alertas marcados para este bot com o que existe agora.`, a.key);
+      const result = await runTenantAlerts({ force: true, only: a.key });
+      return back(`Teste enviado ao ${a.title.toLowerCase()}: ${result.messages} mensagem(ns) de alerta.`);
+    } catch (error) {
+      return fail(`Falha no teste: ${error.message}`);
+    }
+  }
+  back(`Alertas salvos.${tokenMsg}`);
+}
+// ===============================================================
+
 // ===================== TELA PARÂMETROS =====================
 const ABSENCE_TYPE_LABELS = { falta: 'Falta', atestado: 'Atestado', ferias: 'Férias', folga: 'Folga', afastamento: 'Afastamento', outro: 'Outro' };
 
@@ -7330,8 +8008,9 @@ function renderParametersPage(query = {}, values = null, error = '', role = 'adm
         <p class="hint">Jornadas de trabalho (horários e intervalos) ficam em <a href="/cadastros#jornadas">Cadastros → Jornadas</a>.</p>
         <div class="actions"><button class="btn" type="submit">Salvar parâmetros</button><a class="btn secondary" href="/parametros">Descartar alterações</a></div>
       </section>
-    </form>`;
-  return pageLayout({ title: 'Parâmetros', content, notice: query.notice || '', error, role });
+    </form>
+    ${renderAlertsSection()}`;
+  return pageLayout({ title: 'Parâmetros', content, notice: query.notice || '', error: error || query.error || '', role });
 }
 
 function handleSaveParameters(form, res, role) {
@@ -10021,6 +10700,7 @@ const server = http.createServer(async (req, res) => {
         return sendHtml(res, renderParametersPage(query, null, query.error || '', role));
       }
       if (req.method === 'POST' && pathname === '/parametros') return handleSaveParameters(await parseBody(req), res, role);
+      if (req.method === 'POST' && pathname === '/parametros/alertas') return handleSaveAlerts(await parseBody(req), res, role);
       const workScheduleToggleMatch = pathname.match(/^\/work-schedules\/(\d+)\/toggle$/);
       if (req.method === 'POST' && workScheduleToggleMatch) return handleToggleWorkSchedule(Number(workScheduleToggleMatch[1]), res, role);
       const workScheduleUpdateMatch = pathname.match(/^\/work-schedules\/(\d+)$/);
