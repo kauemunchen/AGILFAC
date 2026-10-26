@@ -154,3 +154,4 @@ fieldset { border: 1px solid rgba(148, 163, 184, .35); border-radius: 10px; padd
 .employees-summary .card { min-width: 180px; }
 .employees-summary .card strong { font-size: 1.8em; display: block; }
 .text-ok { color: #15803d; }
+.active-count-pill { display: inline-block; vertical-align: middle; margin-left: 10px; padding: 3px 12px; border-radius: 999px; background: #dcfce7; color: #15803d; font-size: .5em; font-weight: 700; }
