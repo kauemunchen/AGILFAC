@@ -4867,6 +4867,7 @@ function validateOp(form) {
   const brandName = String(form.brand || '').trim();
   const collectionName = String(form.collection_name || '').trim();
   if (!form.op_number) errors.push('Informe o número da OP.');
+  else if (!/^\d{7}-\d{3}$/.test(String(form.op_number).trim())) errors.push('Número da OP fora do padrão: use 7 dígitos + "-" + 3 dígitos (ex.: 1801772-001).');
   if (!form.product_name) errors.push('Informe o produto.');
   if (!brandName) errors.push('Selecione uma marca cadastrada.');
   if (brandName && !findBrandByName(brandName)) errors.push('Marca inválida: cadastre a marca antes no módulo Cadastros.');
@@ -4880,7 +4881,10 @@ function validateOp(form) {
 
 function handleCreateOp(form, res) {
   // Padrão do número: 7 dígitos ganham "-001" (ex.: 1801772 -> 1801772-001)
-  if (form.op_number) form.op_number = normalizeOpNumberInput(form.op_number);
+  if (form.op_number) {
+    const digits = String(form.op_number).replace(/\D/g, '');
+    form.op_number = digits.length === 10 ? `${digits.slice(0, 7)}-${digits.slice(7)}` : normalizeOpNumberInput(form.op_number);
+  }
   const errors = validateOp(form);
   if (errors.length) {
     return sendHtml(res, renderOpForm(form, errors.join(' '), form._role || 'adm'), 422);
@@ -6023,7 +6027,16 @@ function renderOpForm(values = {}, error = '', role = 'adm') {
     <section class="page-header"><div><h2>Cadastro de OPs</h2><p>Nova OP inicia verde. F23 interno exige minutos F23. Marca precisa existir previamente em Cadastros.</p></div></section>
     <form class="panel form-grid" method="post" action="/ops">
       <label>Barcode<input name="barcode" value="${escapeHtml(values.barcode || '')}" /></label>
-      <label>Número da OP<input name="op_number" required value="${escapeHtml(values.op_number || '')}" /></label>
+      <label>Número da OP *<input name="op_number" required data-op-mask maxlength="11" inputmode="numeric" pattern="\\d{7}-\\d{3}" title="Padrão: 7 dígitos + -001 (ex.: 1801772-001)" placeholder="1801772-001" value="${escapeHtml(values.op_number || '')}" /></label>
+      <script>
+        (() => {
+          const el = document.querySelector('[data-op-mask]');
+          if (!el) return;
+          const mask = v => { const d = String(v || '').replace(/\\D/g, '').slice(0, 10); return d.length > 7 ? d.slice(0, 7) + '-' + d.slice(7) : d; };
+          el.addEventListener('input', () => { el.value = mask(el.value); });
+          el.addEventListener('blur', () => { const d = el.value.replace(/\\D/g, ''); if (d.length === 7) el.value = d + '-001'; });
+        })();
+      </script>
       <label>Produto<input name="product_name" required value="${escapeHtml(values.product_name || '')}" /></label>
       <label>Flag/tipo
         <select name="op_type">
