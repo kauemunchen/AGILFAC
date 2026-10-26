@@ -4344,6 +4344,25 @@ function handleUpsertClosureAbsence(form, res) {
   redirect(res, buildClosureRedirectUrl(form, 'notice', 'Ausência registrada no fechamento.'));
 }
 
+// Máscara (47) 99999-9999 enquanto digita; aceita colar com +55
+const PHONE_MASK_SCRIPT = `<script>
+  (() => {
+    const mask = v => {
+      let d = String(v || '').replace(/\\D/g, '');
+      if (d.length > 11 && d.startsWith('55')) d = d.slice(2);
+      d = d.slice(0, 11);
+      if (d.length <= 2) return d ? '(' + d : '';
+      if (d.length <= 6) return '(' + d.slice(0, 2) + ') ' + d.slice(2);
+      if (d.length <= 10) return '(' + d.slice(0, 2) + ') ' + d.slice(2, 6) + '-' + d.slice(6);
+      return '(' + d.slice(0, 2) + ') ' + d.slice(2, 7) + '-' + d.slice(7);
+    };
+    document.querySelectorAll('[data-phone-mask]').forEach(el => {
+      el.addEventListener('input', () => { el.value = mask(el.value); });
+      el.value = mask(el.value);
+    });
+  })();
+</script>`;
+
 // Telefone/WhatsApp: guarda só dígitos com DDD (ex.: 47999998888)
 function normalizePhone(value) {
   let digits = String(value || '').replace(/\D/g, '');
@@ -4779,7 +4798,8 @@ function validateEmployee(form) {
     return 'A data de rescisão não pode ser anterior à data de início.';
   }
   const phone = normalizePhone(form.phone);
-  if (phone && (phone.length < 10 || phone.length > 11)) return 'Telefone inválido: informe DDD + número (ex.: 47 99999-9999).';
+  if (!phone && !terminationDate) return 'Informe o telefone (WhatsApp) da colaboradora.';
+  if (phone && (phone.length < 10 || phone.length > 11)) return 'Telefone inválido: informe DDD + número (ex.: (47) 99999-9999).';
   return '';
 }
 
@@ -7217,7 +7237,7 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
       <form class="form-grid" method="post" action="/employees">
         <label>Registro<input name="registration_code" required value="${escapeHtml(values.registration_code || '')}" /></label>
         <label>Nome completo<input name="full_name" required value="${escapeHtml(values.full_name || '')}" /></label>
-        <label>Telefone (WhatsApp)<input type="tel" name="phone" inputmode="tel" placeholder="(47) 99999-9999" value="${escapeHtml(formatPhone(normalizePhone(values.phone)))}" /></label>
+        <label>Telefone (WhatsApp) *<input type="tel" name="phone" inputmode="numeric" required data-phone-mask maxlength="15" pattern="\\(\\d{2}\\) \\d{4,5}-\\d{4}" title="Informe DDD + número, ex.: (47) 99999-9999" placeholder="(47) 99999-9999" value="${escapeHtml(formatPhone(normalizePhone(values.phone)))}" /></label>
         <label>Data de nascimento<input type="date" name="birth_date" value="${formatDateInput(values.birth_date)}" /></label>
         <label>Data de início<input type="date" name="start_date" value="${formatDateInput(values.start_date)}" /></label>
         <label>Data de rescisão<input type="date" name="termination_date" value="${formatDateInput(values.termination_date)}" /></label>
@@ -7240,7 +7260,7 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
                   <form class="form-grid" method="post" action="/employees/${emp.id}">
                     <label>Registro<input name="registration_code" required value="${escapeHtml(emp.registration_code || '')}" /></label>
                     <label>Nome completo<input name="full_name" required value="${escapeHtml(emp.full_name || '')}" /></label>
-                    <label>Telefone (WhatsApp)<input type="tel" name="phone" inputmode="tel" placeholder="(47) 99999-9999" value="${escapeHtml(formatPhone(emp.phone))}" /></label>
+                    <label>Telefone (WhatsApp)${emp.termination_date ? '' : ' *'}<input type="tel" name="phone" inputmode="numeric" ${emp.termination_date ? '' : 'required'} data-phone-mask maxlength="15" pattern="\\(\\d{2}\\) \\d{4,5}-\\d{4}" title="Informe DDD + número, ex.: (47) 99999-9999" placeholder="(47) 99999-9999" value="${escapeHtml(formatPhone(emp.phone))}" /></label>
                     <label>Data de nascimento<input type="date" name="birth_date" value="${formatDateInput(emp.birth_date)}" /></label>
                     <label>Data de início<input type="date" name="start_date" value="${formatDateInput(emp.start_date)}" /></label>
                     <label>Data de rescisão<input type="date" name="termination_date" value="${formatDateInput(emp.termination_date)}" /></label>
@@ -7255,6 +7275,7 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
             const status = describeEmployeeStatus(emp);
             return `<tr class="${status === 'Ativo' ? 'is-active' : 'is-inactive'}"><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td>${renderWhatsAppLink(emp.phone)}</td><td>${escapeHtml(nowPt(emp.birth_date))}</td><td>${escapeHtml(nowPt(emp.start_date))}</td><td>${escapeHtml(nowPt(emp.termination_date))}</td><td><span class="status-tag ${status === 'Ativo' ? 'ok' : 'off'}">${escapeHtml(status)}</span></td><td>${escapeHtml(emp.job_role || '-')}</td><td>${escapeHtml(scheduleNames.get(emp.work_schedule_id) || 'Sem jornada')}</td><td>${escapeHtml(emp.notes || '-')}</td><td><a href="/employees?edit=${emp.id}">Editar</a></td></tr>`;
           }).join('') || '<tr><td colspan="11">Nenhum colaborador cadastrado.</td></tr>'}
+          ${PHONE_MASK_SCRIPT}
         </tbody>
       </table>
     </section>
