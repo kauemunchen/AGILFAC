@@ -4846,6 +4846,8 @@ function validateOp(form) {
 }
 
 function handleCreateOp(form, res) {
+  // Padrão do número: 7 dígitos ganham "-001" (ex.: 1801772 -> 1801772-001)
+  if (form.op_number) form.op_number = normalizeOpNumberInput(form.op_number);
   const errors = validateOp(form);
   if (errors.length) {
     return sendHtml(res, renderOpForm(form, errors.join(' '), form._role || 'adm'), 422);
