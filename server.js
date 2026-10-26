@@ -1001,6 +1001,46 @@ function migrateDatabase(tenantDb = db) {
 
   migrateWorkSchedulesAndPrizeFlag(tenantDb);
   migrateOpNumberSuffix(tenantDb);
+  migrateOpNumberSuffixReversedConflicts(tenantDb);
+}
+
+// Segunda etapa (v2): quando a versão "-001" já existe mas está ESTORNADA, ela é renomeada
+// para "-001-EST" e a OP ativa de 7 dígitos recebe o "-001". Conflitos com OP ativa continuam intocados.
+function migrateOpNumberSuffixReversedConflicts(tenantDb) {
+  if (tenantDb.prepare("SELECT 1 FROM app_settings WHERE key = 'migration_op_suffix_v2'").get()) return;
+  const hasTable = name => Boolean(tenantDb.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
+  const rows = tenantDb.prepare("SELECT id, TRIM(op_number) AS op_number FROM ops WHERE is_reversed = 0 AND TRIM(op_number) GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9]'").all();
+  const find = tenantDb.prepare('SELECT id, is_reversed FROM ops WHERE TRIM(op_number) = ? COLLATE NOCASE');
+  const rename = tenantDb.prepare('UPDATE ops SET op_number = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?');
+  const upShip = hasTable('shipment_items') ? tenantDb.prepare('UPDATE shipment_items SET op_number = ? WHERE op_id = ?') : null;
+  const upCell = hasTable('cell_closure_items') ? tenantDb.prepare('UPDATE cell_closure_items SET op_number = ? WHERE op_id = ?') : null;
+  const done = [];
+  const skipped = [];
+  tenantDb.exec('BEGIN');
+  try {
+    for (const row of rows) {
+      const target = `${row.op_number}-001`;
+      const existing = find.get(target);
+      if (existing && !existing.is_reversed) { skipped.push(row.op_number); continue; }
+      if (existing) {
+        let archived = `${target}-EST`;
+        for (let i = 2; find.get(archived); i += 1) archived = `${target}-EST${i}`;
+        rename.run(archived, existing.id);
+        if (upShip) upShip.run(archived, existing.id);
+        if (upCell) upCell.run(archived, existing.id);
+      }
+      rename.run(target, row.id);
+      if (upShip) upShip.run(target, row.id);
+      if (upCell) upCell.run(target, row.id);
+      done.push(row.op_number);
+    }
+    tenantDb.prepare("INSERT INTO app_settings (key, value, updated_at) VALUES ('migration_op_suffix_v2', ?, CURRENT_TIMESTAMP)")
+      .run(JSON.stringify({ fixed: done, skipped_active_conflict: skipped, at: new Date().toISOString() }));
+    tenantDb.exec('COMMIT');
+  } catch (error) {
+    tenantDb.exec('ROLLBACK');
+    console.error('Falha ao resolver conflitos de -001:', error.message);
+  }
 }
 
 // Migração única: OPs com 7 dígitos ganham "-001" (ex.: 1801772 -> 1801772-001),
