@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS ops (
   minutes_f22 REAL NOT NULL DEFAULT 0 CHECK (minutes_f22 >= 0),
   f23_mode TEXT NOT NULL CHECK (f23_mode IN ('interno', 'externo')),
   minutes_f23 REAL,
-  entry_date TEXT NOT NULL DEFAULT (date('now')),
+  entry_date TEXT NOT NULL DEFAULT (date('now', '-3 hours')),
   entered_by_user_id INTEGER REFERENCES users(id),
   notes TEXT,
   status_color TEXT NOT NULL DEFAULT 'verde' CHECK (status_color IN ('verde', 'amarelo', 'azul', 'rosa', 'vermelho')),
@@ -162,7 +162,7 @@ CREATE TABLE IF NOT EXISTS op_occurrences (
 CREATE TABLE IF NOT EXISTS op_problem_items (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   op_id INTEGER NOT NULL REFERENCES ops(id) ON DELETE CASCADE,
-  problem_date TEXT NOT NULL DEFAULT (date('now')),
+  problem_date TEXT NOT NULL DEFAULT (date('now', '-3 hours')),
   quantity INTEGER NOT NULL CHECK (quantity > 0),
   reason TEXT NOT NULL,
   notes TEXT,

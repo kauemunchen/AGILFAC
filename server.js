@@ -8,6 +8,13 @@ const { AsyncLocalStorage } = require('async_hooks');
 const { DatabaseSync } = require('node:sqlite');
 
 const PORT = Number(process.env.PORT || 8090);
+
+// Fuso oficial do negócio. Datas de negócio (lançamento, envio, embarque) são sempre
+// no horário de Brasília; timestamps de auditoria (created_at etc.) ficam em UTC.
+const BUSINESS_TZ = 'America/Sao_Paulo';
+const BUSINESS_DATE_FMT = new Intl.DateTimeFormat('en-CA', { timeZone: BUSINESS_TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
+const BUSINESS_HOUR_FMT = new Intl.DateTimeFormat('en-GB', { timeZone: BUSINESS_TZ, hour: '2-digit', hourCycle: 'h23' });
+
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const DATA_DIR = path.join(ROOT, 'data');
@@ -657,7 +664,7 @@ function migrateDatabase(tenantDb = db) {
     CREATE TABLE IF NOT EXISTS op_problem_items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       op_id INTEGER NOT NULL REFERENCES ops(id) ON DELETE CASCADE,
-      problem_date TEXT NOT NULL DEFAULT (date('now')),
+      problem_date TEXT NOT NULL DEFAULT (date('now', '-3 hours')),
       quantity INTEGER NOT NULL CHECK (quantity > 0),
       reason TEXT NOT NULL,
       notes TEXT,
@@ -948,7 +955,7 @@ function upgradeOpsStatusColorConstraint(tenantDb) {
       minutes_f22 REAL NOT NULL DEFAULT 0 CHECK (minutes_f22 >= 0),
       f23_mode TEXT NOT NULL CHECK (f23_mode IN ('interno', 'externo')),
       minutes_f23 REAL,
-      entry_date TEXT NOT NULL DEFAULT (date('now')),
+      entry_date TEXT NOT NULL DEFAULT (date('now', '-3 hours')),
       entered_by_user_id INTEGER REFERENCES users(id),
       notes TEXT,
       status_color TEXT NOT NULL DEFAULT 'verde' CHECK (status_color IN ('verde', 'amarelo', 'azul', 'rosa', 'vermelho')),
@@ -1123,12 +1130,12 @@ function seedIfNeeded() {
   }
 }
 
-function today() {
-  return new Date().toISOString().slice(0, 10);
+function today(date = new Date()) {
+  return BUSINESS_DATE_FMT.format(date);
 }
 
 function currentHourSlot(date = new Date()) {
-  return `${String(date.getUTCHours()).padStart(2, '0')}:00`;
+  return `${BUSINESS_HOUR_FMT.format(date).padStart(2, '0')}:00`;
 }
 
 function normalizeHourSlotInput(value) {
@@ -1156,12 +1163,16 @@ function normalizeOpNumberInput(value) {
 
 function nowPt(value) {
   if (!value) return '-';
-  const date = new Date(value.length === 10 ? `${value}T00:00:00Z` : value);
-  return new Intl.DateTimeFormat('pt-BR', {
-    dateStyle: 'short',
-    timeStyle: value.length === 10 ? undefined : 'short',
-    timeZone: 'UTC'
-  }).format(date);
+  const raw = String(value);
+  if (raw.length === 10) {
+    // Data de negócio: só reformatar, sem conversão de fuso
+    return new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short', timeZone: 'UTC' }).format(new Date(`${raw}T00:00:00Z`));
+  }
+  // Timestamp de auditoria: gravado em UTC (CURRENT_TIMESTAMP vem sem "Z"), exibido em Brasília
+  const normalized = /[zZ]|[+-]\d{2}:?\d{2}$/.test(raw) ? raw : `${raw.replace(' ', 'T')}Z`;
+  const date = new Date(normalized);
+  if (Number.isNaN(date.getTime())) return raw;
+  return new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short', timeStyle: 'short', timeZone: BUSINESS_TZ }).format(date);
 }
 
 function escapeHtml(value) {
@@ -6382,7 +6393,7 @@ function getCellReportData(filters = {}) {
       o.total_pieces,
       o.status_color,
       o.shipped_at,
-      CAST((julianday(COALESCE(t.returned_at, DATE('now'))) - julianday(t.sent_at)) AS INTEGER) + 1 AS days_in_cell,
+      CAST((julianday(COALESCE(t.returned_at, DATE('now', '-3 hours'))) - julianday(t.sent_at)) AS INTEGER) + 1 AS days_in_cell,
       ROUND(t.quantity_sent * COALESCE(o.minutes_f21, 0), 2) AS sent_sewing_minutes,
       ROUND(t.quantity_returned * COALESCE(o.minutes_f21, 0), 2) AS returned_sewing_minutes,
       ROUND((t.quantity_sent - t.quantity_returned) * COALESCE(o.minutes_f21, 0), 2) AS open_sewing_minutes
