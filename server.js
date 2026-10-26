@@ -4422,7 +4422,25 @@ function describeEmployeeStatus(employee) {
   return employee.is_active ? 'Ativo' : 'Inativo';
 }
 
+// Busca a OP pelo número, pelo código de barras cadastrado ou por formas comuns de leitura
+// (ex.: leitor que não envia o hífen: 1801138001 -> 1801138-001; 1801138 -> 1801138-001).
 function getOpByNumber(opNumber) {
+  const raw = String(opNumber || '').trim();
+  if (!raw) return null;
+  const candidates = [raw];
+  const digits = raw.replace(/\D/g, '');
+  if (/^\d{10}$/.test(raw)) candidates.push(`${raw.slice(0, 7)}-${raw.slice(7)}`);
+  if (/^\d{7}$/.test(raw)) candidates.push(`${raw}-001`);
+  if (digits && digits !== raw && /^\d{10}$/.test(digits)) candidates.push(`${digits.slice(0, 7)}-${digits.slice(7)}`);
+  for (const candidate of candidates) {
+    const found = findOpByExactNumber(candidate);
+    if (found) return found;
+  }
+  const byBarcode = db.prepare('SELECT op_number FROM ops WHERE is_reversed = 0 AND TRIM(barcode) = ? ORDER BY created_at DESC LIMIT 1').get(raw);
+  return byBarcode ? findOpByExactNumber(byBarcode.op_number) : null;
+}
+
+function findOpByExactNumber(opNumber) {
   const normalized = String(opNumber || '').trim();
   if (!normalized) return null;
   return db.prepare(`
@@ -4918,7 +4936,7 @@ function handleCreateProduction(form, res) {
   const opId = mode === 'quick' ? Number(getOpByNumber(typedOpNumber)?.id || 0) : Number(form.op_id);
 
   const redirectQuery = new URLSearchParams({
-    mode,
+    mode: mode === 'quick' ? 'quick' : 'lista',
     production_date: productionDate
   });
   if (keepEmployee === '1') redirectQuery.set('keep_employee', '1');
@@ -7795,7 +7813,7 @@ function renderHourlyProductionPage(values = {}, error = '', notice = '', role =
           <input name="hour_slot" value="${escapeHtml(hourSlot)}" data-hourly-field="hour" placeholder="Ex.: 15:00" />
         </label>
         <label>OP
-          <input name="op_number" required autocomplete="off" placeholder="Ex.: OP-1001" value="${escapeHtml(suggestedOpNumber)}" data-hourly-field="op" />
+          <span class="scan-input"><input name="op_number" required autocomplete="off" placeholder="Bipe a etiqueta ou digite a OP" value="${escapeHtml(suggestedOpNumber)}" data-hourly-field="op" data-scan-input /><button class="btn secondary scan-btn" type="button" data-scan-camera title="Ler com a câmera">📷</button></span>
         </label>
         <label>Quantidade
           <input type="number" min="1" name="produced_quantity" required value="${escapeHtml(values.produced_quantity || '')}" data-hourly-field="quantity" />
@@ -7810,6 +7828,7 @@ function renderHourlyProductionPage(values = {}, error = '', notice = '', role =
         </div>
       </form>
       ${renderPrizeFlagScript({ formSelector: '[data-hourly-launch]', employeeFieldSelector: '[name=employee_id]', dateFieldSelector: '[name=production_date]', hourFieldSelector: '[name=hour_slot]' })}
+      ${renderScannerScript()}
       ${quickPreview ? `
         <div class="quick-op-preview ${quickPreview.is_in_cell ? 'is-blocked' : (quickPreview.remaining_quantity <= 0 ? 'is-finished' : '')}">
           <strong>${escapeHtml(quickPreview.op_number)} · ${escapeHtml(quickPreview.product_name)}</strong>
@@ -7904,6 +7923,9 @@ function renderHourlyProductionPage(values = {}, error = '', notice = '', role =
         if (op) {
           op.addEventListener('blur', normalizeOpField);
           op.addEventListener('change', normalizeOpField);
+          const goQuantity = () => { normalizeOpField(); if (quantity) { quantity.focus(); quantity.select(); } };
+          op.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); goQuantity(); } });
+          op.addEventListener('scan', goQuantity);
         }
         syncEmployeeSelection();
         const firstTarget = employeeLabel && !employeeLabel.value ? employeeLabel : op || quantity || employeeLabel;
@@ -7930,7 +7952,8 @@ function renderProductionForm(values = {}, error = '', notice = '', role = 'adm'
     LIMIT 20
   `).all();
 
-  const mode = values.mode === 'quick' ? 'quick' : 'default';
+  // Padrão: lançamento rápido (OP bipada/digitada). Lista completa só com ?mode=lista.
+  const mode = values.mode === 'lista' || values.mode === 'default' ? 'default' : 'quick';
   const keepEmployee = values.keep_employee === '1';
   const selectedEmployeeId = String(values.employee_id || '');
   const selectedDate = values.production_date || today();
@@ -7941,10 +7964,10 @@ function renderProductionForm(values = {}, error = '', notice = '', role = 'adm'
     <section class="panel quick-launch-panel">
       <div class="quick-launch-header">
         <div>
-          <h3>Lançamento sequencial rápido</h3>
-          <p>Fluxo pensado para uma linha por vez, com OP digitada manualmente e Enter para avançar.</p>
+          <h3>Lançamento rápido</h3>
+          <p>Bipe a etiqueta (leitor ou câmera) ou digite a OP. Enter avança para a quantidade.</p>
         </div>
-        <a class="btn secondary" href="/productions/new">Voltar ao modo lista</a>
+        <a class="btn secondary" href="/productions/new?mode=lista">Modo lista</a>
       </div>
       <form class="form-grid quick-launch-form" method="post" action="/productions" data-quick-launch>
         <input type="hidden" name="mode" value="quick" />
@@ -7961,8 +7984,8 @@ function renderProductionForm(values = {}, error = '', notice = '', role = 'adm'
           <span>Manter colaborador</span>
           <input type="checkbox" name="keep_employee" value="1" ${keepEmployee ? 'checked' : ''} />
         </label>
-        <label>OP digitada
-          <input name="op_number" required autocomplete="off" placeholder="Ex.: OP-1001" value="${escapeHtml(values.op_number || '')}" data-quick-field="op" />
+        <label>OP (bipar ou digitar)
+          <span class="scan-input"><input name="op_number" required autocomplete="off" placeholder="Bipe a etiqueta ou digite a OP" value="${escapeHtml(values.op_number || '')}" data-quick-field="op" data-scan-input /><button class="btn secondary scan-btn" type="button" data-scan-camera title="Ler com a câmera">📷</button></span>
         </label>
         <label>Minutos F21 do lançamento
           <input type="number" min="0.001" step="0.001" name="used_minutes_f21" value="${escapeHtml(selectedLaunchMinutes)}" data-quick-field="minutes" />
@@ -7977,7 +8000,8 @@ function renderProductionForm(values = {}, error = '', notice = '', role = 'adm'
         </div>
       </form>
       ${renderPrizeFlagScript({ formSelector: '[data-quick-launch]', employeeFieldSelector: '[name=employee_id]', dateFieldSelector: '[name=production_date]' })}
-      <div class="quick-launch-tip">Atalho: Enter avança para o próximo campo; no campo quantidade, Enter salva.</div>
+      <div class="quick-launch-tip">Leitor USB: bipe a etiqueta no campo OP e o cursor vai direto para a quantidade. No celular, use 📷. Enter na quantidade salva.</div>
+      ${renderScannerScript()}
       ${quickPreview ? `
         <div class="quick-op-preview ${quickPreview.is_in_cell ? 'is-blocked' : (quickPreview.remaining_quantity <= 0 ? 'is-finished' : '')}">
           <strong>${escapeHtml(quickPreview.op_number)} · ${escapeHtml(quickPreview.product_name)}</strong>
@@ -8031,10 +8055,12 @@ function renderProductionForm(values = {}, error = '', notice = '', role = 'adm'
             if (event.key !== 'Enter') return;
             if (field === quantity) return;
             event.preventDefault();
+            if (field === op) { loadPreview(); if (quantity) { quantity.focus(); quantity.select(); } return; }
             const next = ordered[index + 1];
             if (next) next.focus();
           });
         });
+        if (op) op.addEventListener('scan', () => { loadPreview(); if (quantity) { quantity.focus(); quantity.select(); } });
       })();
     </script>
   `;
@@ -8045,7 +8071,7 @@ function renderProductionForm(values = {}, error = '', notice = '', role = 'adm'
         <h3>Precisa lançar mais rápido?</h3>
         <p>Use o modo sequencial para digitar OP manualmente e seguir um lançamento por vez.</p>
       </div>
-      <a class="btn" href="/productions/new?mode=quick">Abrir lançamento rápido</a>
+      <a class="btn" href="/productions/new">Abrir lançamento rápido</a>
     </section>
     <form class="panel form-grid" method="post" action="/productions" data-full-launch>
       <input type="hidden" name="mode" value="default" />
@@ -8639,6 +8665,124 @@ function formatPilotLabel(mode) {
   return mode || '-';
 }
 
+// ===================== CÓDIGO DE BARRAS (T1.2) =====================
+// Code 128 (conjunto B) gerado no servidor como SVG — sem dependências externas.
+const CODE128_PATTERNS = '212222 222122 222221 121223 121322 131222 122213 122312 132212 221213 221312 231212 112232 122132 122231 113222 123122 123221 223211 221132 221231 213212 223112 312131 311222 321122 321221 312212 322112 322211 212123 212321 232121 111323 131123 131321 112313 132113 132311 211313 231113 231311 112133 112331 132131 113123 113321 133121 313121 211331 231131 213113 213311 213131 311123 311321 331121 312113 312311 332111 314111 221411 431111 111224 111422 121124 121421 141122 141221 112214 112412 122114 122411 142112 142211 241211 221114 413111 241112 134111 111242 121142 121241 114212 124112 124211 411212 421112 421211 212141 214121 412121 111143 111341 131141 114113 114311 411113 411311 113141 114131 311141 411131 211412 211214 211232'.split(' ');
+const CODE128_STOP = '2331112';
+
+function renderCode128Svg(text, { height = 46, className = 'barcode-svg' } = {}) {
+  const value = String(text || '').trim();
+  if (!value || /[^\x20-\x7e]/.test(value)) return '';
+  const codes = [104];
+  for (const ch of value) codes.push(ch.charCodeAt(0) - 32);
+  const checksum = codes.reduce((sum, code, index) => sum + code * (index || 1), 0) % 103;
+  codes.push(checksum);
+  const widths = codes.map(code => CODE128_PATTERNS[code]).join('') + CODE128_STOP;
+  const quiet = 10;
+  let x = quiet;
+  let bars = '';
+  let isBar = true;
+  for (const w of widths) {
+    const width = Number(w);
+    if (isBar) bars += `<rect x="${x}" y="0" width="${width}" height="${height}"/>`;
+    x += width;
+    isBar = !isBar;
+  }
+  const total = x + quiet;
+  return `<svg class="${className}" viewBox="0 0 ${total} ${height}" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Código de barras ${escapeHtml(value)}" shape-rendering="crispEdges"><rect width="${total}" height="${height}" fill="#fff"/><g fill="#000">${bars}</g></svg>`;
+}
+
+// Leitura pela câmera (celular/tablet). Usa o leitor nativo do navegador (Android/Chrome)
+// e, se não existir (iPhone), carrega o ZXing. Ao ler, preenche o campo e dispara o evento "scan".
+function renderScannerScript() {
+  return `<script>
+  (() => {
+    if (window.__agilfacScanner) return;
+    window.__agilfacScanner = true;
+    let overlay, video, statusEl, stream, rafId, zxingReader, done;
+    const stop = () => {
+      done = true;
+      if (rafId) cancelAnimationFrame(rafId);
+      if (zxingReader) { try { zxingReader.reset(); } catch (_) {} zxingReader = null; }
+      if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+      if (overlay) overlay.hidden = true;
+    };
+    const ensureOverlay = () => {
+      if (overlay) return;
+      overlay = document.createElement('div');
+      overlay.className = 'scan-overlay';
+      overlay.innerHTML = '<div class="scan-box"><video playsinline muted></video><div class="scan-aim"></div><p class="scan-status">Aponte a câmera para o código de barras da etiqueta</p><button type="button" class="btn secondary">Cancelar</button></div>';
+      document.body.appendChild(overlay);
+      video = overlay.querySelector('video');
+      statusEl = overlay.querySelector('.scan-status');
+      overlay.querySelector('button').addEventListener('click', stop);
+    };
+    const deliver = (input, text) => {
+      if (done) return;
+      stop();
+      input.value = String(text || '').trim();
+      try { navigator.vibrate && navigator.vibrate(80); } catch (_) {}
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      input.dispatchEvent(new CustomEvent('scan', { bubbles: true }));
+    };
+    const loadZxing = () => new Promise((resolve, reject) => {
+      if (window.ZXing) return resolve(window.ZXing);
+      const sc = document.createElement('script');
+      sc.src = 'https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js';
+      sc.onload = () => resolve(window.ZXing);
+      sc.onerror = reject;
+      document.head.appendChild(sc);
+    });
+    const open = async input => {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { alert('Este navegador não permite usar a câmera. Digite a OP.'); return; }
+      ensureOverlay();
+      done = false;
+      overlay.hidden = false;
+      statusEl.textContent = 'Abrindo a câmera...';
+      const constraints = { video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } } };
+      try {
+        if ('BarcodeDetector' in window) {
+          const detector = new BarcodeDetector({ formats: ['code_128', 'ean_13', 'code_39', 'qr_code'] });
+          stream = await navigator.mediaDevices.getUserMedia(constraints);
+          video.srcObject = stream;
+          await video.play();
+          statusEl.textContent = 'Aponte para o código de barras';
+          const tick = async () => {
+            if (done) return;
+            try {
+              const codes = await detector.detect(video);
+              if (codes && codes.length) return deliver(input, codes[0].rawValue);
+            } catch (_) {}
+            rafId = requestAnimationFrame(tick);
+          };
+          tick();
+        } else {
+          const ZX = await loadZxing();
+          zxingReader = new ZX.BrowserMultiFormatReader();
+          statusEl.textContent = 'Aponte para o código de barras';
+          zxingReader.decodeFromConstraints(constraints, video, result => { if (result) deliver(input, result.getText()); });
+        }
+      } catch (error) {
+        stop();
+        alert('Não foi possível usar a câmera (' + (error && error.name ? error.name : 'erro') + '). Verifique a permissão do navegador.');
+      }
+    };
+    document.addEventListener('click', event => {
+      const btn = event.target.closest('[data-scan-camera]');
+      if (!btn) return;
+      event.preventDefault();
+      const input = btn.parentElement.querySelector('[data-scan-input]');
+      if (input) open(input);
+    });
+  })();
+  </script>`;
+}
+
+function renderLabelBarcode(opNumber) {
+  const svg = renderCode128Svg(opNumber);
+  return svg ? `<div class="label-barcode">${svg}<span>${escapeHtml(opNumber)}</span></div>` : '';
+}
+
 function renderLabelsShell({ title, subtitle, labels, role = 'adm', emptyMessage = 'Nenhuma etiqueta encontrada.', filtersHtml = '', batchActionsHtml = '' }) {
   const companyName = getCompanyName();
   const renderedLabels = labels.map(item => {
@@ -8671,6 +8815,7 @@ function renderLabelsShell({ title, subtitle, labels, role = 'adm', emptyMessage
           <div class="entry-label-grid-row entry-label-grid-line-4">
             <div class="entry-cell entry-cell-appliance"><span>Aparelho</span><strong>${escapeHtml(item.appliance || '-')}</strong></div>
           </div>
+          ${renderLabelBarcode(item.op_number)}
           ${item.singleLabelHref ? `<div class="label-card-actions no-print"><a class="btn secondary" href="${item.singleLabelHref}" target="_blank">Gerar individual</a></div>` : ''}
         </article>
       `;
@@ -8716,6 +8861,7 @@ function renderLabelsShell({ title, subtitle, labels, role = 'adm', emptyMessage
           <div><dt>Coleção</dt><dd>${escapeHtml(item.collection_name || '-')}</dd></div>
           ${item.shipment_date ? `<div><dt>Embarque</dt><dd>${escapeHtml(nowPt(item.shipment_date))}</dd></div>` : ''}
         </dl>
+        ${renderLabelBarcode(item.op_number)}
         ${item.singleLabelHref ? `<div class="label-card-actions no-print"><a class="btn secondary" href="${item.singleLabelHref}" target="_blank">Gerar individual</a></div>` : ''}
       </article>
     `;

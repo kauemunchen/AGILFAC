@@ -162,3 +162,21 @@ fieldset { border: 1px solid rgba(148, 163, 184, .35); border-radius: 10px; padd
 .wa-queue-head .active-count-pill { font-size: .95em; margin-left: 0; }
 .wa-queue-head [data-wa-next] { background: #25d366; border-color: #25d366; color: #fff; font-weight: 700; }
 .wa-queue-head [data-wa-next]:disabled { background: #9ca3af; border-color: #9ca3af; }
+
+/* T1.1 / T1.2 — leitura de código de barras */
+.scan-input { display: flex; gap: 6px; align-items: stretch; }
+.scan-input input { flex: 1; min-width: 0; }
+.scan-btn { padding: 6px 12px; font-size: 18px; line-height: 1; }
+.scan-overlay { position: fixed; inset: 0; z-index: 1000; background: rgba(15, 23, 42, .88); display: flex; align-items: center; justify-content: center; padding: 16px; }
+.scan-overlay[hidden] { display: none; }
+.scan-box { position: relative; width: min(520px, 100%); background: #0f172a; border-radius: 16px; padding: 12px; display: flex; flex-direction: column; gap: 10px; align-items: center; }
+.scan-box video { width: 100%; max-height: 60vh; border-radius: 12px; background: #000; object-fit: cover; }
+.scan-aim { position: absolute; left: 12%; right: 12%; top: 35%; height: 18%; border: 3px solid #22c55e; border-radius: 10px; pointer-events: none; }
+.scan-status { color: #e2e8f0; margin: 0; font-size: 14px; text-align: center; }
+.label-barcode { display: flex; flex-direction: column; align-items: center; gap: 2px; margin-top: 4px; }
+.label-barcode .barcode-svg { width: 78%; max-width: 360px; height: 46px; }
+.label-barcode span { font-family: monospace; font-size: 12px; letter-spacing: .12em; color: #111; }
+@media print {
+  .label-barcode .barcode-svg { width: 70mm; height: 13mm; }
+  .label-barcode span { font-size: 10pt; }
+}
