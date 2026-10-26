@@ -212,3 +212,37 @@ fieldset { border: 1px solid rgba(148, 163, 184, .35); border-radius: 10px; padd
 .params-form { display: flex; flex-direction: column; gap: 16px; }
 .params-form .panel h3 { margin-bottom: 12px; }
 .params-table td input { max-width: 160px; }
+
+/* T1.6 — celular (≤ 700px): sem rolagem lateral, alvos de toque de 44px, teclado numérico */
+@media (max-width: 700px) {
+  html, body { overflow-x: hidden; }
+  .content { padding: 12px 12px 28px; }
+  .page-header h2 { font-size: 22px; }
+  .page-header p { font-size: 13px; }
+  .panel, .card { padding: 12px; border-radius: 14px; }
+  input, select, textarea, .btn { min-height: 44px; font-size: 16px; }
+  .btn { padding: 10px 14px; }
+  .form-grid label, .inline-form label, .stack-form label { min-width: 100%; font-size: 13px; }
+  .actions, .header-actions { flex-wrap: wrap; }
+  .actions .btn, .quick-launch-form .actions .btn { flex: 1 1 auto; }
+  /* tabelas: rolam dentro do próprio quadro, a página não vaza */
+  .panel table, .table-wrapper table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
+  .panel table th, .panel table td { padding: 8px; font-size: 13px; }
+  /* lançamento rápido: quantidade e botão grandes */
+  .quick-launch-form [data-quick-field="quantity"], [data-hourly-field="quantity"] { font-size: 22px; font-weight: 700; }
+  .quick-launch-form button[type="submit"], [data-hourly-launch] button[type="submit"] { width: 100%; min-height: 52px; font-size: 18px; }
+  .quick-checkbox { max-width: none; flex-direction: row; align-items: center; gap: 10px; }
+  .quick-checkbox input { width: 26px; height: 26px; min-height: 0; }
+  .scan-btn { min-width: 52px; font-size: 22px; }
+  /* filtros da consulta de OPs: 2 por linha */
+  form.inline-form[action="/ops"] label { min-width: calc(50% - 6px); flex: 1 1 calc(50% - 6px); }
+  form.inline-form[action="/ops"] label:first-child { min-width: 100%; }
+  .details-grid { grid-template-columns: 1fr; gap: 2px 0; }
+  .details-grid dt { margin-top: 8px; font-size: 12px; color: #607089; }
+  .top-bar { flex-direction: row; align-items: center; }
+  .top-meta-actions .role-badge { font-size: 11px; }
+}
+@media (max-width: 1100px) {
+  .two-columns, .dashboard-columns, .closure-actions-grid, .closure-report-grid { grid-template-columns: minmax(0, 1fr) !important; }
+  .two-columns > *, .dashboard-columns > * { min-width: 0; }
+}

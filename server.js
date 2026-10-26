@@ -571,7 +571,8 @@ const mimeTypes = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
-  '.svg': 'image/svg+xml'
+  '.svg': 'image/svg+xml',
+  '.webmanifest': 'application/manifest+json; charset=utf-8'
 };
 
 
@@ -1654,6 +1655,11 @@ function renderLoginPage(values = {}, error = '', notice = '') {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Login - AgilFac</title>
     <link rel="stylesheet" href="/public/styles.css" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#0f172a" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="AgilFac" />
+    <link rel="apple-touch-icon" href="/public/icons/apple-touch-icon.png" />
   </head>
   <body>
     <main class="content" style="max-width:520px;margin:48px auto;">
@@ -2236,6 +2242,13 @@ function pageLayout({ title, content, notice = '', error = '', role = 'adm' }) {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>${escapeHtml(title)} - AgilFac</title>
     <link rel="stylesheet" href="/public/styles.css" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#0f172a" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="AgilFac" />
+    <link rel="apple-touch-icon" href="/public/icons/apple-touch-icon.png" />
+    <script>if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));</script>
   </head>
   <body class="sidebar-collapsed">
     <div class="layout app-layout">
@@ -8193,7 +8206,7 @@ function renderHourlyProductionPage(values = {}, error = '', notice = '', role =
           <span class="scan-input"><input name="op_number" required autocomplete="off" placeholder="Bipe a etiqueta ou digite a OP" value="${escapeHtml(suggestedOpNumber)}" data-hourly-field="op" data-scan-input /><button class="btn secondary scan-btn" type="button" data-scan-camera title="Ler com a câmera">📷</button></span>
         </label>
         <label>Quantidade
-          <input type="number" min="1" name="produced_quantity" required value="${escapeHtml(values.produced_quantity || '')}" data-hourly-field="quantity" />
+          <input type="number" inputmode="numeric" min="1" name="produced_quantity" required value="${escapeHtml(values.produced_quantity || '')}" data-hourly-field="quantity" />
         </label>
         <label>Observação
           <input name="notes" value="${escapeHtml(values.notes || '')}" placeholder="Opcional" />
@@ -8368,7 +8381,7 @@ function renderProductionForm(values = {}, error = '', notice = '', role = 'adm'
           <input type="number" min="0.001" step="0.001" name="used_minutes_f21" value="${escapeHtml(selectedLaunchMinutes)}" data-quick-field="minutes" />
         </label>
         <label>Quantidade produzida
-          <input type="number" min="1" name="produced_quantity" required value="${escapeHtml(values.produced_quantity || '')}" data-quick-field="quantity" />
+          <input type="number" inputmode="numeric" min="1" name="produced_quantity" required value="${escapeHtml(values.produced_quantity || '')}" data-quick-field="quantity" />
         </label>
         <div class="full">${renderPrizeFlagField(values)}</div>
         <div class="full actions">
@@ -8465,7 +8478,7 @@ function renderProductionForm(values = {}, error = '', notice = '', role = 'adm'
         </select>
       </label>
       <label>Minutos F21 do lançamento<input type="number" min="0.001" step="0.001" name="used_minutes_f21" value="${escapeHtml(values.used_minutes_f21 || '')}" /></label>
-      <label>Quantidade produzida<input type="number" min="1" name="produced_quantity" required value="${escapeHtml(values.produced_quantity || '')}" /></label>
+      <label>Quantidade produzida<input type="number" inputmode="numeric" min="1" name="produced_quantity" required value="${escapeHtml(values.produced_quantity || '')}" /></label>
       <label>Data<input type="date" name="production_date" value="${escapeHtml(selectedDate)}" /></label>
       <div class="full">${renderPrizeFlagField(values)}</div>
       <div class="full actions"><button class="btn" type="submit">Salvar lançamento</button><a class="btn secondary" href="/ops">Consultar OPs</a></div>
@@ -8655,7 +8668,7 @@ function renderOpDetailPage(id, query = {}, role = 'adm') {
                 ${getCellList().map(cell => `<option value="${cell.id}">${escapeHtml(cell.name)}</option>`).join('')}
               </select>
             </label>
-            <label>Quantidade para enviar<input type="number" name="quantity_sent" min="1" max="${Math.max(Number(op.remaining_quantity || 0) - Number(cellBalance.total_open || 0), 0)}" value="${Math.max(Math.min(Math.max(Number(op.remaining_quantity || 0) - Number(cellBalance.total_open || 0), 0), 1), 0)}" required /></label>
+            <label>Quantidade para enviar<input type="number" inputmode="numeric" name="quantity_sent" min="1" max="${Math.max(Number(op.remaining_quantity || 0) - Number(cellBalance.total_open || 0), 0)}" value="${Math.max(Math.min(Math.max(Number(op.remaining_quantity || 0) - Number(cellBalance.total_open || 0), 0), 1), 0)}" required /></label>
             <label>Data de envio<input type="date" name="sent_at" value="${escapeHtml(today())}" required /></label>
             <label class="full">Observações do envio<textarea name="sent_notes" rows="3" placeholder="Opcional"></textarea></label>
             <button class="btn" type="submit">Enviar quantidade para célula</button>
@@ -9442,7 +9455,7 @@ function renderEstornosPage(query = {}, role = 'adm') {
               <select name="employee_id" required>${employees.map(emp => `<option value="${emp.id}" ${emp.id === row.employee_id ? 'selected' : ''}>${escapeHtml(emp.registration_code)} - ${escapeHtml(emp.full_name)}</option>`).join('')}</select>
             </label>
             <label>Data<input type="date" name="production_date" value="${escapeHtml(row.production_date)}" required /></label>
-            <label>Quantidade<input type="number" min="1" name="produced_quantity" value="${row.produced_quantity}" required /></label>
+            <label>Quantidade<input type="number" inputmode="numeric" min="1" name="produced_quantity" value="${row.produced_quantity}" required /></label>
             <label>Minutos F21 do lançamento<input type="number" min="0.001" step="0.001" name="used_minutes_f21" value="${Number(row.used_minutes_f21 || 0).toFixed(3)}" required /></label>
             <label class="full">Motivo da correção<textarea name="reason" rows="2" required placeholder="Obrigatório para auditoria."></textarea></label>
             <button class="btn" type="submit">Salvar correção</button>
@@ -9779,6 +9792,12 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname.startsWith('/public/')) return serveStatic(pathname, res);
+    // T1.6 — app instalável (PWA): manifest e service worker na raiz para valer em todo o site
+    if (req.method === 'GET' && pathname === '/manifest.webmanifest') return serveStatic('/public/manifest.webmanifest', res);
+    if (req.method === 'GET' && pathname === '/sw.js') {
+      res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'no-cache', 'Service-Worker-Allowed': '/' });
+      return res.end(fs.readFileSync(path.join(PUBLIC_DIR, 'sw.js')));
+    }
 
     if (req.method === 'GET' && pathname === '/superadmin/login') {
       const session = getSuperAdminSession(req);
