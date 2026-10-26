@@ -150,3 +150,7 @@ fieldset { border: 1px solid rgba(148, 163, 184, .35); border-radius: 10px; padd
 @media (prefers-color-scheme: dark) {
   .employees-table tbody tr.is-inactive { background: transparent; }
 }
+.employees-summary { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.employees-summary .card { min-width: 180px; }
+.employees-summary .card strong { font-size: 1.8em; display: block; }
+.text-ok { color: #15803d; }

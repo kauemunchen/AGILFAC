@@ -7183,10 +7183,15 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
     return ia - ib || String(a.full_name).localeCompare(String(b.full_name), 'pt-BR', { sensitivity: 'base' });
   });
   const scheduleNames = new Map(getWorkSchedules().map(item => [item.id, formatWorkSchedule(item)]));
+  const activeCount = employees.filter(emp => describeEmployeeStatus(emp) === 'Ativo').length;
   const editingId = Number(query.edit || 0);
   const showForm = query.new === '1' || Boolean(error);
   const content = `
     <section class="page-header"><div><h2>Colaboradores</h2><p>Base de apoio para lançamentos diários.</p></div><a class="btn" href="/employees?new=1">Novo colaborador</a></section>
+    <div class="employees-summary">
+      <article class="card"><span>Ativas no momento</span><strong class="text-ok">${activeCount}</strong></article>
+      <article class="card"><span>Desligadas</span><strong>${employees.length - activeCount}</strong></article>
+    </div>
     ${showForm ? `
     <section class="panel">
       <h3>Cadastro de colaborador</h3>
