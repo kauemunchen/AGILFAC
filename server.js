@@ -652,6 +652,7 @@ function migrateDatabase(tenantDb = db) {
   ensureColumn(tenantDb, 'employees', 'termination_date', 'TEXT');
   ensureColumn(tenantDb, 'employees', 'birth_date', 'TEXT');
   ensureColumn(tenantDb, 'employees', 'job_role', 'TEXT');
+  ensureColumn(tenantDb, 'employees', 'phone', 'TEXT');
   ensureColumn(tenantDb, 'ops', 'collection_name', 'TEXT');
   ensureColumn(tenantDb, 'ops', 'pilot_mode', 'TEXT');
   ensureColumn(tenantDb, 'ops', 'appliance', 'TEXT');
@@ -4343,6 +4344,25 @@ function handleUpsertClosureAbsence(form, res) {
   redirect(res, buildClosureRedirectUrl(form, 'notice', 'Ausência registrada no fechamento.'));
 }
 
+// Telefone/WhatsApp: guarda só dígitos com DDD (ex.: 47999998888)
+function normalizePhone(value) {
+  let digits = String(value || '').replace(/\D/g, '');
+  if (digits.startsWith('55') && digits.length >= 12) digits = digits.slice(2);
+  return digits || null;
+}
+
+function formatPhone(digits) {
+  const d = String(digits || '');
+  if (d.length === 11) return `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7)}`;
+  if (d.length === 10) return `(${d.slice(0, 2)}) ${d.slice(2, 6)}-${d.slice(6)}`;
+  return d;
+}
+
+function renderWhatsAppLink(digits) {
+  if (!digits) return '-';
+  return `<a class="whatsapp-link" href="https://wa.me/55${escapeHtml(digits)}" target="_blank" rel="noopener">${escapeHtml(formatPhone(digits))}</a>`;
+}
+
 function describeEmployeeStatus(employee) {
   if (employee.termination_date) return 'Desligado';
   if (employee.start_date) return 'Ativo';
@@ -4758,6 +4778,8 @@ function validateEmployee(form) {
   if (startDate && terminationDate && terminationDate < startDate) {
     return 'A data de rescisão não pode ser anterior à data de início.';
   }
+  const phone = normalizePhone(form.phone);
+  if (phone && (phone.length < 10 || phone.length > 11)) return 'Telefone inválido: informe DDD + número (ex.: 47 99999-9999).';
   return '';
 }
 
@@ -4772,8 +4794,8 @@ function handleCreateEmployee(form, res) {
   const birthDate = form.birth_date || null;
   const jobRole = form.job_role || null;
   try {
-    db.prepare('INSERT INTO employees (registration_code, full_name, birth_date, start_date, termination_date, job_role, notes, work_schedule_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(form.registration_code.trim(), form.full_name.trim(), birthDate, startDate, terminationDate, jobRole, form.notes || null, Number(form.work_schedule_id || 0) || null);
+    db.prepare('INSERT INTO employees (registration_code, full_name, birth_date, start_date, termination_date, job_role, notes, work_schedule_id, phone) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(form.registration_code.trim(), form.full_name.trim(), birthDate, startDate, terminationDate, jobRole, form.notes || null, Number(form.work_schedule_id || 0) || null, normalizePhone(form.phone));
     redirect(res, `/employees?notice=${encodeURIComponent('Colaborador cadastrado com sucesso.')}`);
   } catch (error) {
     const msg = error.message.includes('UNIQUE')
@@ -4810,9 +4832,10 @@ function handleUpdateEmployee(employeeId, form, res) {
           job_role = ?,
           notes = ?,
           work_schedule_id = ?,
+          phone = ?,
           updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `).run(form.registration_code.trim(), form.full_name.trim(), birthDate, startDate, terminationDate, jobRole, form.notes || null, Number(form.work_schedule_id || 0) || null, employeeId);
+    `).run(form.registration_code.trim(), form.full_name.trim(), birthDate, startDate, terminationDate, jobRole, form.notes || null, Number(form.work_schedule_id || 0) || null, normalizePhone(form.phone), employeeId);
     redirect(res, `/employees?notice=${encodeURIComponent('Colaborador atualizado com sucesso.')}`);
   } catch (error) {
     const msg = error.message.includes('UNIQUE')
@@ -7194,6 +7217,7 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
       <form class="form-grid" method="post" action="/employees">
         <label>Registro<input name="registration_code" required value="${escapeHtml(values.registration_code || '')}" /></label>
         <label>Nome completo<input name="full_name" required value="${escapeHtml(values.full_name || '')}" /></label>
+        <label>Telefone (WhatsApp)<input type="tel" name="phone" inputmode="tel" placeholder="(47) 99999-9999" value="${escapeHtml(formatPhone(normalizePhone(values.phone)))}" /></label>
         <label>Data de nascimento<input type="date" name="birth_date" value="${formatDateInput(values.birth_date)}" /></label>
         <label>Data de início<input type="date" name="start_date" value="${formatDateInput(values.start_date)}" /></label>
         <label>Data de rescisão<input type="date" name="termination_date" value="${formatDateInput(values.termination_date)}" /></label>
@@ -7206,16 +7230,17 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
     </section>` : ''}
     <section class="panel">
       <table class="table-zebra employees-table">
-        <thead><tr><th>Registro</th><th>Nome</th><th>Nascimento</th><th>Início</th><th>Rescisão</th><th>Status</th><th>Função</th><th>Jornada</th><th>Observações</th><th>Ações</th></tr></thead>
+        <thead><tr><th>Registro</th><th>Nome</th><th>WhatsApp</th><th>Nascimento</th><th>Início</th><th>Rescisão</th><th>Status</th><th>Função</th><th>Jornada</th><th>Observações</th><th>Ações</th></tr></thead>
         <tbody>
           ${employees.map(emp => {
             const isEditing = editingId === emp.id;
             if (isEditing) {
               return `<tr>
-                <td colspan="10">
+                <td colspan="11">
                   <form class="form-grid" method="post" action="/employees/${emp.id}">
                     <label>Registro<input name="registration_code" required value="${escapeHtml(emp.registration_code || '')}" /></label>
                     <label>Nome completo<input name="full_name" required value="${escapeHtml(emp.full_name || '')}" /></label>
+                    <label>Telefone (WhatsApp)<input type="tel" name="phone" inputmode="tel" placeholder="(47) 99999-9999" value="${escapeHtml(formatPhone(emp.phone))}" /></label>
                     <label>Data de nascimento<input type="date" name="birth_date" value="${formatDateInput(emp.birth_date)}" /></label>
                     <label>Data de início<input type="date" name="start_date" value="${formatDateInput(emp.start_date)}" /></label>
                     <label>Data de rescisão<input type="date" name="termination_date" value="${formatDateInput(emp.termination_date)}" /></label>
@@ -7228,8 +7253,8 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
               </tr>`;
             }
             const status = describeEmployeeStatus(emp);
-            return `<tr class="${status === 'Ativo' ? 'is-active' : 'is-inactive'}"><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td>${escapeHtml(nowPt(emp.birth_date))}</td><td>${escapeHtml(nowPt(emp.start_date))}</td><td>${escapeHtml(nowPt(emp.termination_date))}</td><td><span class="status-tag ${status === 'Ativo' ? 'ok' : 'off'}">${escapeHtml(status)}</span></td><td>${escapeHtml(emp.job_role || '-')}</td><td>${escapeHtml(scheduleNames.get(emp.work_schedule_id) || 'Sem jornada')}</td><td>${escapeHtml(emp.notes || '-')}</td><td><a href="/employees?edit=${emp.id}">Editar</a></td></tr>`;
-          }).join('') || '<tr><td colspan="10">Nenhum colaborador cadastrado.</td></tr>'}
+            return `<tr class="${status === 'Ativo' ? 'is-active' : 'is-inactive'}"><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td>${renderWhatsAppLink(emp.phone)}</td><td>${escapeHtml(nowPt(emp.birth_date))}</td><td>${escapeHtml(nowPt(emp.start_date))}</td><td>${escapeHtml(nowPt(emp.termination_date))}</td><td><span class="status-tag ${status === 'Ativo' ? 'ok' : 'off'}">${escapeHtml(status)}</span></td><td>${escapeHtml(emp.job_role || '-')}</td><td>${escapeHtml(scheduleNames.get(emp.work_schedule_id) || 'Sem jornada')}</td><td>${escapeHtml(emp.notes || '-')}</td><td><a href="/employees?edit=${emp.id}">Editar</a></td></tr>`;
+          }).join('') || '<tr><td colspan="11">Nenhum colaborador cadastrado.</td></tr>'}
         </tbody>
       </table>
     </section>
