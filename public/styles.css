@@ -143,3 +143,10 @@ fieldset { border: 1px solid rgba(148, 163, 184, .35); border-radius: 10px; padd
   .table-zebra tbody tr:nth-child(odd) { background: rgba(148, 163, 184, .12); }
   .table-zebra tbody tr:nth-child(even) { background: transparent; }
 }
+/* Desligadas sempre em fundo branco; listrado só nas ativas */
+.employees-table tbody tr.is-inactive,
+.employees-table tbody tr.is-inactive:nth-child(odd),
+.employees-table tbody tr.is-inactive:nth-child(even) { background: #ffffff; }
+@media (prefers-color-scheme: dark) {
+  .employees-table tbody tr.is-inactive { background: transparent; }
+}
