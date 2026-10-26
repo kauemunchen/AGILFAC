@@ -625,7 +625,9 @@ function ensureTenantLegacyUsersCompat(tenantDb) {
 function upgradeTenantUserRoleConstraint(tenantDb) {
   const row = tenantDb.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'").get();
   const createSql = String(row?.sql || '');
-  if (!createSql || createSql.includes("'lancador'")) {
+  // A tabela "users" do banco da empresa é legada (o login usa company_users no banco mestre).
+  // Não é recriada para o perfil Lançador: recriar quebraria as referências antigas (users_role_legacy).
+  if (!createSql || createSql.includes("'apontamento'")) {
     ensureTenantLegacyUsersCompat(tenantDb);
     return;
   }
