@@ -2487,7 +2487,7 @@ function getEmployeeDailyResultRows(rangeStart, rangeEnd, employeeId = '') {
   const productionMap = new Map(productionRows.map(row => [`${row.employee_id}:${row.production_date}`, row]));
   const rows = [];
   for (const employee of filteredEmployees) {
-    const businessDays = getEmployeeBusinessDaysInRange(employee, rangeStart, rangeEnd);
+    const businessDays = getEmployeeBaseDays(employee, rangeStart, rangeEnd);
     for (const day of businessDays) {
       const item = productionMap.get(`${employee.id}:${day}`);
       const producedMinutes = Number(item?.produced_minutes || 0);
@@ -3189,10 +3189,38 @@ function getCountedProductionByEmployee(rangeStart, rangeEnd, employees) {
   return result;
 }
 
+// T1.5 — Ausências que tiram o dia da base de 528 min (decisão do dono, 26/10/2026).
+// Falta e "outro" continuam na base. Configurável por empresa em app_settings.
+const DEFAULT_BASE_EXCLUDED_ABSENCES = 'atestado,ferias,folga,afastamento';
+
+function getBaseExcludedAbsenceTypes() {
+  return new Set(String(getAppSetting('absence_types_excluded_from_base', DEFAULT_BASE_EXCLUDED_ABSENCES) || '')
+    .split(',').map(item => item.trim()).filter(Boolean));
+}
+
+function getExcludedAbsenceDates(employeeId, rangeStart, rangeEnd) {
+  const types = [...getBaseExcludedAbsenceTypes()];
+  if (!types.length) return new Set();
+  const rows = db.prepare(`
+    SELECT absence_date FROM employee_absences
+    WHERE employee_id = ? AND absence_date BETWEEN ? AND ? AND absence_type IN (${types.map(() => '?').join(',')})
+  `).all(employeeId, rangeStart, rangeEnd, ...types);
+  return new Set(rows.map(row => row.absence_date));
+}
+
+// Dias que entram na base: dias úteis do período ativo, menos ausências justificadas
+function getEmployeeBaseDays(employee, rangeStart, rangeEnd) {
+  if (rangeEnd < rangeStart) return [];
+  const businessDays = getEmployeeBusinessDaysInRange(employee, rangeStart, rangeEnd);
+  if (!businessDays.length) return businessDays;
+  const excluded = getExcludedAbsenceDates(employee.id, rangeStart, rangeEnd);
+  return excluded.size ? businessDays.filter(day => !excluded.has(day)) : businessDays;
+}
+
 // Eficiência de uma colaboradora. cutoff informado = "até o corte"; vazio = período cheio.
 function calculateEmployeeEfficiency(employee, producedMinutes, rangeStart, rangeEnd, cutoff = '') {
   const end = cutoff && cutoff < rangeEnd ? cutoff : rangeEnd;
-  const businessDays = end >= rangeStart ? getEmployeeBusinessDaysInRange(employee, rangeStart, end) : [];
+  const businessDays = end >= rangeStart ? getEmployeeBaseDays(employee, rangeStart, end) : [];
   const availableMinutes = round2(businessDays.length * AVAILABLE_MINUTES_DAY);
   return {
     business_days: businessDays.length,
@@ -3252,6 +3280,7 @@ function getMonthlyClosureData(baseDate = today(), period = 'month', employeeId 
     GROUP BY p.employee_id, p.production_date
   `).all(range.start, range.end);
   const countedMap = getCountedProductionByEmployee(range.start, range.end, employees);
+  const baseExcludedTypes = getBaseExcludedAbsenceTypes();
 
   const closureRows = db.prepare(`
     SELECT employee_id, work_date, status_type, justification, notes, updated_at
@@ -3321,6 +3350,7 @@ function getMonthlyClosureData(baseDate = today(), period = 'month', employeeId 
           pending: 0,
           resolved: 0,
           absences: 0,
+          base_excluded: 0,
           produced_quantity: 0,
           normal_minutes: 0,
           extra_minutes: 0,
@@ -3329,6 +3359,7 @@ function getMonthlyClosureData(baseDate = today(), period = 'month', employeeId 
       }
       const daily = dailyMap.get(day);
       daily.employees_active += 1;
+      if (item.absence_type && baseExcludedTypes.has(item.absence_type)) daily.base_excluded += 1;
       daily.produced_quantity += item.produced_quantity;
       daily.normal_minutes = round2(daily.normal_minutes + item.normal_minutes);
       daily.extra_minutes = round2(daily.extra_minutes + item.extra_minutes);
@@ -3404,7 +3435,7 @@ function getMonthlyClosureData(baseDate = today(), period = 'month', employeeId 
   pendingItems.sort((a, b) => `${a.work_date}-${a.full_name}`.localeCompare(`${b.work_date}-${b.full_name}`));
 
   const dailyRows = Array.from(dailyMap.values()).sort((a, b) => a.work_date.localeCompare(b.work_date)).map(item => {
-    const availableMinutes = round2(item.employees_active * AVAILABLE_MINUTES_DAY);
+    const availableMinutes = round2(Math.max(item.employees_active - item.base_excluded, 0) * AVAILABLE_MINUTES_DAY);
     return {
       ...item,
       available_minutes: availableMinutes,
@@ -3595,8 +3626,8 @@ function getDailyTrackingData(baseDate = today(), period = 'month', employeeId =
     const normalMinutes = round2(Number(accumulated?.normal_minutes || 0));
     const extraMinutes = round2(Number(accumulated?.extra_minutes || 0));
     const producedQuantity = Number(accumulated?.qty || 0);
-    const elapsedAvailableMinutes = round2(businessDaysElapsed.length * AVAILABLE_MINUTES_DAY);
-    const totalAvailableMinutes = round2(businessDaysTotal.length * AVAILABLE_MINUTES_DAY);
+    const elapsedAvailableMinutes = round2((progressEnd >= range.start ? getEmployeeBaseDays(employee, range.start, progressEnd).length : 0) * AVAILABLE_MINUTES_DAY);
+    const totalAvailableMinutes = round2(getEmployeeBaseDays(employee, range.start, range.end).length * AVAILABLE_MINUTES_DAY);
     const currentTargetMinutes = round2(elapsedAvailableMinutes * 0.6);
     const currentPercent = elapsedAvailableMinutes > 0 ? round2((producedMinutes / elapsedAvailableMinutes) * 100) : 0;
     const fullPeriodPercent = totalAvailableMinutes > 0 ? round2((producedMinutes / totalAvailableMinutes) * 100) : 0;
@@ -3951,7 +3982,7 @@ function getProductionPrizeData(baseDate = today(), period = 'month', employeeId
     const normalMinutes = round2(Number(productionMap.get(employee.id)?.normal_minutes || 0));
     const producedExtraMinutes = round2(Number(productionMap.get(employee.id)?.extra_minutes || 0));
     const producedMinutes = round2(Number(productionMap.get(employee.id)?.minutes || 0));
-    const availableMinutes = round2(businessDays.length * AVAILABLE_MINUTES_DAY);
+    const availableMinutes = round2(getEmployeeBaseDays(employee, range.start, range.end).length * AVAILABLE_MINUTES_DAY);
     const targetMinutes60 = round2(availableMinutes * 0.6);
     const efficiencyPercent = availableMinutes > 0 ? round2((producedMinutes / availableMinutes) * 100) : 0;
     const productionPrize = getProductionPrizeTier(efficiencyPercent);
