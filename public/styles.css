@@ -180,3 +180,30 @@ fieldset { border: 1px solid rgba(148, 163, 184, .35); border-radius: 10px; padd
   .label-barcode .barcode-svg { width: 70mm; height: 13mm; }
   .label-barcode span { font-size: 10pt; }
 }
+
+/* T1.3 — data de entrega */
+.delivery-tag { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 700; white-space: nowrap; text-decoration: none; }
+.delivery-tag.late { background: #fee2e2; color: #b91c1c; }
+.delivery-tag.soon { background: #ffedd5; color: #c2410c; }
+.deadline-alerts { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.deadline-alerts .delivery-tag { font-size: 13px; padding: 6px 12px; }
+.delivery-form { margin-top: 6px; gap: 6px; }
+.delivery-form input { max-width: 170px; }
+.entry-label-grid-line-4.has-delivery { grid-template-columns: 2fr 1fr; }
+@media print {
+  .label-card-entry-layout-v3 .entry-label-grid-line-4.has-delivery { grid-template-columns: 2fr 1fr !important; }
+  .label-card-entry-layout-v3 .entry-cell-delivery strong { font-size: 20px !important; }
+}
+
+/* Etiqueta de embarque na impressão: nunca usar o layout de celular */
+@media print {
+  .label-card .label-highlights { display: grid !important; grid-template-columns: .8fr 1.2fr 1.2fr !important; gap: 6px !important; }
+  .label-card .label-highlight { min-height: 0 !important; padding: 6px 9px !important; }
+  .label-card .label-highlight span { margin-bottom: 2px !important; }
+  .label-card .label-fields { display: grid !important; grid-template-columns: repeat(3, minmax(0, 1fr)) !important; gap: 5px 6px !important; }
+  .label-card .label-fields div { padding: 5px 8px !important; }
+  .label-card .label-product-block { padding: 6px 10px !important; }
+  .label-card { gap: 7px !important; }
+  .label-card-head { padding-bottom: 6px !important; }
+  .label-card .label-barcode { margin-top: auto !important; }
+}

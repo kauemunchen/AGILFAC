@@ -654,6 +654,7 @@ function migrateDatabase(tenantDb = db) {
   ensureColumn(tenantDb, 'employees', 'job_role', 'TEXT');
   ensureColumn(tenantDb, 'employees', 'phone', 'TEXT');
   ensureColumn(tenantDb, 'ops', 'collection_name', 'TEXT');
+  ensureColumn(tenantDb, 'ops', 'delivery_date', 'TEXT');
   ensureColumn(tenantDb, 'ops', 'pilot_mode', 'TEXT');
   ensureColumn(tenantDb, 'ops', 'appliance', 'TEXT');
   ensureColumn(tenantDb, 'ops', 'is_billed', 'INTEGER NOT NULL DEFAULT 0');
@@ -4488,6 +4489,39 @@ function getOpQuickPreview(opNumber) {
   };
 }
 
+// ===================== DATA DE ENTREGA (T1.3) =====================
+function addDaysIso(isoDate, days) {
+  const d = new Date(`${isoDate}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+function isOpOpenForDelivery(op) {
+  return !op.shipped_at && op.status_color !== 'vermelho' && !isReturnedWithoutProductionLifecycle(op.lifecycle_type);
+}
+
+// Badge: atrasada (vermelho), vence em até 3 dias (laranja), data normal
+function deliveryBadge(op) {
+  if (!op.delivery_date) return '<span class="hint">-</span>';
+  const label = escapeHtml(formatDatePtBr(op.delivery_date));
+  if (!isOpOpenForDelivery(op)) return label;
+  const todayIso = today();
+  if (op.delivery_date < todayIso) return `<span class="delivery-tag late" title="Atrasada">${label} · atrasada</span>`;
+  const days = Math.round((new Date(`${op.delivery_date}T00:00:00Z`) - new Date(`${todayIso}T00:00:00Z`)) / 86400000);
+  if (days === 0) return `<span class="delivery-tag soon">${label} · hoje</span>`;
+  if (days <= 3) return `<span class="delivery-tag soon">${label} · ${days} dia${days > 1 ? 's' : ''}</span>`;
+  return label;
+}
+
+function handleUpdateOpDeliveryDate(opId, form, res, role) {
+  if (!canAccessCadastros(role)) return requireAdmin(null, res, role);
+  const value = String(form.delivery_date || '').trim();
+  if (value && !/^\d{4}-\d{2}-\d{2}$/.test(value)) return redirect(res, `/ops/${opId}?error=${encodeURIComponent('Data de entrega inválida.')}`);
+  const result = db.prepare('UPDATE ops SET delivery_date = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(value || null, opId);
+  if (!result.changes) return redirect(res, `/ops?error=${encodeURIComponent('OP não encontrada.')}`);
+  redirect(res, `/ops/${opId}?notice=${encodeURIComponent(value ? 'Data de entrega atualizada.' : 'Data de entrega removida.')}`);
+}
+
 function getOpList(filters = {}) {
   let sql = `
     SELECT
@@ -4508,6 +4542,7 @@ function getOpList(filters = {}) {
       o.status_color,
       o.lifecycle_type,
       o.entry_date,
+      o.delivery_date,
       o.shipped_at,
       o.is_billed,
       o.billed_at,
@@ -4579,8 +4614,21 @@ function getOpList(filters = {}) {
     where.push('o.shipped_at IS NULL');
     where.push("COALESCE(o.lifecycle_type, 'normal') IN ('normal', 'nao_industrializada', 'devolvida_sem_producao')");
   }
+  // Prazo de entrega (só OPs ainda não embarcadas e não devolvidas)
+  const openForDelivery = "o.shipped_at IS NULL AND o.status_color <> 'vermelho' AND COALESCE(o.lifecycle_type, 'normal') = 'normal'";
+  if (filters.deadline === 'atrasadas') {
+    where.push(`${openForDelivery} AND o.delivery_date IS NOT NULL AND o.delivery_date < ?`);
+    params.push(today());
+  } else if (filters.deadline === 'vencem3') {
+    where.push(`${openForDelivery} AND o.delivery_date BETWEEN ? AND ?`);
+    params.push(today(), addDaysIso(today(), 3));
+  } else if (filters.deadline === 'sem_data') {
+    where.push(`${openForDelivery} AND (o.delivery_date IS NULL OR o.delivery_date = '')`);
+  }
   if (where.length) sql += ` AND ${where.join(' AND ')}`;
-  sql += ' GROUP BY o.id ORDER BY o.entry_date DESC, o.created_at DESC';
+  sql += filters.deadline === 'atrasadas' || filters.deadline === 'vencem3' || filters.sort === 'entrega'
+    ? " GROUP BY o.id ORDER BY CASE WHEN o.delivery_date IS NULL OR o.delivery_date = '' THEN 1 ELSE 0 END, o.delivery_date ASC, o.entry_date DESC"
+    : ' GROUP BY o.id ORDER BY o.entry_date DESC, o.created_at DESC';
   return db.prepare(sql).all(...params).map(op => ({ ...op, ...calculateOpShipmentMinutes(op) }));
 }
 
@@ -4809,8 +4857,8 @@ function handleCreateOp(form, res) {
     db.prepare(`
       INSERT INTO ops (
         barcode, op_number, product_name, op_type, brand, collection_name, pilot_mode, appliance, total_pieces,
-        minutes_f21, minutes_f22, f23_mode, minutes_f23, entry_date, notes
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        minutes_f21, minutes_f22, f23_mode, minutes_f23, entry_date, notes, delivery_date
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       form.barcode || null,
       form.op_number.trim(),
@@ -4826,7 +4874,8 @@ function handleCreateOp(form, res) {
       form.f23_mode || 'externo',
       form.f23_mode === 'interno' ? Number(form.minutes_f23) : null,
       form.entry_date || today(),
-      form.notes || null
+      form.notes || null,
+      /^\d{4}-\d{2}-\d{2}$/.test(String(form.delivery_date || '')) ? form.delivery_date : null
     );
     const id = db.prepare('SELECT last_insert_rowid() AS id').get().id;
     recalculateOpStatus(id);
@@ -5974,6 +6023,7 @@ function renderOpForm(values = {}, error = '', role = 'adm') {
       </label>
       <label>Minutos F23<input type="number" min="0" step="0.001" name="minutes_f23" value="${escapeHtml(values.minutes_f23 || '')}" /></label>
       <label>Data de entrada<input type="date" name="entry_date" value="${escapeHtml(values.entry_date || today())}" /></label>
+      <label>Data de entrega<input type="date" name="delivery_date" value="${escapeHtml(values.delivery_date || '')}" /></label>
       <label class="full">Observações<textarea name="notes" rows="4">${escapeHtml(values.notes || '')}</textarea></label>
       <div class="full actions"><button class="btn" type="submit">Salvar OP</button>${isAdminRole(role) ? '<a class="btn secondary" href="/cadastros">Abrir cadastros</a>' : ''}<a class="btn secondary" href="/ops">Ver consulta de OPs</a></div>
       <p class="hint full">Bloqueio ativo: não é permitido cadastrar OP com marca fora da base de Marcas. Cadastre antes em <strong>Cadastros</strong>.</p>
@@ -8124,14 +8174,27 @@ function renderOpListPage(query = {}, role = 'adm') {
     opType: query.op_type || '',
     brand: query.brand || '',
     collectionName: query.collection_name || '',
-    billingStatus: query.billing_status || ''
+    billingStatus: query.billing_status || '',
+    deadline: query.deadline || '',
+    sort: query.sort || ''
   };
   const rows = getOpList(filters);
+  const deadlineCounts = db.prepare(`
+    SELECT
+      SUM(CASE WHEN delivery_date IS NOT NULL AND delivery_date <> '' AND delivery_date < ? THEN 1 ELSE 0 END) AS late,
+      SUM(CASE WHEN delivery_date BETWEEN ? AND ? THEN 1 ELSE 0 END) AS soon
+    FROM ops
+    WHERE is_reversed = 0 AND shipped_at IS NULL AND status_color <> 'vermelho' AND COALESCE(lifecycle_type, 'normal') = 'normal'
+  `).get(today(), today(), addDaysIso(today(), 3));
   const content = `
     <section class="page-header">
       <div><h2>Consulta de OPs</h2><p>Busca com status, saldo e acesso ao histórico detalhado.</p></div>
       <a class="btn" href="/ops/new">Nova OP</a>
     </section>
+    ${Number(deadlineCounts.late || 0) || Number(deadlineCounts.soon || 0) ? `<div class="deadline-alerts">
+      ${Number(deadlineCounts.late || 0) ? `<a class="delivery-tag late" href="/ops?deadline=atrasadas">${deadlineCounts.late} OP(s) atrasada(s)</a>` : ''}
+      ${Number(deadlineCounts.soon || 0) ? `<a class="delivery-tag soon" href="/ops?deadline=vencem3">${deadlineCounts.soon} vencem em até 3 dias</a>` : ''}
+    </div>` : ''}
     <form class="panel inline-form" method="get" action="/ops">
       <label>Buscar<input name="q" value="${escapeHtml(filters.q)}" placeholder="OP, código de barras, produto ou marca" /></label>
       <label>Status
@@ -8163,6 +8226,14 @@ function renderOpListPage(query = {}, role = 'adm') {
           ${availableCollections.map(item => `<option value="${escapeHtml(item)}" ${filters.collectionName === item ? 'selected' : ''}>${escapeHtml(item)}</option>`).join('')}
         </select>
       </label>
+      <label>Prazo de entrega
+        <select name="deadline">
+          <option value="">Todos</option>
+          <option value="atrasadas" ${filters.deadline === 'atrasadas' ? 'selected' : ''}>Atrasadas</option>
+          <option value="vencem3" ${filters.deadline === 'vencem3' ? 'selected' : ''}>Vencem em até 3 dias</option>
+          <option value="sem_data" ${filters.deadline === 'sem_data' ? 'selected' : ''}>Sem data</option>
+        </select>
+      </label>
       <label>Cobrança
         <select name="billing_status">
           <option value="">Todas</option>
@@ -8176,9 +8247,9 @@ function renderOpListPage(query = {}, role = 'adm') {
     </form>
     <section class="panel">
       <table>
-        <thead><tr><th>OP</th><th>Produto</th><th>Tipo</th><th>Marca</th><th>Coleção</th><th>Total</th><th>Produzido</th><th>Saldo</th><th>Embarque</th><th>Status</th><th>Cobrança</th><th>Ações</th></tr></thead>
+        <thead><tr><th>OP</th><th>Produto</th><th>Tipo</th><th>Marca</th><th>Coleção</th><th>Total</th><th>Produzido</th><th>Saldo</th><th><a href="/ops?${new URLSearchParams({ ...query, sort: 'entrega' }).toString()}" title="Ordenar por data de entrega">Entrega ↑</a></th><th>Embarque</th><th>Status</th><th>Cobrança</th><th>Ações</th></tr></thead>
         <tbody>
-          ${rows.map(op => `<tr><td>${escapeHtml(op.op_number)}</td><td>${escapeHtml(op.product_name)}</td><td>${escapeHtml(op.op_type)}</td><td>${escapeHtml(op.brand || '-')}</td><td>${escapeHtml(op.collection_name || '-')}</td><td>${op.total_pieces}</td><td>${op.produced_quantity}</td><td>${op.remaining_quantity}</td><td>${escapeHtml(nowPt(op.shipped_at))}</td><td>${statusBadge(op.status_color)} ${lifecycleBadge(op.lifecycle_type)}</td><td>${billingStatusLabel(op)}</td><td><a href="/ops/${op.id}">Detalhar</a></td></tr>`).join('') || '<tr><td colspan="12">Nenhuma OP encontrada.</td></tr>'}
+          ${rows.map(op => `<tr><td>${escapeHtml(op.op_number)}</td><td>${escapeHtml(op.product_name)}</td><td>${escapeHtml(op.op_type)}</td><td>${escapeHtml(op.brand || '-')}</td><td>${escapeHtml(op.collection_name || '-')}</td><td>${op.total_pieces}</td><td>${op.produced_quantity}</td><td>${op.remaining_quantity}</td><td>${deliveryBadge(op)}</td><td>${escapeHtml(nowPt(op.shipped_at))}</td><td>${statusBadge(op.status_color)} ${lifecycleBadge(op.lifecycle_type)}</td><td>${billingStatusLabel(op)}</td><td><a href="/ops/${op.id}">Detalhar</a></td></tr>`).join('') || '<tr><td colspan="13">Nenhuma OP encontrada.</td></tr>'}
         </tbody>
       </table>
     </section>
@@ -8225,6 +8296,7 @@ function renderOpDetailPage(id, query = {}, role = 'adm') {
           <dt>Piloto</dt><dd>${escapeHtml(op.pilot_mode || '-')}</dd>
           <dt>Aparelho</dt><dd>${escapeHtml(op.appliance || '-')}</dd>
           <dt>Data de entrada</dt><dd>${escapeHtml(nowPt(op.entry_date))}</dd>
+          <dt>Data de entrega</dt><dd>${deliveryBadge(op)}${canAccessCadastros(role) ? `<form class="inline-form delivery-form" method="post" action="/ops/${op.id}/delivery-date"><input type="date" name="delivery_date" value="${escapeHtml(op.delivery_date || '')}" /><button class="btn secondary" type="submit">Salvar</button></form>` : ''}</dd>
           <dt>Data de saída</dt><dd>${escapeHtml(nowPt(op.shipped_at))}</dd>
           <dt>Cobrança</dt><dd>${billingStatusText(op)}</dd>
           <dt>Obs. cobrança</dt><dd>${escapeHtml(op.billing_notes || '-')}</dd>
@@ -8812,8 +8884,9 @@ function renderLabelsShell({ title, subtitle, labels, role = 'adm', emptyMessage
             <div class="entry-cell entry-cell-time"><span>T. Pós costura</span><strong>${formatLabelTime(item.minutes_f23, item.total_pieces, item.f23_mode === 'interno')}</strong></div>
           </div>
 
-          <div class="entry-label-grid-row entry-label-grid-line-4">
+          <div class="entry-label-grid-row entry-label-grid-line-4 ${item.delivery_date ? 'has-delivery' : ''}">
             <div class="entry-cell entry-cell-appliance"><span>Aparelho</span><strong>${escapeHtml(item.appliance || '-')}</strong></div>
+            ${item.delivery_date ? `<div class="entry-cell entry-cell-delivery"><span>Entrega</span><strong>${escapeHtml(formatDatePtBr(item.delivery_date))}</strong></div>` : ''}
           </div>
           ${renderLabelBarcode(item.op_number)}
           ${item.singleLabelHref ? `<div class="label-card-actions no-print"><a class="btn secondary" href="${item.singleLabelHref}" target="_blank">Gerar individual</a></div>` : ''}
@@ -9496,6 +9569,9 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'GET' && pathname === '/employees/new') return redirect(res, '/employees');
       if (req.method === 'GET' && pathname === '/employees/whatsapp-resultados') return sendHtml(res, renderEmployeeWhatsAppQueuePage(role));
       if (req.method === 'POST' && pathname === '/employees') return handleCreateEmployee(await parseBody(req), res);
+
+      const opDeliveryMatch = pathname.match(/^\/ops\/(\d+)\/delivery-date$/);
+      if (req.method === 'POST' && opDeliveryMatch) return handleUpdateOpDeliveryDate(Number(opDeliveryMatch[1]), await parseBody(req), res, role);
 
       const employeeUpdateMatch = pathname.match(/^\/employees\/(\d+)$/);
       if (req.method === 'POST' && employeeUpdateMatch) return handleUpdateEmployee(Number(employeeUpdateMatch[1]), await parseBody(req), res);
