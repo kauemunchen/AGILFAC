@@ -23,7 +23,7 @@ const LEGACY_DB_PATH = path.join(DATA_DIR, 'app.sqlite');
 const MASTER_DB_PATH = path.join(DATA_DIR, 'master.sqlite');
 const SCHEMA_PATH = path.join(ROOT, 'database', 'schema.sql');
 const MASTER_SCHEMA_PATH = path.join(ROOT, 'database', 'master-schema.sql');
-const AVAILABLE_MINUTES_DAY = 528;
+const AVAILABLE_MINUTES_DAY = 528; // padrão; o valor efetivo vem de Parâmetros (baseMinutesDay())
 const SESSION_COOKIE = 'agilfac_session';
 const SUPERADMIN_SESSION_COOKIE = 'agilfac_superadmin_session';
 const SESSION_TTL_DAYS = 7;
@@ -2030,6 +2030,54 @@ function validateCollectionName(name) {
   return '';
 }
 
+// ===================== PARÂMETROS POR EMPRESA =====================
+// Cada empresa ajusta suas regras em Parâmetros. Valores padrão = regras originais do AgilFac.
+const PARAM_DEFAULTS = {
+  base_minutes_day: '528',
+  target_percent: '60',
+  period_start_day: '26',
+  workdays: '1,2,3,4,5',
+  prize_tier1_percent: '40', prize_tier1_value: '30',
+  prize_tier2_percent: '45', prize_tier2_value: '60',
+  prize_tier3_percent: '50', prize_tier3_value: '90',
+  prize_target_value: '400',
+  prize_extra_block_minutes: '100',
+  prize_extra_value: '10',
+  absence_types_excluded_from_base: 'atestado,ferias,folga,afastamento',
+  holiday_dates: '',
+  holiday_recurring_mmdd: '',
+  worked_holiday_dates: ''
+};
+const paramsCache = new WeakMap();
+
+function getParams() {
+  const dbKey = getActiveDb();
+  const cached = paramsCache.get(dbKey);
+  if (cached && Date.now() - cached.at < 60000) return cached.values;
+  const rows = db.prepare(`SELECT key, value FROM app_settings WHERE key IN (${Object.keys(PARAM_DEFAULTS).map(() => '?').join(',')})`).all(...Object.keys(PARAM_DEFAULTS));
+  const values = { ...PARAM_DEFAULTS };
+  for (const row of rows) if (row.value !== null && row.value !== undefined) values[row.key] = String(row.value);
+  paramsCache.set(dbKey, { at: Date.now(), values });
+  return values;
+}
+
+function invalidateParams() {
+  paramsCache.delete(getActiveDb());
+}
+
+function numParam(key) {
+  const n = Number(String(getParams()[key]).replace(',', '.'));
+  return Number.isFinite(n) ? n : Number(PARAM_DEFAULTS[key]);
+}
+
+function baseMinutesDay() { return numParam('base_minutes_day'); }
+function targetPercent() { return numParam('target_percent'); }
+function targetRatio() { return targetPercent() / 100; }
+function tp() { return fmtNum(targetPercent(), Number.isInteger(targetPercent()) ? 0 : 2); }
+function workdaySet() { return new Set(String(getParams().workdays).split(',').map(Number).filter(d => d >= 0 && d <= 6)); }
+function periodStartDay() { return Math.min(Math.max(Math.round(numParam('period_start_day')), 1), 28); }
+function periodLabel() { const s = periodStartDay(); return s === 1 ? 'mês civil' : `${s} → ${s - 1}`; }
+
 function getAppSetting(key, fallback = '') {
   const row = db.prepare('SELECT value FROM app_settings WHERE key = ? LIMIT 1').get(String(key || '').trim());
   return String(row?.value || fallback || '').trim();
@@ -2048,6 +2096,7 @@ function getHolidayDateSet() {
 }
 
 function setAppSetting(key, value) {
+  invalidateParams();
   db.prepare(`
     INSERT INTO app_settings (key, value, updated_at)
     VALUES (?, ?, CURRENT_TIMESTAMP)
@@ -2146,6 +2195,7 @@ function pageLayout({ title, content, notice = '', error = '', role = 'adm' }) {
     navItems.push({ href: '/cadastros', label: 'Cadastros', icon: '⚙️', active: title.startsWith('Cadastros') });
   }
   if (isAdminRole(role)) {
+    navItems.push({ href: '/parametros', label: 'Parâmetros', icon: '🎛️', active: title === 'Parâmetros' });
     navItems.push({ href: '/admin/access', label: 'Acessos', icon: '🔐', active: title.startsWith('Usuários e acessos') });
     navItems.push({ href: '/estornos', label: 'Estornos', icon: '↩️', active: title.startsWith('Estornos') });
   }
@@ -2498,8 +2548,8 @@ function getEmployeeDailyResultRows(rangeStart, rangeEnd, employeeId = '') {
         production_date: day,
         produced_quantity: Number(item?.produced_quantity || 0),
         produced_minutes: producedMinutes,
-        available_minutes: AVAILABLE_MINUTES_DAY,
-        result_percent: round2((producedMinutes / AVAILABLE_MINUTES_DAY) * 100)
+        available_minutes: baseMinutesDay(),
+        result_percent: round2((producedMinutes / baseMinutesDay()) * 100)
       });
     }
   }
@@ -2522,12 +2572,13 @@ function getPeriodRange(period, refDate) {
     const d = date.getUTCDate();
     let start;
     let end;
-    if (d >= 26) {
-      start = new Date(Date.UTC(y, m, 26));
-      end = new Date(Date.UTC(y, m + 1, 25));
+    const startDay = periodStartDay();
+    if (d >= startDay) {
+      start = new Date(Date.UTC(y, m, startDay));
+      end = new Date(Date.UTC(y, m + 1, startDay - 1));
     } else {
-      start = new Date(Date.UTC(y, m - 1, 26));
-      end = new Date(Date.UTC(y, m, 25));
+      start = new Date(Date.UTC(y, m - 1, startDay));
+      end = new Date(Date.UTC(y, m, startDay - 1));
     }
     return { label: 'Mês operacional', start: iso(start), end: iso(end) };
   }
@@ -3109,7 +3160,7 @@ function isBusinessDay(dateValue) {
   const isoDate = typeof dateValue === 'string' ? dateValue : iso(date);
   const holidays = getHolidayDateSet();
   const day = date.getUTCDay();
-  return day >= 1 && day <= 5 && !holidays.has(isoDate);
+  return workdaySet().has(day) && !holidays.has(isoDate);
 }
 
 function getPreviousBusinessDay(referenceDate) {
@@ -3194,7 +3245,7 @@ function getCountedProductionByEmployee(rangeStart, rangeEnd, employees) {
 const DEFAULT_BASE_EXCLUDED_ABSENCES = 'atestado,ferias,folga,afastamento';
 
 function getBaseExcludedAbsenceTypes() {
-  return new Set(String(getAppSetting('absence_types_excluded_from_base', DEFAULT_BASE_EXCLUDED_ABSENCES) || '')
+  return new Set(String(getParams().absence_types_excluded_from_base || '')
     .split(',').map(item => item.trim()).filter(Boolean));
 }
 
@@ -3221,7 +3272,7 @@ function getEmployeeBaseDays(employee, rangeStart, rangeEnd) {
 function calculateEmployeeEfficiency(employee, producedMinutes, rangeStart, rangeEnd, cutoff = '') {
   const end = cutoff && cutoff < rangeEnd ? cutoff : rangeEnd;
   const businessDays = end >= rangeStart ? getEmployeeBaseDays(employee, rangeStart, end) : [];
-  const availableMinutes = round2(businessDays.length * AVAILABLE_MINUTES_DAY);
+  const availableMinutes = round2(businessDays.length * baseMinutesDay());
   return {
     business_days: businessDays.length,
     available_minutes: availableMinutes,
@@ -3435,7 +3486,7 @@ function getMonthlyClosureData(baseDate = today(), period = 'month', employeeId 
   pendingItems.sort((a, b) => `${a.work_date}-${a.full_name}`.localeCompare(`${b.work_date}-${b.full_name}`));
 
   const dailyRows = Array.from(dailyMap.values()).sort((a, b) => a.work_date.localeCompare(b.work_date)).map(item => {
-    const availableMinutes = round2(Math.max(item.employees_active - item.base_excluded, 0) * AVAILABLE_MINUTES_DAY);
+    const availableMinutes = round2(Math.max(item.employees_active - item.base_excluded, 0) * baseMinutesDay());
     return {
       ...item,
       available_minutes: availableMinutes,
@@ -3560,9 +3611,9 @@ function renderClosureCards(data) {
 }
 
 function getProductionPrizeTier(efficiencyPercent) {
-  if (efficiencyPercent >= 50) return 90;
-  if (efficiencyPercent >= 45) return 60;
-  if (efficiencyPercent >= 40) return 30;
+  const tiers = [3, 2, 1].map(i => ({ pct: numParam(`prize_tier${i}_percent`), value: numParam(`prize_tier${i}_value`) }))
+    .filter(t => t.pct > 0).sort((a, b) => b.pct - a.pct);
+  for (const tier of tiers) if (efficiencyPercent >= tier.pct) return tier.value;
   return 0;
 }
 
@@ -3589,8 +3640,8 @@ function getDailyTrackingQueryString(filters = {}) {
 }
 
 function getDailyTrackingStatusMeta(percent = 0) {
-  if (percent >= 60) return { key: 'hit', label: 'Acima de 60%', badgeClass: 'status-pill ok', rowClass: 'tracking-row-hit', cardClass: 'tracking-status-good', textClass: 'perf-high' };
-  return { key: 'below', label: 'Abaixo de 60%', badgeClass: 'status-pill pending', rowClass: 'tracking-row-below', cardClass: 'tracking-status-risk', textClass: 'perf-low' };
+  if (percent >= targetPercent()) return { key: 'hit', label: `Acima de ${tp()}%`, badgeClass: 'status-pill ok', rowClass: 'tracking-row-hit', cardClass: 'tracking-status-good', textClass: 'perf-high' };
+  return { key: 'below', label: `Abaixo de ${tp()}%`, badgeClass: 'status-pill pending', rowClass: 'tracking-row-below', cardClass: 'tracking-status-risk', textClass: 'perf-low' };
 }
 
 function getDailyTrackingData(baseDate = today(), period = 'month', employeeId = '', startDate = '', endDate = '') {
@@ -3626,9 +3677,9 @@ function getDailyTrackingData(baseDate = today(), period = 'month', employeeId =
     const normalMinutes = round2(Number(accumulated?.normal_minutes || 0));
     const extraMinutes = round2(Number(accumulated?.extra_minutes || 0));
     const producedQuantity = Number(accumulated?.qty || 0);
-    const elapsedAvailableMinutes = round2((progressEnd >= range.start ? getEmployeeBaseDays(employee, range.start, progressEnd).length : 0) * AVAILABLE_MINUTES_DAY);
-    const totalAvailableMinutes = round2(getEmployeeBaseDays(employee, range.start, range.end).length * AVAILABLE_MINUTES_DAY);
-    const currentTargetMinutes = round2(elapsedAvailableMinutes * 0.6);
+    const elapsedAvailableMinutes = round2((progressEnd >= range.start ? getEmployeeBaseDays(employee, range.start, progressEnd).length : 0) * baseMinutesDay());
+    const totalAvailableMinutes = round2(getEmployeeBaseDays(employee, range.start, range.end).length * baseMinutesDay());
+    const currentTargetMinutes = round2(elapsedAvailableMinutes * targetRatio());
     const currentPercent = elapsedAvailableMinutes > 0 ? round2((producedMinutes / elapsedAvailableMinutes) * 100) : 0;
     const fullPeriodPercent = totalAvailableMinutes > 0 ? round2((producedMinutes / totalAvailableMinutes) * 100) : 0;
     const minutesToCurrentTarget = Math.max(round2(currentTargetMinutes - producedMinutes), 0);
@@ -3678,7 +3729,7 @@ function getDailyTrackingData(baseDate = today(), period = 'month', employeeId =
     acc.currentTargetMinutes = round2(acc.currentTargetMinutes + Number(item.current_target_minutes || 0));
     acc.minutesToCurrentTarget = round2(acc.minutesToCurrentTarget + Number(item.minutes_to_current_target || 0));
     acc.aboveTargetMinutes = round2(acc.aboveTargetMinutes + Number(item.above_target_minutes || 0));
-    if (item.current_percent >= 60) acc.reachedCurrentTarget += 1;
+    if (item.current_percent >= targetPercent()) acc.reachedCurrentTarget += 1;
     else acc.belowCurrentTarget += 1;
     return acc;
   }, {
@@ -3709,8 +3760,8 @@ function getDailyTrackingData(baseDate = today(), period = 'month', employeeId =
     attentionRows,
     hitRatePercent: totals.employees > 0 ? round2((totals.reachedCurrentTarget / totals.employees) * 100) : 0,
     nextActionLabel: attentionRows.length
-      ? `Priorizar ${attentionRows[0].full_name} (${fmtNum(attentionRows[0].current_percent, 2)}%) · faltam ${fmtNum(attentionRows[0].minutes_to_current_target, 2)} min para 60%.`
-      : 'Time inteiro acima de 60% no corte atual.'
+      ? `Priorizar ${attentionRows[0].full_name} (${fmtNum(attentionRows[0].current_percent, 2)}%) · faltam ${fmtNum(attentionRows[0].minutes_to_current_target, 2)} min para ${tp()}%.`
+      : `Time inteiro acima de ${tp()}% no corte atual.`
   };
 
   return {
@@ -3738,7 +3789,7 @@ function renderDailyTrackingFilters(data) {
       <form class="inline-form" method="get" action="/acompanhamento/diario">
         <label>Visão
           <select name="period" onchange="this.form.submit()">
-            <option value="month" ${filters.period === 'month' ? 'selected' : ''}>Mês operacional 26 → 25</option>
+            <option value="month" ${filters.period === 'month' ? 'selected' : ''}>Mês operacional ${periodLabel()}</option>
             <option value="custom" ${filters.period === 'custom' ? 'selected' : ''}>Período personalizado</option>
           </select>
         </label>
@@ -3772,12 +3823,12 @@ function renderDailyTrackingCards(data) {
     <div class="cards closure-cards">
       <article class="card"><span>Colaboradores no painel</span><strong>${data.totals.employees}</strong><small>Ativos no período filtrado</small></article>
       <article class="card"><span>Dias úteis decorridos</span><strong>${data.totals.businessDaysElapsed}</strong><small>Soma por colaboradora</small></article>
-      <article class="card"><span>Dias úteis do período</span><strong>${data.totals.businessDaysTotal}</strong><small>Faixa total 26 → 25 ou personalizada</small></article>
+      <article class="card"><span>Dias úteis do período</span><strong>${data.totals.businessDaysTotal}</strong><small>Faixa total ${periodLabel()} ou personalizada</small></article>
       <article class="card"><span>Minutos acumulados</span><strong>${fmtNum(data.totals.producedMinutes, 2)}</strong><small>Total lançado até o corte atual</small></article>
-      <article class="card tracking-status-good"><span>Já em 60%+</span><strong>${data.totals.reachedCurrentTarget}</strong><small>${fmtNum(data.management.hitRatePercent, 2)}% do time no alvo</small></article>
-      <article class="card tracking-status-risk"><span>Abaixo de 60%</span><strong>${data.totals.belowCurrentTarget}</strong><small>Quem ainda pede reação no período</small></article>
+      <article class="card tracking-status-good"><span>Já em ${tp()}%+</span><strong>${data.totals.reachedCurrentTarget}</strong><small>${fmtNum(data.management.hitRatePercent, 2)}% do time no alvo</small></article>
+      <article class="card tracking-status-risk"><span>Abaixo de ${tp()}%</span><strong>${data.totals.belowCurrentTarget}</strong><small>Quem ainda pede reação no período</small></article>
       <article class="card"><span>Eficiência até o corte (${formatDatePtBr(data.progressEnd)})</span><strong>${fmtNum(data.totals.currentPercent, 2)}%</strong><small>Contra os minutos úteis já decorridos</small></article>
-      <article class="card"><span>Faltam para 60%</span><strong>${fmtNum(data.totals.minutesToCurrentTarget, 2)}</strong><small>Gap consolidado até a meta atual</small></article>
+      <article class="card"><span>Faltam para ${tp()}%</span><strong>${fmtNum(data.totals.minutesToCurrentTarget, 2)}</strong><small>Gap consolidado até a meta atual</small></article>
       <article class="card"><span>Eficiência do período cheio</span><strong>${fmtNum(data.totals.fullPeriodPercent, 2)}%</strong><small>Minutos até o corte ÷ base do período inteiro</small></article>
     </div>
   `;
@@ -3786,7 +3837,7 @@ function renderDailyTrackingCards(data) {
 function renderDailyTrackingRankingTable(data) {
   return `
     <table>
-      <thead><tr><th>Rank</th><th>Colaboradora</th><th>Status</th><th>Dias úteis</th><th>Minutos acumulados</th><th>Base atual</th><th>% até o corte</th><th>Meta atual 60%</th><th>Faltam p/ 60%</th><th>% período cheio</th><th>Último lançamento</th></tr></thead>
+      <thead><tr><th>Rank</th><th>Colaboradora</th><th>Status</th><th>Dias úteis</th><th>Minutos acumulados</th><th>Base atual</th><th>% até o corte</th><th>Meta atual ${tp()}%</th><th>Faltam p/ ${tp()}%</th><th>% período cheio</th><th>Último lançamento</th></tr></thead>
       <tbody>
         ${data.employeeSummaries.map(emp => `<tr class="${emp.status_meta.rowClass}"><td><strong>#${emp.ranking_position}</strong></td><td><strong>${escapeHtml(emp.full_name)}</strong><br /><span class="hint">${escapeHtml(emp.registration_code)}</span></td><td><span class="${emp.status_meta.badgeClass}">${emp.status_meta.label}</span></td><td>${emp.business_days_elapsed}/${emp.business_days_total}</td><td>${fmtNum(emp.produced_minutes, 2)}</td><td>${fmtNum(emp.elapsed_available_minutes, 2)}</td><td class="${emp.status_meta.textClass}">${fmtNum(emp.current_percent, 2)}%</td><td>${fmtNum(emp.current_target_minutes, 2)}</td><td>${fmtNum(emp.minutes_to_current_target, 2)}</td><td>${fmtNum(emp.full_period_percent, 2)}%</td><td>${emp.last_production_date ? formatDatePtBr(emp.last_production_date) : '-'}</td></tr>`).join('') || '<tr><td colspan="11">Nenhum colaborador ativo nesse período.</td></tr>'}
       </tbody>
@@ -3797,7 +3848,7 @@ function renderDailyTrackingRankingTable(data) {
 function renderDailyTrackingPrintTable(data) {
   return `
     <table>
-      <thead><tr><th>Rank</th><th>Registro</th><th>Colaboradora</th><th>Status</th><th>Dias úteis</th><th>Peças</th><th>Min. normais</th><th>Min. extras</th><th>Min. acumulados</th><th>Base atual</th><th>% até o corte</th><th>Meta 60%</th><th>Gap 60%</th><th>% período cheio</th><th>Último lançamento</th></tr></thead>
+      <thead><tr><th>Rank</th><th>Registro</th><th>Colaboradora</th><th>Status</th><th>Dias úteis</th><th>Peças</th><th>Min. normais</th><th>Min. extras</th><th>Min. acumulados</th><th>Base atual</th><th>% até o corte</th><th>Meta ${tp()}%</th><th>Gap ${tp()}%</th><th>% período cheio</th><th>Último lançamento</th></tr></thead>
       <tbody>
         ${data.employeeSummaries.map(emp => `<tr class="${emp.status_meta.rowClass}"><td><strong>#${emp.ranking_position}</strong></td><td>${escapeHtml(emp.registration_code)}</td><td><strong>${escapeHtml(emp.full_name)}</strong></td><td><span class="${emp.status_meta.badgeClass}">${emp.status_meta.label}</span></td><td>${emp.business_days_elapsed}/${emp.business_days_total}</td><td>${emp.produced_quantity}</td><td>${fmtNum(emp.normal_minutes, 2)}</td><td>${fmtNum(emp.extra_minutes, 2)}</td><td>${fmtNum(emp.produced_minutes, 2)}</td><td>${fmtNum(emp.elapsed_available_minutes, 2)}</td><td class="${emp.status_meta.textClass}">${fmtNum(emp.current_percent, 2)}%</td><td>${fmtNum(emp.current_target_minutes, 2)}</td><td>${fmtNum(emp.minutes_to_current_target, 2)}</td><td>${fmtNum(emp.full_period_percent, 2)}%</td><td>${emp.last_production_date ? formatDatePtBr(emp.last_production_date) : '-'}</td></tr>`).join('') || '<tr><td colspan="15">Nenhum colaborador ativo nesse período.</td></tr>'}
       </tbody>
@@ -3817,7 +3868,7 @@ function renderDailyTrackingPage(query = {}, role = 'adm') {
     <section class="page-header">
       <div>
         <h2>Acompanhamento diário de resultado</h2>
-        <p>Visão gerencial do período, com ranking 26 → 25, status visual de 60% e leitura rápida do que já pede ação.</p>
+        <p>Visão gerencial do período, com ranking ${periodLabel()}, status visual de ${tp()}% e leitura rápida do que já pede ação.</p>
       </div>
       <div class="header-actions">
         <a class="btn secondary" href="/acompanhamento/diario/export${getDailyTrackingQueryString(data.filters)}" target="_blank" rel="noopener">Imprimir / Salvar PDF</a>
@@ -3830,8 +3881,8 @@ function renderDailyTrackingPage(query = {}, role = 'adm') {
     <section class="panel section-gap">
       <div class="panel-header"><h3>Legenda visual do status</h3><span class="hint">Leitura imediata da meta mínima.</span></div>
       <div class="actions tracking-inline-actions">
-        <span class="status-pill ok">Acima de 60%</span>
-        <span class="status-pill pending">Abaixo de 60%</span>
+        <span class="status-pill ok">Acima de ${tp()}%</span>
+        <span class="status-pill pending">Abaixo de ${tp()}%</span>
       </div>
       <p class="subtle-note">O ranking e o resumo gerencial usam essa mesma régua visual para deixar evidente quem já bateu a meta mínima e quem ainda precisa de reação.</p>
     </section>
@@ -3848,7 +3899,7 @@ function renderDailyTrackingPage(query = {}, role = 'adm') {
           <div class="tracking-kpi-item">
             <span>Última colocação</span>
             <strong>${data.management.lastPlace ? `${escapeHtml(data.management.lastPlace.full_name)} · ${fmtNum(data.management.lastPlace.current_percent, 2)}%` : 'Sem dados'}</strong>
-            <small>${data.management.lastPlace ? `Gap atual: ${fmtNum(data.management.lastPlace.minutes_to_current_target, 2)} min para chegar em 60%.` : 'Nenhum colaborador ativo no período.'}</small>
+            <small>${data.management.lastPlace ? `Gap atual: ${fmtNum(data.management.lastPlace.minutes_to_current_target, 2)} min para chegar em ${tp()}%.` : 'Nenhum colaborador ativo no período.'}</small>
           </div>
           <div class="tracking-kpi-item tracking-kpi-next-step">
             <span>Atalhos do período</span>
@@ -3863,25 +3914,25 @@ function renderDailyTrackingPage(query = {}, role = 'adm') {
       </article>
 
       <article class="panel tracking-management-panel">
-        <div class="panel-header"><h3>Radar abaixo de 60%</h3><span class="hint">Quem está pedindo atenção primeiro.</span></div>
+        <div class="panel-header"><h3>Radar abaixo de ${tp()}%</h3><span class="hint">Quem está pedindo atenção primeiro.</span></div>
         <div class="tracking-alert-list">
-          ${data.management.attentionRows.map(emp => `<div class="tracking-alert-item ${emp.status_meta.cardClass}"><strong>${escapeHtml(emp.full_name)}</strong><span>${escapeHtml(emp.registration_code)} · ${fmtNum(emp.current_percent, 2)}%</span><small>Faltam ${fmtNum(emp.minutes_to_current_target, 2)} minutos para alcançar 60%.</small></div>`).join('') || '<p class="hint">Nenhuma colaboradora abaixo de 60% no recorte atual.</p>'}
+          ${data.management.attentionRows.map(emp => `<div class="tracking-alert-item ${emp.status_meta.cardClass}"><strong>${escapeHtml(emp.full_name)}</strong><span>${escapeHtml(emp.registration_code)} · ${fmtNum(emp.current_percent, 2)}%</span><small>Faltam ${fmtNum(emp.minutes_to_current_target, 2)} minutos para alcançar ${tp()}%.</small></div>`).join('') || `<p class="hint">Nenhuma colaboradora abaixo de ${tp()}% no recorte atual.</p>`}
         </div>
       </article>
     </section>
 
     <section class="panel section-gap">
-      <div class="panel-header"><h3>Ranking gerencial 26 → 25</h3><span class="hint">Ordenado por desempenho atual no período.</span></div>
+      <div class="panel-header"><h3>Ranking gerencial ${periodLabel()}</h3><span class="hint">Ordenado por desempenho atual no período.</span></div>
       ${renderDailyTrackingRankingTable(data)}
     </section>
 
     <section class="panel section-gap">
       <div class="panel-header"><h3>Leitura desta versão</h3><span class="hint">Foco em acompanhamento do mês operacional.</span></div>
       <ul>
-        <li>O período padrão usa o <strong>mês operacional de 26 até 25</strong>.</li>
+        <li>O período padrão usa o <strong>mês operacional (${periodLabel()})</strong>.</li>
         <li><strong>Minutos acumulados</strong> consideram somente lançamentos até o <strong>último dia útil anterior</strong> à data base exibida.</li>
         <li><strong>% até o corte</strong> compara o acumulado com os <strong>dias úteis já decorridos</strong> para cada colaboradora.</li>
-        <li>O ranking já destaca visualmente quem <strong>bateu 60%</strong> e quem ainda está <strong>abaixo</strong>.</li>
+        <li>O ranking já destaca visualmente quem <strong>bateu ${tp()}%</strong> e quem ainda está <strong>abaixo</strong>.</li>
         <li>A contagem de dias úteis respeita <strong>feriados configurados</strong> e também datas de início/rescisão do cadastro.</li>
         <li>Os atalhos abrem o <strong>Prêmio de produção</strong> e o <strong>Fechamento</strong> com o mesmo filtro.</li>
       </ul>
@@ -3926,26 +3977,26 @@ function renderDailyTrackingExportPage(query = {}, role = 'adm') {
           <div class="tracking-kpi-item">
             <span>Última colocação</span>
             <strong>${data.management.lastPlace ? `${escapeHtml(data.management.lastPlace.full_name)} · ${fmtNum(data.management.lastPlace.current_percent, 2)}%` : 'Sem dados'}</strong>
-            <small>${data.management.lastPlace ? `Gap atual: ${fmtNum(data.management.lastPlace.minutes_to_current_target, 2)} min para chegar em 60%.` : 'Nenhum colaborador ativo no período.'}</small>
+            <small>${data.management.lastPlace ? `Gap atual: ${fmtNum(data.management.lastPlace.minutes_to_current_target, 2)} min para chegar em ${tp()}%.` : 'Nenhum colaborador ativo no período.'}</small>
           </div>
           <div class="tracking-kpi-item tracking-kpi-next-step">
             <span>Próxima ação gerencial</span>
-            <strong>${data.totals.reachedCurrentTarget === data.totals.employees && data.totals.employees > 0 ? 'Time inteiro acima do corte mínimo' : 'Foco em quem ainda não atingiu 60%'}</strong>
+            <strong>${data.totals.reachedCurrentTarget === data.totals.employees && data.totals.employees > 0 ? 'Time inteiro acima do corte mínimo' : `Foco em quem ainda não atingiu ${tp()}%`}</strong>
             <small>${escapeHtml(data.management.nextActionLabel)}</small>
           </div>
         </div>
       </article>
 
       <article class="panel tracking-management-panel">
-        <div class="panel-header"><h3>Radar abaixo de 60%</h3><span class="hint">Prioridade rápida para conferência.</span></div>
+        <div class="panel-header"><h3>Radar abaixo de ${tp()}%</h3><span class="hint">Prioridade rápida para conferência.</span></div>
         <div class="tracking-alert-list">
-          ${data.management.attentionRows.map(emp => `<div class="tracking-alert-item ${emp.status_meta.cardClass}"><strong>${escapeHtml(emp.full_name)}</strong><span>${escapeHtml(emp.registration_code)} · ${fmtNum(emp.current_percent, 2)}%</span><small>Faltam ${fmtNum(emp.minutes_to_current_target, 2)} minutos para alcançar 60%.</small></div>`).join('') || '<p class="hint">Nenhuma colaboradora abaixo de 60% no recorte atual.</p>'}
+          ${data.management.attentionRows.map(emp => `<div class="tracking-alert-item ${emp.status_meta.cardClass}"><strong>${escapeHtml(emp.full_name)}</strong><span>${escapeHtml(emp.registration_code)} · ${fmtNum(emp.current_percent, 2)}%</span><small>Faltam ${fmtNum(emp.minutes_to_current_target, 2)} minutos para alcançar ${tp()}%.</small></div>`).join('') || `<p class="hint">Nenhuma colaboradora abaixo de ${tp()}% no recorte atual.</p>`}
         </div>
       </article>
     </section>
 
     <section class="panel section-gap">
-      <div class="panel-header"><h3>Ranking gerencial 26 → 25</h3><span class="hint">Ordenado por desempenho atual no período.</span></div>
+      <div class="panel-header"><h3>Ranking gerencial ${periodLabel()}</h3><span class="hint">Ordenado por desempenho atual no período.</span></div>
       ${renderDailyTrackingRankingTable(data)}
     </section>
 
@@ -3982,14 +4033,14 @@ function getProductionPrizeData(baseDate = today(), period = 'month', employeeId
     const normalMinutes = round2(Number(productionMap.get(employee.id)?.normal_minutes || 0));
     const producedExtraMinutes = round2(Number(productionMap.get(employee.id)?.extra_minutes || 0));
     const producedMinutes = round2(Number(productionMap.get(employee.id)?.minutes || 0));
-    const availableMinutes = round2(getEmployeeBaseDays(employee, range.start, range.end).length * AVAILABLE_MINUTES_DAY);
-    const targetMinutes60 = round2(availableMinutes * 0.6);
+    const availableMinutes = round2(getEmployeeBaseDays(employee, range.start, range.end).length * baseMinutesDay());
+    const targetMinutes60 = round2(availableMinutes * targetRatio());
     const efficiencyPercent = availableMinutes > 0 ? round2((producedMinutes / availableMinutes) * 100) : 0;
     const productionPrize = getProductionPrizeTier(efficiencyPercent);
-    const sixtyPrize = efficiencyPercent >= 60 ? 400 : 0;
+    const sixtyPrize = efficiencyPercent >= targetPercent() ? numParam('prize_target_value') : 0;
     const extraMinutes = Math.max(round2(producedMinutes - targetMinutes60), 0);
-    const extraBlocks = Math.floor(extraMinutes / 100);
-    const extraPrize = extraBlocks * 10;
+    const extraBlocks = numParam('prize_extra_block_minutes') > 0 ? Math.floor(extraMinutes / numParam('prize_extra_block_minutes')) : 0;
+    const extraPrize = extraBlocks * numParam('prize_extra_value');
     const totalPrize = productionPrize + sixtyPrize + extraPrize;
 
     employeeSummaries.push({
@@ -4101,7 +4152,7 @@ function renderProductionPrizeFilters(data) {
         <a class="btn secondary" href="/premios/producao/export${getProductionPrizeQueryString(filters)}" target="_blank" rel="noopener">Abrir versão para impressão / PDF</a>
       </form>
       <p class="hint"><strong>Período analisado:</strong> ${formatDatePtBr(data.range.start)} até ${formatDatePtBr(data.range.end)} · <strong>modo:</strong> ${escapeHtml(data.range.label)}${data.selectedEmployee ? ` · <strong>colaborador:</strong> ${escapeHtml(data.selectedEmployee.full_name)}` : ''}.</p>
-      <p class="subtle-note">Base do prêmio: minutos lançados no período ÷ minutos úteis monitorados. A meta de 60% usa os mesmos dias úteis/feriados já aplicados no fechamento.</p>
+      <p class="subtle-note">Base do prêmio: minutos lançados no período ÷ minutos úteis monitorados. A meta de ${tp()}% usa os mesmos dias úteis/feriados já aplicados no fechamento.</p>
     </section>
   `;
 }
@@ -4111,9 +4162,9 @@ function renderProductionPrizeCards(data) {
     <div class="cards closure-cards">
       <article class="card"><span>Colaboradores no período</span><strong>${data.totals.employees}</strong><small>Ativos dentro do intervalo filtrado</small></article>
       <article class="card"><span>Com prêmio</span><strong>${data.totals.awardedEmployees}</strong><small>Recebem alguma bonificação</small></article>
-      <article class="card"><span>Atingiram 60%</span><strong>${data.totals.reachedSixty}</strong><small>Ganham prêmio fixo de 400</small></article>
+      <article class="card"><span>Atingiram ${tp()}%</span><strong>${data.totals.reachedSixty}</strong><small>Ganham prêmio fixo de ${fmtMoney(numParam('prize_target_value'))}</small></article>
       <article class="card"><span>Prêmio produção</span><strong>${fmtMoney(data.totals.productionPrize)}</strong><small>Faixas de 40%, 45% e 50%</small></article>
-      <article class="card"><span>Prêmio 60%</span><strong>${fmtMoney(data.totals.sixtyPrize)}</strong><small>400 por colaboradora que atinge a meta</small></article>
+      <article class="card"><span>Prêmio ${tp()}%</span><strong>${fmtMoney(data.totals.sixtyPrize)}</strong><small>${fmtMoney(numParam('prize_target_value'))} por colaboradora que atinge a meta</small></article>
       <article class="card"><span>Prêmio extra</span><strong>${fmtMoney(data.totals.extraPrize)}</strong><small>10 a cada 100 min acima da meta</small></article>
       <article class="card"><span>Min. normais</span><strong>${fmtNum(data.totals.normalMinutes, 2)}</strong><small>Base sem o tempo extra</small></article>
       <article class="card"><span>Min. extras</span><strong>${fmtNum(data.totals.producedExtraMinutes, 2)}</strong><small>Tempo extra já incluído na eficiência</small></article>
@@ -4135,7 +4186,7 @@ function renderProductionPrizePage(query = {}, role = 'adm') {
     <section class="page-header">
       <div>
         <h2>Prêmio de produção</h2>
-        <p>Cálculo do prêmio por costureira com base nos minutos que contam para prêmio e na meta de 60% do período.</p>
+        <p>Cálculo do prêmio por costureira com base nos minutos que contam para prêmio e na meta de ${tp()}% do período.</p>
       </div>
     </section>
 
@@ -4143,9 +4194,9 @@ function renderProductionPrizePage(query = {}, role = 'adm') {
     ${renderProductionPrizeCards(data)}
 
     <section class="panel section-gap">
-      <div class="panel-header"><h3>Relatório por colaboradora</h3><span class="hint">Prêmio produção, prêmio 60% e prêmio extra por colaboradora.</span></div>
+      <div class="panel-header"><h3>Relatório por colaboradora</h3><span class="hint">Prêmio produção, prêmio ${tp()}% e prêmio extra por colaboradora.</span></div>
       <table>
-        <thead><tr><th>Nome</th><th>Prêmio produção</th><th>Prêmio 60%</th><th>Prêmio extra</th><th>Total</th><th>Normal</th><th>Extra</th><th>Minutos</th><th>Meta 60%</th><th>Base</th><th>Eficiência</th><th>Dias úteis</th></tr></thead>
+        <thead><tr><th>Nome</th><th>Prêmio produção</th><th>Prêmio ${tp()}%</th><th>Prêmio extra</th><th>Total</th><th>Normal</th><th>Extra</th><th>Minutos</th><th>Meta ${tp()}%</th><th>Base</th><th>Eficiência</th><th>Dias úteis</th></tr></thead>
         <tbody>
           ${data.employeeSummaries.map(emp => {
             const perfClass = emp.efficiency_percent < 40 ? 'perf-low' : (emp.efficiency_percent < 60 ? 'perf-mid' : 'perf-high');
@@ -4156,12 +4207,13 @@ function renderProductionPrizePage(query = {}, role = 'adm') {
     </section>
 
     <section class="panel section-gap">
-      <div class="panel-header"><h3>Regras aplicadas nesta versão</h3><span class="hint">Base alinhada ao fechamento atual.</span></div>
+      <div class="panel-header"><h3>Regras aplicadas</h3><span class="hint">Base alinhada ao fechamento atual.</span></div>
       <ul>
-        <li>Meta mensal/por período = <strong>60% dos minutos úteis monitorados</strong>.</li>
-        <li><strong>Prêmio produção</strong>: 40% = 30, 45% = 60, 50% = 90.</li>
-        <li><strong>Prêmio 60%</strong>: ao atingir 60%, soma <strong>R$ 400,00</strong>.</li>
-        <li><strong>Prêmio extra</strong>: a cada 100 minutos acima da meta de 60%, soma <strong>R$ 10,00</strong>.</li>
+        <li>Meta do período = <strong>${tp()}% dos minutos úteis monitorados</strong> (base ${fmtNum(baseMinutesDay(), 0)} min por dia útil).</li>
+        <li><strong>Prêmio produção</strong>: ${[1, 2, 3].filter(i => numParam(`prize_tier${i}_percent`) > 0).map(i => `${fmtNum(numParam(`prize_tier${i}_percent`), 0)}% = ${fmtMoney(numParam(`prize_tier${i}_value`))}`).join(', ')}.</li>
+        <li><strong>Prêmio da meta</strong>: ao atingir ${tp()}%, soma <strong>${fmtMoney(numParam('prize_target_value'))}</strong>.</li>
+        <li><strong>Prêmio extra</strong>: a cada ${fmtNum(numParam('prize_extra_block_minutes'), 0)} minutos acima da meta, soma <strong>${fmtMoney(numParam('prize_extra_value'))}</strong>.</li>
+        <li>As regras são configuradas em <a href="/parametros">Parâmetros</a>.</li>
         <li>Os minutos do cálculo seguem os lançamentos já existentes no sistema e a base usa dias úteis/feriados conforme configuração atual.</li>
       </ul>
     </section>
@@ -4195,7 +4247,7 @@ function renderProductionPrizeExportPage(query = {}, role = 'adm') {
     <section class="panel section-gap">
       <h3>Relatório por colaboradora</h3>
       <table>
-        <thead><tr><th>Nome</th><th>Prêmio produção</th><th>Prêmio 60%</th><th>Prêmio extra</th><th>Total</th><th>Normal</th><th>Extra</th><th>Minutos</th><th>Meta 60%</th><th>Base</th><th>Eficiência</th></tr></thead>
+        <thead><tr><th>Nome</th><th>Prêmio produção</th><th>Prêmio ${tp()}%</th><th>Prêmio extra</th><th>Total</th><th>Normal</th><th>Extra</th><th>Minutos</th><th>Meta ${tp()}%</th><th>Base</th><th>Eficiência</th></tr></thead>
         <tbody>
           ${data.employeeSummaries.map(emp => `<tr><td>${escapeHtml(emp.full_name)}</td><td>${fmtMoney(emp.production_prize)}</td><td>${fmtMoney(emp.sixty_prize)}</td><td>${fmtMoney(emp.extra_prize)}</td><td>${fmtMoney(emp.total_prize)}</td><td>${fmtNum(emp.normal_minutes, 2)}</td><td>${fmtNum(emp.produced_extra_minutes, 2)}</td><td>${fmtNum(emp.produced_minutes, 2)}</td><td>${fmtNum(emp.target_minutes_60, 2)}</td><td>${fmtNum(emp.available_minutes, 2)}</td><td>${fmtNum(emp.efficiency_percent, 2)}%</td></tr>`).join('') || '<tr><td colspan="11">Sem dados para o filtro selecionado.</td></tr>'}
         </tbody>
@@ -4507,7 +4559,7 @@ function buildEmployeeResultMessage(employee, context) {
   if (!eff.business_days) return '';
   const firstName = String(employee.full_name || '').trim().split(/\s+/)[0] || '';
   const name = firstName ? firstName.charAt(0).toUpperCase() + firstName.slice(1).toLowerCase() : '';
-  const target = round2(eff.available_minutes * 0.6);
+  const target = round2(eff.available_minutes * targetRatio());
   const gap = round2(target - minutes);
   const lines = [
     `Olá, ${name}! Segue seu resultado no período de ${formatDatePtBr(range.start)} a ${formatDatePtBr(range.end)}, até ${formatDatePtBr(cutoff)}:`,
@@ -4515,8 +4567,8 @@ function buildEmployeeResultMessage(employee, context) {
     `• Minutos produzidos: ${fmtNum(minutes, 2)} min`,
     `• Eficiência: ${fmtNum(eff.efficiency_percent, 2)}%`,
     gap > 0
-      ? `• Faltam ${fmtNum(gap, 2)} min para chegar na meta de 60%.`
-      : `• Meta de 60% atingida! Parabéns!`
+      ? `• Faltam ${fmtNum(gap, 2)} min para chegar na meta de ${tp()}%.`
+      : `• Meta de ${tp()}% atingida! Parabéns!`
   ];
   return lines.join('\n');
 }
@@ -5723,7 +5775,7 @@ function renderDashboard(query, role = 'adm') {
   const totalDisplayedMinutes = round2(displayedEmployees.reduce((sum, employee) => sum + Number(employee.produced_minutes || 0), 0));
   const operatorCount = displayedEmployees.length;
   const companyActiveDays = displayedEmployees.reduce((total, employee) => total + employee.active_days, 0);
-  const companyAvailableMinutes = round2(companyActiveDays * AVAILABLE_MINUTES_DAY);
+  const companyAvailableMinutes = round2(companyActiveDays * baseMinutesDay());
   const companyAverageMinutes = operatorCount ? round2(totalDisplayedMinutes / operatorCount) : 0;
   const companyPercent = companyAvailableMinutes > 0 ? round2((totalDisplayedMinutes / companyAvailableMinutes) * 100) : 0;
   const employeeLaunchBreakdown = db.prepare(`
@@ -5741,9 +5793,9 @@ function renderDashboard(query, role = 'adm') {
   const minutesProducao = round2(employeeLaunchBreakdown.find(item => item.op_type === 'producao')?.minutes || 0);
   const minutesMostruario = round2(employeeLaunchBreakdown.find(item => item.op_type === 'mostruario')?.minutes || 0);
   const minutesTotal = round2(minutesProducao + minutesMostruario);
-  const companyClass = companyPercent >= 60 ? 'company-good' : 'company-bad';
-  const companyLabel = companyPercent >= 60 ? 'Meta mínima atingida' : 'Abaixo da meta mínima';
-  const companyAction = companyPercent >= 60 ? 'Seguimos dentro da meta geral da empresa.' : 'Precisamos de plano de ação para elevar a eficiência geral acima de 60%.';
+  const companyClass = companyPercent >= targetPercent() ? 'company-good' : 'company-bad';
+  const companyLabel = companyPercent >= targetPercent() ? 'Meta mínima atingida' : 'Abaixo da meta mínima';
+  const companyAction = companyPercent >= targetPercent() ? 'Seguimos dentro da meta geral da empresa.' : `Precisamos de plano de ação para elevar a eficiência geral acima de ${tp()}%.`;
   const mostruarioData = getDashboardData('day', today(), 'mostruario', brand, mostruarioStartDate, mostruarioEndDate, mostruarioCustomFilter);
   const producaoData = getDashboardData('day', today(), 'producao', brand, producaoStartDate, producaoEndDate, producaoCustomFilter);
   const availableBrands = [...new Set([
@@ -5802,7 +5854,7 @@ function renderDashboard(query, role = 'adm') {
             const firstHour = Number(card.dataset.firstHour || 0);
             const minutes = Number(card.dataset.minutes || 0);
             const expectedHours = Math.max(Math.min(currentHour - firstHour + 1, 8), 1);
-            const expectedBase = expectedHours * 66;
+            const expectedBase = expectedHours * ${round2(baseMinutesDay() / 8)};
             const pct = expectedBase > 0 ? (minutes / expectedBase) * 100 : 0;
             const pctText = card.querySelector('[data-hourly-percent]');
             const bar = card.querySelector('[data-hourly-bar]');
@@ -5890,11 +5942,11 @@ function renderDashboard(query, role = 'adm') {
 
         <section class="panel section-gap tracking-panel-highlight">
           <div class="panel-header"><h3>Acompanhamento diário do mês operacional</h3><a class="btn secondary" href="/acompanhamento/diario${getDailyTrackingQueryString(dailyTrackingData.filters)}">Abrir painel completo</a></div>
-          <p class="hint"><strong>Período 26 → 25:</strong> ${formatDatePtBr(dailyTrackingData.range.start)} até ${formatDatePtBr(dailyTrackingData.range.end)} · <strong>corte atual:</strong> ${formatDatePtBr(dailyTrackingData.progressEnd)}.</p>
+          <p class="hint"><strong>Período ${periodLabel()}:</strong> ${formatDatePtBr(dailyTrackingData.range.start)} até ${formatDatePtBr(dailyTrackingData.range.end)} · <strong>corte atual:</strong> ${formatDatePtBr(dailyTrackingData.progressEnd)}.</p>
           <div class="shipment-summary-grid section-gap">
             <article class="mini-card"><span>Minutos acumulados</span><strong>${fmtNum(dailyTrackingData.totals.producedMinutes, 2)}</strong></article>
-            <article class="mini-card tracking-status-good"><span>Já em 60%+</span><strong>${dailyTrackingData.totals.reachedCurrentTarget}</strong></article>
-            <article class="mini-card tracking-status-risk"><span>Abaixo de 60%</span><strong>${dailyTrackingData.totals.belowCurrentTarget}</strong></article>
+            <article class="mini-card tracking-status-good"><span>Já em ${tp()}%+</span><strong>${dailyTrackingData.totals.reachedCurrentTarget}</strong></article>
+            <article class="mini-card tracking-status-risk"><span>Abaixo de ${tp()}%</span><strong>${dailyTrackingData.totals.belowCurrentTarget}</strong></article>
             <article class="mini-card"><span>% atual geral</span><strong>${fmtNum(dailyTrackingData.totals.currentPercent, 2)}%</strong></article>
           </div>
           <div class="tracking-dashboard-summary">
@@ -5906,7 +5958,7 @@ function renderDashboard(query, role = 'adm') {
             <a class="btn secondary" href="/premios/producao${getProductionPrizeQueryString(dailyTrackingData.filters)}">Ver prêmio de produção</a>
           </div>
           <table>
-            <thead><tr><th>Rank</th><th>Registro</th><th>Colaboradora</th><th>Status</th><th>Dias úteis</th><th>Minutos</th><th>% até o corte</th><th>Faltam p/ 60%</th></tr></thead>
+            <thead><tr><th>Rank</th><th>Registro</th><th>Colaboradora</th><th>Status</th><th>Dias úteis</th><th>Minutos</th><th>% até o corte</th><th>Faltam p/ ${tp()}%</th></tr></thead>
             <tbody>
               ${dailyTrackingTopRows.map(emp => `<tr class="${emp.status_meta.rowClass}"><td><strong>#${emp.ranking_position}</strong></td><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td><span class="${emp.status_meta.badgeClass}">${emp.status_meta.label}</span></td><td>${emp.business_days_elapsed}/${emp.business_days_total}</td><td>${fmtNum(emp.produced_minutes, 2)}</td><td class="${emp.status_meta.textClass}">${fmtNum(emp.current_percent, 2)}%</td><td>${fmtNum(emp.minutes_to_current_target, 2)}</td></tr>`).join('') || '<tr><td colspan="8">Nenhum colaborador ativo no mês operacional atual.</td></tr>'}
             </tbody>
@@ -7069,6 +7121,133 @@ function handleToggleWorkSchedule(id, res, role) {
 }
 // ===============================================================
 
+// ===================== TELA PARÂMETROS =====================
+const ABSENCE_TYPE_LABELS = { falta: 'Falta', atestado: 'Atestado', ferias: 'Férias', folga: 'Folga', afastamento: 'Afastamento', outro: 'Outro' };
+
+function renderParametersPage(query = {}, values = null, error = '', role = 'adm') {
+  const v = values || getParams();
+  const workdays = new Set(String(v.workdays).split(','));
+  const excluded = new Set(String(v.absence_types_excluded_from_base).split(','));
+  const num = (key, attrs = '') => `<input type="number" name="${key}" value="${escapeHtml(String(v[key] ?? ''))}" ${attrs} />`;
+  const content = `
+    <section class="page-header"><div><h2>Parâmetros</h2><p>Regras de cálculo desta empresa. Alterações valem para todas as telas (Dashboard, Acompanhamento, Fechamento e Prêmio) a partir de agora.</p></div></section>
+    <form class="params-form" method="post" action="/parametros">
+      <section class="panel">
+        <h3>Base e meta</h3>
+        <div class="form-grid">
+          <label>Minutos de base por dia útil ${num('base_minutes_day', 'min="1" max="1440" step="1" required')}<small class="hint">Padrão 528 (8h48).</small></label>
+          <label>Meta de eficiência (%) ${num('target_percent', 'min="1" max="200" step="0.01" required')}<small class="hint">Padrão 60%.</small></label>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h3>Período e dias úteis</h3>
+        <div class="form-grid">
+          <label>Dia de início do mês operacional ${num('period_start_day', 'min="1" max="28" step="1" required')}<small class="hint">Ex.: 26 = período de 26 a 25. Use 1 para mês civil.</small></label>
+        </div>
+        <fieldset><legend>Dias úteis (entram na base de cálculo)</legend>
+          ${[1, 2, 3, 4, 5, 6, 0].map(d => `<label class="checkbox-line"><input type="checkbox" name="workdays" value="${d}" ${workdays.has(String(d)) ? 'checked' : ''} /> ${WEEKDAY_LABELS[d]}</label>`).join('')}
+        </fieldset>
+      </section>
+
+      <section class="panel">
+        <h3>Prêmio de produção</h3>
+        <table class="params-table">
+          <thead><tr><th>Faixa</th><th>A partir de (% de eficiência)</th><th>Valor (R$)</th></tr></thead>
+          <tbody>
+            ${[1, 2, 3].map(i => `<tr><td>Faixa ${i}</td><td>${num(`prize_tier${i}_percent`, 'min="0" max="200" step="0.01"')}</td><td>${num(`prize_tier${i}_value`, 'min="0" step="0.01"')}</td></tr>`).join('')}
+          </tbody>
+        </table>
+        <p class="hint">Vale a maior faixa atingida. Deixe 0 no percentual para desativar a faixa.</p>
+        <div class="form-grid">
+          <label>Prêmio ao atingir a meta (R$) ${num('prize_target_value', 'min="0" step="0.01"')}</label>
+          <label>Prêmio extra (R$) ${num('prize_extra_value', 'min="0" step="0.01"')}</label>
+          <label>A cada (minutos acima da meta) ${num('prize_extra_block_minutes', 'min="0" step="1"')}</label>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h3>Ausências que tiram o dia da base</h3>
+        <fieldset><legend>O dia sai da base de cálculo (não conta contra a eficiência)</legend>
+          ${Object.entries(ABSENCE_TYPE_LABELS).map(([key, label]) => `<label class="checkbox-line"><input type="checkbox" name="absence_types_excluded_from_base" value="${key}" ${excluded.has(key) ? 'checked' : ''} /> ${label}</label>`).join('')}
+        </fieldset>
+        <p class="hint">Tipos desmarcados continuam contando como dia sem produção.</p>
+      </section>
+
+      <section class="panel">
+        <h3>Feriados</h3>
+        <div class="form-grid">
+          <label class="full">Feriados com data (um por linha, AAAA-MM-DD)<textarea name="holiday_dates" rows="4" placeholder="2026-11-20">${escapeHtml(String(v.holiday_dates || '').split(/[,;\n]/).map(x => x.trim()).filter(Boolean).join('\n'))}</textarea></label>
+          <label>Feriados fixos todo ano (MM-DD)<textarea name="holiday_recurring_mmdd" rows="4" placeholder="01-01&#10;04-21&#10;12-25">${escapeHtml(String(v.holiday_recurring_mmdd || '').split(/[,;\n]/).map(x => x.trim()).filter(Boolean).join('\n'))}</textarea></label>
+          <label>Feriados trabalhados (AAAA-MM-DD)<textarea name="worked_holiday_dates" rows="4" placeholder="2026-11-02">${escapeHtml(String(v.worked_holiday_dates || '').split(/[,;\n]/).map(x => x.trim()).filter(Boolean).join('\n'))}</textarea><small class="hint">Datas de feriado em que a empresa trabalhou normalmente.</small></label>
+        </div>
+      </section>
+
+      <section class="panel">
+        <p class="hint">Jornadas de trabalho (horários e intervalos) ficam em <a href="/cadastros#jornadas">Cadastros → Jornadas</a>.</p>
+        <div class="actions"><button class="btn" type="submit">Salvar parâmetros</button><a class="btn secondary" href="/parametros">Descartar alterações</a></div>
+      </section>
+    </form>`;
+  return pageLayout({ title: 'Parâmetros', content, notice: query.notice || '', error, role });
+}
+
+function handleSaveParameters(form, res, role) {
+  if (!isAdminRole(role)) return requireAdmin(null, res, role);
+  const list = v => (Array.isArray(v) ? v : [v]).filter(x => x !== undefined && x !== '');
+  const lines = v => String(v || '').split(/[,;\n\r]+/).map(x => x.trim()).filter(Boolean);
+  const values = {};
+  const errors = [];
+  const number = (key, label, { min = 0, max = Infinity, integer = false } = {}) => {
+    const n = Number(String(form[key] ?? '').replace(',', '.'));
+    if (!Number.isFinite(n) || n < min || n > max || (integer && !Number.isInteger(n))) errors.push(`${label} inválido.`);
+    values[key] = String(n);
+  };
+  number('base_minutes_day', 'Minutos de base por dia', { min: 1, max: 1440, integer: true });
+  number('target_percent', 'Meta de eficiência', { min: 1, max: 200 });
+  number('period_start_day', 'Dia de início do período', { min: 1, max: 28, integer: true });
+  for (const i of [1, 2, 3]) {
+    number(`prize_tier${i}_percent`, `Percentual da faixa ${i}`, { min: 0, max: 200 });
+    number(`prize_tier${i}_value`, `Valor da faixa ${i}`, { min: 0 });
+  }
+  number('prize_target_value', 'Prêmio da meta', { min: 0 });
+  number('prize_extra_value', 'Prêmio extra', { min: 0 });
+  number('prize_extra_block_minutes', 'Minutos do prêmio extra', { min: 0, integer: true });
+  const workdays = list(form.workdays).map(Number).filter(d => d >= 0 && d <= 6);
+  if (!workdays.length) errors.push('Marque ao menos um dia útil.');
+  values.workdays = [...new Set(workdays)].sort().join(',');
+  values.absence_types_excluded_from_base = list(form.absence_types_excluded_from_base).filter(k => ABSENCE_TYPE_LABELS[k]).join(',');
+  const dates = lines(form.holiday_dates);
+  const recurring = lines(form.holiday_recurring_mmdd);
+  const worked = lines(form.worked_holiday_dates);
+  const badDate = [...dates, ...worked].find(d => !/^\d{4}-\d{2}-\d{2}$/.test(d));
+  const badMmdd = recurring.find(d => !/^\d{2}-\d{2}$/.test(d));
+  if (badDate) errors.push(`Data inválida em feriados: ${badDate} (use AAAA-MM-DD).`);
+  if (badMmdd) errors.push(`Feriado fixo inválido: ${badMmdd} (use MM-DD).`);
+  values.holiday_dates = dates.join(',');
+  values.holiday_recurring_mmdd = recurring.join(',');
+  values.worked_holiday_dates = worked.join(',');
+  if (errors.length) return sendHtml(res, renderParametersPage({}, { ...getParams(), ...values }, errors.join(' '), role), 422);
+
+  const before = getParams();
+  const changed = Object.keys(values).filter(key => String(before[key]) !== String(values[key]));
+  db.exec('BEGIN');
+  try {
+    const upsert = db.prepare(`INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`);
+    for (const key of changed) upsert.run(key, values[key]);
+    if (changed.length) {
+      upsert.run(`params_log_${Date.now()}`, JSON.stringify({ user: getRequestAuth()?.user?.username || '', changed: Object.fromEntries(changed.map(k => [k, { de: before[k], para: values[k] }])) }));
+    }
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    return sendHtml(res, renderParametersPage({}, { ...before, ...values }, `Erro ao salvar: ${err.message}`, role), 500);
+  }
+  invalidateParams();
+  redirect(res, `/parametros?notice=${encodeURIComponent(changed.length ? `Parâmetros salvos (${changed.length} alteração(ões)).` : 'Nenhuma alteração.')}`);
+}
+// ===============================================================
+
 function handleCreateBrand(form, res, role) {
   if (!isAdminRole(role)) return requireAdmin(null, res, role);
   const validationError = validateBrandName(form.name);
@@ -7605,7 +7784,7 @@ function getHourlyProductionRows(productionDate = today(), employeeId = '') {
     ORDER BY hp.hour_slot ASC, e.full_name ASC, hp.created_at DESC
   `).all(...params).map(item => ({
     ...item,
-    hour_efficiency_percent: round2((Number(item.produced_minutes || 0) / 66) * 100)
+    hour_efficiency_percent: round2((Number(item.produced_minutes || 0) / (baseMinutesDay() / 8)) * 100)
   }));
 }
 
@@ -7632,7 +7811,7 @@ function getHourlyValidationSummary(productionDate = today()) {
     ORDER BY e.full_name ASC
   `).all(productionDate, productionDate).map(item => ({
     ...item,
-    day_efficiency_percent: round2((Number(item.total_minutes || 0) / 528) * 100)
+    day_efficiency_percent: round2((Number(item.total_minutes || 0) / baseMinutesDay()) * 100)
   }));
 }
 
@@ -7652,7 +7831,7 @@ function getHourlyEmployeeDaySummary(employeeId, productionDate = today(), curre
   const launchedHours = new Set(rows.map(item => item.hour_slot)).size;
   const currentHour = Number(String(currentHourSlot || '').split(':')[0] || 0);
   const expectedHours = Math.max(Math.min(currentHour - 7 + 1, 8), 1);
-  const expectedBaseMinutes = expectedHours * 66;
+  const expectedBaseMinutes = expectedHours * (baseMinutesDay() / 8);
   const dayEfficiencyPercent = expectedBaseMinutes > 0 ? round2((totalMinutes / expectedBaseMinutes) * 100) : 0;
   return {
     totalMinutes,
@@ -9663,6 +9842,11 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && pathname === '/collections') return handleCreateCollection(await parseBody(req), res, role);
       if (req.method === 'POST' && pathname === '/cells') return handleCreateCell(await parseBody(req), res, role);
       if (req.method === 'POST' && pathname === '/work-schedules') return handleCreateWorkSchedule(await parseBody(req), res, role);
+      if (req.method === 'GET' && pathname === '/parametros') {
+        if (requireAdmin(req, res, role)) return;
+        return sendHtml(res, renderParametersPage(query, null, query.error || '', role));
+      }
+      if (req.method === 'POST' && pathname === '/parametros') return handleSaveParameters(await parseBody(req), res, role);
       const workScheduleToggleMatch = pathname.match(/^\/work-schedules\/(\d+)\/toggle$/);
       if (req.method === 'POST' && workScheduleToggleMatch) return handleToggleWorkSchedule(Number(workScheduleToggleMatch[1]), res, role);
       const workScheduleUpdateMatch = pathname.match(/^\/work-schedules\/(\d+)$/);

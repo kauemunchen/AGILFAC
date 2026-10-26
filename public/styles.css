@@ -208,3 +208,7 @@ fieldset { border: 1px solid rgba(148, 163, 184, .35); border-radius: 10px; padd
   .label-card .label-barcode { margin-top: auto !important; }
 }
 @media print { .top-bar, .menu-toggle, #menu-toggle { display: none !important; } }
+/* Parâmetros */
+.params-form { display: flex; flex-direction: column; gap: 16px; }
+.params-form .panel h3 { margin-bottom: 12px; }
+.params-table td input { max-width: 160px; }
