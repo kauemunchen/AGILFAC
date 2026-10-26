@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS company_users (
   username TEXT NOT NULL,
   full_name TEXT NOT NULL,
   password_hash TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('adm', 'operacional', 'resultados', 'apontamento')),
+  role TEXT NOT NULL CHECK (role IN ('adm', 'operacional', 'resultados', 'apontamento', 'lancador')),
   is_active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,

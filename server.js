@@ -32,9 +32,9 @@ const SESSION_IDLE_HOURS = 12;
 const PASSWORD_MIN_LENGTH = 8;
 const LOGIN_MAX_FAILURES = 5;
 const LOGIN_WINDOW_MINUTES = 15;
-const ROLE_LABELS = { adm: 'Administrador', operacional: 'Operacional', resultados: 'Resultados', apontamento: 'Apontamento' };
+const ROLE_LABELS = { adm: 'Administrador', operacional: 'Operacional', resultados: 'Resultados', apontamento: 'Apontamento', lancador: 'Lançador' };
 const REVERSAL_TYPES = { op: 'Cadastro de OP', production: 'Lançamento diário', shipment: 'Embarque' };
-const CELL_ALLOWED_ROLES = new Set(['adm', 'operacional']);
+const CELL_ALLOWED_ROLES = new Set(['adm', 'operacional', 'lancador']);
 const DEFAULT_COMPANY_NAME = 'AgilFac';
 const BLOCKED_BRAND_NAMES = new Set(['primavera 27']);
 
@@ -91,7 +91,7 @@ function repairMasterSessionsForeignKey() {
 function upgradeCompanyUserRoleConstraint() {
   const row = masterDb.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'company_users'").get();
   const createSql = String(row?.sql || '');
-  if (!createSql || createSql.includes("'apontamento'")) return;
+  if (!createSql || createSql.includes("'lancador'")) return;
   masterDb.exec('PRAGMA foreign_keys = OFF');
   masterDb.exec(`
     ALTER TABLE company_users RENAME TO company_users_role_legacy;
@@ -101,15 +101,19 @@ function upgradeCompanyUserRoleConstraint() {
       username TEXT NOT NULL,
       full_name TEXT NOT NULL,
       password_hash TEXT NOT NULL,
-      role TEXT NOT NULL CHECK (role IN ('adm', 'operacional', 'resultados', 'apontamento')),
+      role TEXT NOT NULL CHECK (role IN ('adm', 'operacional', 'resultados', 'apontamento', 'lancador')),
       is_active INTEGER NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      must_change_password INTEGER NOT NULL DEFAULT 0,
+      last_login_at TEXT,
       UNIQUE (company_id, username)
     );
-    INSERT INTO company_users (id, company_id, username, full_name, password_hash, role, is_active, created_at, updated_at)
-    SELECT id, company_id, username, full_name, password_hash, role, is_active, created_at, updated_at FROM company_users_role_legacy;
   `);
+  const legacyCols = masterDb.prepare('PRAGMA table_info(company_users_role_legacy)').all().map(c => c.name);
+  const newCols = masterDb.prepare('PRAGMA table_info(company_users)').all().map(c => c.name);
+  const cols = newCols.filter(c => legacyCols.includes(c)).join(', ');
+  masterDb.exec(`INSERT INTO company_users (${cols}) SELECT ${cols} FROM company_users_role_legacy`);
   repairMasterSessionsForeignKey();
   masterDb.exec('DROP TABLE company_users_role_legacy');
   masterDb.exec('CREATE INDEX IF NOT EXISTS idx_company_users_company_id ON company_users(company_id)');
@@ -620,7 +624,7 @@ function ensureTenantLegacyUsersCompat(tenantDb) {
 function upgradeTenantUserRoleConstraint(tenantDb) {
   const row = tenantDb.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'").get();
   const createSql = String(row?.sql || '');
-  if (!createSql || createSql.includes("'apontamento'")) {
+  if (!createSql || createSql.includes("'lancador'")) {
     ensureTenantLegacyUsersCompat(tenantDb);
     return;
   }
@@ -632,14 +636,17 @@ function upgradeTenantUserRoleConstraint(tenantDb) {
       username TEXT NOT NULL UNIQUE,
       full_name TEXT NOT NULL,
       password_hash TEXT,
-      role TEXT NOT NULL CHECK (role IN ('adm', 'operacional', 'resultados', 'apontamento')),
+      role TEXT NOT NULL CHECK (role IN ('adm', 'operacional', 'resultados', 'apontamento', 'lancador')),
       is_active INTEGER NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
-    INSERT INTO users (id, username, full_name, password_hash, role, is_active, created_at, updated_at)
-    SELECT id, username, full_name, password_hash, role, is_active, created_at, updated_at FROM users_role_legacy;
   `);
+  {
+    const legacyCols = tenantDb.prepare('PRAGMA table_info(users_role_legacy)').all().map(c => c.name);
+    const cols = ['id', 'username', 'full_name', 'password_hash', 'role', 'is_active', 'created_at', 'updated_at'].filter(c => legacyCols.includes(c)).join(', ');
+    tenantDb.exec(`INSERT INTO users (${cols}) SELECT ${cols} FROM users_role_legacy`);
+  }
   ensureTenantLegacyUsersCompat(tenantDb);
   tenantDb.exec('PRAGMA foreign_keys = ON');
 }
@@ -1592,7 +1599,22 @@ function isHourlyLauncherRole(role) {
 }
 
 function canAccessHourlyLauncher(role) {
-  return role === 'adm' || role === 'operacional' || role === 'apontamento';
+  return role === 'adm' || role === 'operacional' || role === 'apontamento' || role === 'lancador';
+}
+
+// T1.8 — Perfil Lançador (chão de fábrica): lançamentos, consulta de OP, célula, ocorrências,
+// peças com problema e etiquetas de entrada. Sem financeiro, prêmio, fechamento e dados pessoais.
+function isLancadorRole(role) {
+  return role === 'lancador';
+}
+
+function isLancadorAllowed(method, pathname) {
+  if (method === 'GET' && ['/productions/new', '/productions/hourly', '/ops', '/labels/entry', '/api/op-preview', '/conta/senha'].includes(pathname)) return true;
+  if (method === 'POST' && ['/productions', '/productions/hourly', '/productions/hourly/validate', '/conta/senha', '/logout'].includes(pathname)) return true;
+  if (method === 'GET' && /^\/ops\/\d+$/.test(pathname)) return true;
+  if (method === 'POST' && /^\/ops\/\d+\/(occurrences|problem-items|cell\/send|cell\/return)$/.test(pathname)) return true;
+  if (method === 'POST' && /^\/ops\/\d+\/occurrences\/\d+\/conclude$/.test(pathname)) return true;
+  return false;
 }
 
 function requireAuthentication(req, res) {
@@ -2166,7 +2188,14 @@ function renderRoleSwitcher(role) {
 }
 
 function pageLayout({ title, content, notice = '', error = '', role = 'adm' }) {
-  const navItems = isHourlyLauncherRole(role)
+  const navItems = isLancadorRole(role)
+    ? [
+        { href: '/productions/new', label: 'Lançamentos', icon: '🧵', active: title === 'Novo lançamento' },
+        { href: '/productions/hourly', label: 'Lanç. hora', icon: '⏰', active: title === 'Lançamento por hora' },
+        { href: '/ops', label: 'Consulta OP', icon: '📦', active: title.startsWith('OPs') || title.startsWith('OP ') },
+        { href: '/labels/entry', label: 'Etiq. entrada', icon: '🏷️', active: title.startsWith('Etiquetas de entrada') }
+      ]
+    : isHourlyLauncherRole(role)
     ? [
         { href: '/', label: 'Dashboard', icon: '🏠', active: title === 'Dashboard' },
         { href: '/productions/hourly', label: 'Lanç. hora', icon: '⏰', active: title === 'Lançamento por hora' }
@@ -8532,7 +8561,7 @@ function renderOpListPage(query = {}, role = 'adm') {
           <option value="sem_data" ${filters.deadline === 'sem_data' ? 'selected' : ''}>Sem data</option>
         </select>
       </label>
-      <label>Cobrança
+      <label ${isLancadorRole(role) ? 'hidden' : ''}>Cobrança
         <select name="billing_status">
           <option value="">Todas</option>
           <option value="billed" ${filters.billingStatus === 'billed' ? 'selected' : ''}>Cobradas</option>
@@ -8545,9 +8574,9 @@ function renderOpListPage(query = {}, role = 'adm') {
     </form>
     <section class="panel">
       <table>
-        <thead><tr><th>OP</th><th>Produto</th><th>Tipo</th><th>Marca</th><th>Coleção</th><th>Total</th><th>Produzido</th><th>Saldo</th><th><a href="/ops?${new URLSearchParams({ ...query, sort: 'entrega' }).toString()}" title="Ordenar por data de entrega">Entrega ↑</a></th><th>Embarque</th><th>Status</th><th>Cobrança</th><th>Ações</th></tr></thead>
+        <thead><tr><th>OP</th><th>Produto</th><th>Tipo</th><th>Marca</th><th>Coleção</th><th>Total</th><th>Produzido</th><th>Saldo</th><th><a href="/ops?${new URLSearchParams({ ...query, sort: 'entrega' }).toString()}" title="Ordenar por data de entrega">Entrega ↑</a></th><th>Embarque</th><th>Status</th>${isLancadorRole(role) ? '' : '<th>Cobrança</th>'}<th>Ações</th></tr></thead>
         <tbody>
-          ${rows.map(op => `<tr><td>${escapeHtml(op.op_number)}</td><td>${escapeHtml(op.product_name)}</td><td>${escapeHtml(op.op_type)}</td><td>${escapeHtml(op.brand || '-')}</td><td>${escapeHtml(op.collection_name || '-')}</td><td>${op.total_pieces}</td><td>${op.produced_quantity}</td><td>${op.remaining_quantity}</td><td>${deliveryBadge(op)}</td><td>${escapeHtml(nowPt(op.shipped_at))}</td><td>${statusBadge(op.status_color)} ${lifecycleBadge(op.lifecycle_type)}</td><td>${billingStatusLabel(op)}</td><td><a href="/ops/${op.id}">Detalhar</a></td></tr>`).join('') || '<tr><td colspan="13">Nenhuma OP encontrada.</td></tr>'}
+          ${rows.map(op => `<tr><td>${escapeHtml(op.op_number)}</td><td>${escapeHtml(op.product_name)}</td><td>${escapeHtml(op.op_type)}</td><td>${escapeHtml(op.brand || '-')}</td><td>${escapeHtml(op.collection_name || '-')}</td><td>${op.total_pieces}</td><td>${op.produced_quantity}</td><td>${op.remaining_quantity}</td><td>${deliveryBadge(op)}</td><td>${escapeHtml(nowPt(op.shipped_at))}</td><td>${statusBadge(op.status_color)} ${lifecycleBadge(op.lifecycle_type)}</td>${isLancadorRole(role) ? '' : `<td>${billingStatusLabel(op)}</td>`}<td><a href="/ops/${op.id}">Detalhar</a></td></tr>`).join('') || '<tr><td colspan="13">Nenhuma OP encontrada.</td></tr>'}
         </tbody>
       </table>
     </section>
@@ -8596,8 +8625,8 @@ function renderOpDetailPage(id, query = {}, role = 'adm') {
           <dt>Data de entrada</dt><dd>${escapeHtml(nowPt(op.entry_date))}</dd>
           <dt>Data de entrega</dt><dd>${deliveryBadge(op)}${canAccessCadastros(role) ? `<form class="inline-form delivery-form" method="post" action="/ops/${op.id}/delivery-date"><input type="date" name="delivery_date" value="${escapeHtml(op.delivery_date || '')}" /><button class="btn secondary" type="submit">Salvar</button></form>` : ''}</dd>
           <dt>Data de saída</dt><dd>${escapeHtml(nowPt(op.shipped_at))}</dd>
-          <dt>Cobrança</dt><dd>${billingStatusText(op)}</dd>
-          <dt>Obs. cobrança</dt><dd>${escapeHtml(op.billing_notes || '-')}</dd>
+          ${isLancadorRole(role) ? '' : `<dt>Cobrança</dt><dd>${billingStatusText(op)}</dd>
+          <dt>Obs. cobrança</dt><dd>${escapeHtml(op.billing_notes || '-')}</dd>`}
           <dt>Fluxo da OP</dt><dd>${lifecycleFlowLabel(op.lifecycle_type)}</dd>
           ${isReturnedWithoutProductionLifecycle(op.lifecycle_type) ? `<dt>Motivo da devolução</dt><dd>${escapeHtml(op.return_reason || '-')}</dd><dt>Devolvida em</dt><dd>${escapeHtml(nowPt(op.returned_without_production_at))}</dd>` : ''}
           <dt>Origem</dt><dd>${escapeHtml(getSourceLabel(op.notes))}</dd>
@@ -8675,7 +8704,7 @@ function renderOpDetailPage(id, query = {}, role = 'adm') {
       </table>
     </section>
 
-    <section class="panel">
+    <section class="panel" ${isLancadorRole(role) ? 'hidden' : ''}>
       <h3>Histórico de cobrança</h3>
       <table>
         <thead><tr><th>Data</th><th>Observação</th><th>Registrado por</th><th>Lote</th></tr></thead>
@@ -9795,6 +9824,18 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'GET' && pathname === '/api/op-preview') {
         const preview = getOpQuickPreview(query.op_number || '');
         return sendJson(res, preview ? { found: true, ...preview } : { found: false }, preview ? 200 : 404);
+      }
+
+      if (isLancadorRole(role)) {
+        if (req.method === 'GET' && pathname === '/') return redirect(res, '/productions/new');
+        if (!isLancadorAllowed(req.method, pathname)) {
+          return sendHtml(res, pageLayout({
+            title: 'Acesso restrito',
+            content: '<section class="panel"><p>O perfil Lançador acessa lançamentos, consulta de OPs, célula, ocorrências e etiquetas de entrada.</p><p><a class="btn" href="/productions/new">Ir para lançamentos</a></p></section>',
+            error: 'Acesso não permitido para este perfil.',
+            role
+          }), 403);
+        }
       }
 
       if (isHourlyLauncherRole(role)) {
