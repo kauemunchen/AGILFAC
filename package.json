@@ -1,0 +1,23 @@
+{
+  "name": "app-controle-ops",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MVP funcional para controle de OPs com Node.js + SQLite",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "PORT=8090 node server.js",
+    "test:cell": "node scripts/test-cell-module.js",
+    "test:op-extra": "node scripts/test-op-extra-module.js",
+    "test:billing": "node scripts/test-billing-reconciliation.js",
+    "test:no-industrialization": "node scripts/test-without-industrialization-shortcut.js",
+    "test:cell-closure": "node scripts/test-cell-closure-module.js",
+    "test:daily-tracking": "node scripts/test-daily-tracking-module.js"
+  },
+  "dependencies": {
+    "next": "^16.2.1",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "xlsx": "^0.18.5"
+  }
+}

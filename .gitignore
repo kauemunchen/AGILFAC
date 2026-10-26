@@ -1,0 +1,11 @@
+node_modules/
+data/
+backups/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+.env
+*.bak*
+*.tar.gz
+*.log
