@@ -4792,13 +4792,22 @@ function sanitizeEmployeeDates(form) {
 }
 
 function validateEmployee(form) {
-  if (!form.registration_code || !form.full_name) return 'Informe registro e nome do colaborador.';
+  if (!String(form.registration_code || '').trim() || !String(form.full_name || '').trim()) return 'Informe registro e nome completo.';
   const { startDate, terminationDate } = sanitizeEmployeeDates(form);
+  // Colaboradora ativa (sem rescisão): cadastro completo obrigatório
+  if (!terminationDate) {
+    const missing = [];
+    if (!startDate) missing.push('data de admissão');
+    if (!form.birth_date) missing.push('data de nascimento');
+    if (!String(form.job_role || '').trim()) missing.push('função');
+    if (!Number(form.work_schedule_id || 0)) missing.push('jornada');
+    if (!normalizePhone(form.phone)) missing.push('telefone (WhatsApp)');
+    if (missing.length) return `Preencha: ${missing.join(', ')}.`;
+  }
   if (startDate && terminationDate && terminationDate < startDate) {
     return 'A data de rescisão não pode ser anterior à data de início.';
   }
   const phone = normalizePhone(form.phone);
-  if (!phone && !terminationDate) return 'Informe o telefone (WhatsApp) da colaboradora.';
   if (phone && (phone.length < 10 || phone.length > 11)) return 'Telefone inválido: informe DDD + número (ex.: (47) 99999-9999).';
   return '';
 }
@@ -6702,9 +6711,9 @@ function renderPrizeFlagField(values = {}) {
   </div>`;
 }
 
-function renderWorkScheduleSelect(selectedId) {
+function renderWorkScheduleSelect(selectedId, required = false) {
   const options = getWorkSchedules().filter(item => item.is_active || item.id === Number(selectedId));
-  return `<label>Jornada de trabalho<select name="work_schedule_id"><option value="">Sem jornada (só sáb/dom/feriado pedem a flag)</option>${options.map(item => `<option value="${item.id}" ${Number(selectedId) === item.id ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></label>`;
+  return `<label>Jornada de trabalho${required ? ' *' : ''}<select name="work_schedule_id" ${required ? 'required' : ''}><option value="">${required ? 'Selecione...' : 'Sem jornada'}</option>${options.map(item => `<option value="${item.id}" ${Number(selectedId) === item.id ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></label>`;
 }
 
 function renderWorkSchedulesSection(values = {}, query = {}) {
@@ -7236,13 +7245,13 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
       <h3>Cadastro de colaborador</h3>
       <form class="form-grid" method="post" action="/employees">
         <label>Registro<input name="registration_code" required value="${escapeHtml(values.registration_code || '')}" /></label>
-        <label>Nome completo<input name="full_name" required value="${escapeHtml(values.full_name || '')}" /></label>
+        <label>Nome completo *<input name="full_name" required value="${escapeHtml(values.full_name || '')}" /></label>
         <label>Telefone (WhatsApp) *<input type="tel" name="phone" inputmode="numeric" required data-phone-mask maxlength="15" pattern="\\(\\d{2}\\) \\d{4,5}-\\d{4}" title="Informe DDD + número, ex.: (47) 99999-9999" placeholder="(47) 99999-9999" value="${escapeHtml(formatPhone(normalizePhone(values.phone)))}" /></label>
-        <label>Data de nascimento<input type="date" name="birth_date" value="${formatDateInput(values.birth_date)}" /></label>
-        <label>Data de início<input type="date" name="start_date" value="${formatDateInput(values.start_date)}" /></label>
+        <label>Data de nascimento *<input type="date" name="birth_date" required value="${formatDateInput(values.birth_date)}" /></label>
+        <label>Data de admissão *<input type="date" name="start_date" required value="${formatDateInput(values.start_date)}" /></label>
         <label>Data de rescisão<input type="date" name="termination_date" value="${formatDateInput(values.termination_date)}" /></label>
-        <label>Função<input name="job_role" value="${escapeHtml(values.job_role || '')}" /></label>
-        ${renderWorkScheduleSelect(values.work_schedule_id)}
+        <label>Função *<input name="job_role" required value="${escapeHtml(values.job_role || '')}" /></label>
+        ${renderWorkScheduleSelect(values.work_schedule_id, true)}
         <label class="full">Observações<textarea name="notes" rows="3">${escapeHtml(values.notes || '')}</textarea></label>
         <div class="full actions"><button class="btn" type="submit">Salvar colaborador</button><a class="btn secondary" href="/employees">Cancelar</a></div>
       </form>
@@ -7254,18 +7263,19 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
         <tbody>
           ${employees.map(emp => {
             const isEditing = editingId === emp.id;
+            const req = emp.termination_date ? '' : 'required';
             if (isEditing) {
               return `<tr>
                 <td colspan="11">
                   <form class="form-grid" method="post" action="/employees/${emp.id}">
                     <label>Registro<input name="registration_code" required value="${escapeHtml(emp.registration_code || '')}" /></label>
-                    <label>Nome completo<input name="full_name" required value="${escapeHtml(emp.full_name || '')}" /></label>
+                    <label>Nome completo *<input name="full_name" required value="${escapeHtml(emp.full_name || '')}" /></label>
                     <label>Telefone (WhatsApp)${emp.termination_date ? '' : ' *'}<input type="tel" name="phone" inputmode="numeric" ${emp.termination_date ? '' : 'required'} data-phone-mask maxlength="15" pattern="\\(\\d{2}\\) \\d{4,5}-\\d{4}" title="Informe DDD + número, ex.: (47) 99999-9999" placeholder="(47) 99999-9999" value="${escapeHtml(formatPhone(emp.phone))}" /></label>
-                    <label>Data de nascimento<input type="date" name="birth_date" value="${formatDateInput(emp.birth_date)}" /></label>
-                    <label>Data de início<input type="date" name="start_date" value="${formatDateInput(emp.start_date)}" /></label>
+                    <label>Data de nascimento${req ? ' *' : ''}<input type="date" name="birth_date" ${req} value="${formatDateInput(emp.birth_date)}" /></label>
+                    <label>Data de admissão${req ? ' *' : ''}<input type="date" name="start_date" ${req} value="${formatDateInput(emp.start_date)}" /></label>
                     <label>Data de rescisão<input type="date" name="termination_date" value="${formatDateInput(emp.termination_date)}" /></label>
-                    <label>Função<input name="job_role" value="${escapeHtml(emp.job_role || '')}" /></label>
-                    ${renderWorkScheduleSelect(emp.work_schedule_id)}
+                    <label>Função${req ? ' *' : ''}<input name="job_role" ${req} value="${escapeHtml(emp.job_role || '')}" /></label>
+                    ${renderWorkScheduleSelect(emp.work_schedule_id, Boolean(req))}
                     <label class="full">Observações<textarea name="notes" rows="3">${escapeHtml(emp.notes || '')}</textarea></label>
                     <div class="full actions"><button class="btn" type="submit">Salvar edição</button><a class="btn secondary" href="/employees">Cancelar</a></div>
                   </form>
