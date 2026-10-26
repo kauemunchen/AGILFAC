@@ -134,7 +134,7 @@ fieldset { border: 1px solid rgba(148, 163, 184, .35); border-radius: 10px; padd
 .table-zebra tbody tr:nth-child(odd) { background: #f3f4f6; }
 .table-zebra tbody tr:nth-child(even) { background: #ffffff; }
 .table-zebra tbody tr:hover { background: #e8f5ec; }
-.employees-table tr.is-active td:nth-child(2) { color: #15803d; font-weight: 600; }
+.employees-table tr.is-active td:nth-child(2) { color: inherit; }
 .employees-table tr.is-inactive td { color: #6b7280; }
 .status-tag { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: .85em; font-weight: 600; }
 .status-tag.ok { background: #dcfce7; color: #15803d; }
