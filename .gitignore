@@ -9,3 +9,4 @@ backups/
 *.bak*
 *.tar.gz
 *.log
+.deploy-failed

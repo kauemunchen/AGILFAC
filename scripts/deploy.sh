@@ -20,6 +20,8 @@ git fetch -q origin main || { log "ERRO: git fetch falhou"; exit 1; }
 OLD=$(git rev-parse HEAD)
 NEW=$(git rev-parse origin/main)
 [ "$OLD" = "$NEW" ] && exit 0
+# Versão que já falhou não é tentada de novo (evita reiniciar em loop); só tenta quando chegar commit novo
+[ -f .deploy-failed ] && [ "$(cat .deploy-failed)" = "$NEW" ] && exit 0
 
 log "Deploy ${OLD%${OLD#???????}} -> ${NEW%${NEW#???????}}"
 
@@ -36,7 +38,8 @@ tar -czf "$APP/backups/pre-deploy-$(date +%Y%m%d-%H%M%S).tar.gz" -C "$APP" data 
 ls -1t "$APP"/backups/pre-deploy-*.tar.gz 2>/dev/null | tail -n +31 | xargs -r rm -f
 
 rollback() {
-  log "FALHA: $1 — voltando para ${OLD%${OLD#???????}}"
+  log "FALHA: $1 — voltando para ${OLD%${OLD#???????}} (essa versão não será tentada de novo)"
+  echo "$NEW" > .deploy-failed
   git reset -q --hard "$OLD"
   docker restart "$CONTAINER" >/dev/null
   exit 1
@@ -62,11 +65,11 @@ done
 
 docker restart "$CONTAINER" >/dev/null || rollback "docker restart"
 
-# Saúde: até 30 s para responder sem erro 5xx
+# Saúde: até 2 min para responder sem erro 5xx (o container reinstala pacotes ao iniciar)
 i=0
-while [ $i -lt 15 ]; do
-  CODE=$(curl -s -o /dev/null -w '%{http_code}' "$HEALTH_URL" || echo 000)
-  case "$CODE" in 2*|3*|4*) log "OK: no ar (HTTP $CODE)"; exit 0 ;; esac
+while [ $i -lt 60 ]; do
+  CODE=$(curl -s -m 3 -o /dev/null -w "%{http_code}" "$HEALTH_URL" 2>/dev/null); [ -n "$CODE" ] || CODE=000
+  case "$CODE" in 2*|3*|4*) rm -f .deploy-failed; log "OK: no ar (HTTP $CODE) em $((i * 2))s"; exit 0 ;; esac
   i=$((i + 1)); sleep 2
 done
 rollback "sistema não respondeu (HTTP $CODE)"
