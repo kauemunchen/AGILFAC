@@ -1014,6 +1014,16 @@ function migrateWorkSchedulesAndPrizeFlag(tenantDb) {
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `);
+  ensureColumn(tenantDb, 'work_schedules', 'start_time', 'TEXT');
+  ensureColumn(tenantDb, 'work_schedules', 'end_time', 'TEXT');
+  ensureColumn(tenantDb, 'work_schedules', 'break_start', 'TEXT');
+  ensureColumn(tenantDb, 'work_schedules', 'break_end', 'TEXT');
+  tenantDb.exec(`
+    UPDATE work_schedules SET
+      start_time = COALESCE(start_time, printf('%02d:00', start_hour)),
+      end_time = COALESCE(end_time, printf('%02d:00', end_hour))
+    WHERE start_time IS NULL OR end_time IS NULL
+  `);
   ensureColumn(tenantDb, 'employees', 'work_schedule_id', 'INTEGER REFERENCES work_schedules(id)');
   ensureColumn(tenantDb, 'op_daily_productions', 'counts_for_prize', 'INTEGER NOT NULL DEFAULT 1');
   ensureColumn(tenantDb, 'hourly_productions', 'counts_for_prize', 'INTEGER NOT NULL DEFAULT 1');
@@ -6448,7 +6458,7 @@ function renderCadastrosPage(query = {}, values = {}, error = '', role = 'adm') 
       </section>
     </div>
 
-    ${renderWorkSchedulesSection(values)}
+    ${renderWorkSchedulesSection(values, query)}
   `;
   return pageLayout({ title: 'Cadastros', content, notice: query.notice || '', error: error || query.error || '', role });
 }
@@ -6460,10 +6470,49 @@ function getWorkSchedules({ onlyActive = false } = {}) {
   return db.prepare(`SELECT * FROM work_schedules ${onlyActive ? 'WHERE is_active = 1' : ''} ORDER BY name ASC`).all();
 }
 
+// "07:00" -> 420
+function timeToMinutes(value) {
+  const match = String(value || '').match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return null;
+  const minutes = Number(match[1]) * 60 + Number(match[2]);
+  return minutes >= 0 && minutes <= 24 * 60 ? minutes : null;
+}
+
+function getScheduleTimes(schedule) {
+  const start = timeToMinutes(schedule.start_time) ?? Number(schedule.start_hour || 0) * 60;
+  const end = timeToMinutes(schedule.end_time) ?? Number(schedule.end_hour || 24) * 60;
+  const breakStart = timeToMinutes(schedule.break_start);
+  const breakEnd = timeToMinutes(schedule.break_end);
+  const hasBreak = breakStart !== null && breakEnd !== null && breakEnd > breakStart;
+  return { start, end, breakStart: hasBreak ? breakStart : null, breakEnd: hasBreak ? breakEnd : null };
+}
+
+function getScheduleWorkMinutes(schedule) {
+  const t = getScheduleTimes(schedule);
+  return Math.max(t.end - t.start - (t.breakStart !== null ? t.breakEnd - t.breakStart : 0), 0);
+}
+
+function formatMinutesAsHours(minutes) {
+  return `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, '0')}`;
+}
+
 function formatWorkSchedule(schedule) {
   if (!schedule) return 'Sem jornada';
   const days = String(schedule.weekdays || '').split(',').filter(Boolean).map(d => WEEKDAY_LABELS[d]).join(', ');
-  return `${schedule.name} · ${String(schedule.start_hour).padStart(2, '0')}h–${String(schedule.end_hour).padStart(2, '0')}h · ${days}`;
+  const t = getScheduleTimes(schedule);
+  const hhmm = m => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  const pause = t.breakStart !== null ? ` · intervalo ${hhmm(t.breakStart)}–${hhmm(t.breakEnd)}` : '';
+  return `${schedule.name} · ${hhmm(t.start)}–${hhmm(t.end)}${pause} · ${days}`;
+}
+
+// A hora lançada (slot "HH:00") está dentro da jornada? Fora do início/término ou no intervalo = horário extra.
+function isSlotInsideSchedule(schedule, hourSlot) {
+  const slot = timeToMinutes(String(hourSlot).slice(0, 5));
+  if (slot === null) return true;
+  const t = getScheduleTimes(schedule);
+  if (slot < Math.floor(t.start / 60) * 60 || slot >= t.end) return false;
+  if (t.breakStart !== null && slot >= t.breakStart && slot < t.breakEnd) return false;
+  return true;
 }
 
 // Lançamento fora da jornada oficial? Retorna o motivo (vazio = dentro da jornada).
@@ -6478,10 +6527,7 @@ function getOutsideScheduleReason(employee, productionDate, hourSlot = '') {
     : null;
   const workDays = schedule ? String(schedule.weekdays || '').split(',').map(Number) : [1, 2, 3, 4, 5];
   if (!workDays.includes(weekday)) return weekday === 6 ? 'sábado' : (weekday === 0 ? 'domingo' : 'dia fora da jornada');
-  if (schedule && hourSlot) {
-    const hour = Number(String(hourSlot).slice(0, 2));
-    if (hour < Number(schedule.start_hour) || hour >= Number(schedule.end_hour)) return 'horário extra';
-  }
+  if (schedule && hourSlot && !isSlotInsideSchedule(schedule, hourSlot)) return 'horário extra ou intervalo';
   return '';
 }
 
@@ -6500,7 +6546,10 @@ function parseCountsForPrizeFlag(value) {
 
 // Script de cliente: mostra a flag "Conta para prêmio" quando a data/hora sai da jornada
 function renderPrizeFlagScript({ formSelector, employeeFieldSelector, dateFieldSelector, hourFieldSelector = '' }) {
-  const schedules = Object.fromEntries(getWorkSchedules().map(item => [item.id, { s: item.start_hour, e: item.end_hour, d: String(item.weekdays).split(',').map(Number) }]));
+  const schedules = Object.fromEntries(getWorkSchedules().map(item => {
+    const t = getScheduleTimes(item);
+    return [item.id, { s: Math.floor(t.start / 60) * 60, e: t.end, bs: t.breakStart, be: t.breakEnd, d: String(item.weekdays).split(',').map(Number) }];
+  }));
   const employeeSchedules = Object.fromEntries(db.prepare('SELECT id, work_schedule_id FROM employees').all().map(item => [item.id, item.work_schedule_id || 0]));
   const holidays = [...getHolidayDateSet()].filter(d => d >= '2025-01-01');
   return `<script>
@@ -6526,8 +6575,9 @@ function renderPrizeFlagScript({ formSelector, employeeFieldSelector, dateFieldS
         if (holidays.has(d)) reason = 'feriado';
         else if (!days.includes(wd)) reason = wd === 6 ? 'sábado' : (wd === 0 ? 'domingo' : 'dia fora da jornada');
         else if (sch && hour && hour.value) {
-          const h = Number(String(hour.value).replace(/\D/g, '').padStart(4, '0').slice(0, 2));
+          const h = Number(String(hour.value).replace(/\D/g, '').padStart(4, '0').slice(0, 2)) * 60;
           if (h < sch.s || h >= sch.e) reason = 'horário extra';
+          else if (sch.bs !== null && h >= sch.bs && h < sch.be) reason = 'intervalo';
         }
       }
       box.hidden = !reason;
@@ -6553,33 +6603,63 @@ function renderWorkScheduleSelect(selectedId) {
   return `<label>Jornada de trabalho<select name="work_schedule_id"><option value="">Sem jornada (só sáb/dom/feriado pedem a flag)</option>${options.map(item => `<option value="${item.id}" ${Number(selectedId) === item.id ? 'selected' : ''}>${escapeHtml(formatWorkSchedule(item))}</option>`).join('')}</select></label>`;
 }
 
-function renderWorkSchedulesSection(values = {}) {
-  const weekdays = String(values.weekdays_list || '1,2,3,4,5').split(',');
+function renderWorkSchedulesSection(values = {}, query = {}) {
+  const editing = query.edit_schedule ? db.prepare('SELECT * FROM work_schedules WHERE id = ?').get(Number(query.edit_schedule)) : null;
+  const v = editing && !values.schedule_name ? {
+    schedule_name: editing.name,
+    start_time: editing.start_time,
+    end_time: editing.end_time,
+    break_start: editing.break_start || '',
+    break_end: editing.break_end || '',
+    weekdays_list: editing.weekdays
+  } : values;
+  const weekdays = String(v.weekdays_list || '1,2,3,4,5').split(',');
   const list = getWorkSchedules();
   const usage = new Map(db.prepare('SELECT work_schedule_id AS id, COUNT(*) AS n FROM employees WHERE work_schedule_id IS NOT NULL AND is_active = 1 GROUP BY work_schedule_id').all().map(r => [r.id, r.n]));
   return `
-    <div class="two-columns cadastros-grid">
+    <div class="two-columns cadastros-grid" id="jornadas">
       <section class="panel">
-        <h3>Nova jornada de trabalho</h3>
-        <form class="stack-form" method="post" action="/work-schedules">
-          <label>Nome<input name="schedule_name" required value="${escapeHtml(values.schedule_name || '')}" placeholder="Ex.: Costura 07h–17h" /></label>
+        <h3>${editing ? `Editar jornada: ${escapeHtml(editing.name)}` : 'Nova jornada de trabalho'}</h3>
+        <form class="stack-form" method="post" action="${editing ? `/work-schedules/${editing.id}` : '/work-schedules'}" data-schedule-form>
+          <label>Nome<input name="schedule_name" required value="${escapeHtml(v.schedule_name || '')}" placeholder="Ex.: Primeiro turno" /></label>
           <div class="inline-form">
-            <label>Início (hora)<input name="start_hour" type="number" min="0" max="23" required value="${escapeHtml(values.start_hour || '7')}" inputmode="numeric" /></label>
-            <label>Fim (hora)<input name="end_hour" type="number" min="1" max="24" required value="${escapeHtml(values.end_hour || '17')}" inputmode="numeric" /></label>
+            <label>Início<input name="start_time" type="time" required value="${escapeHtml(v.start_time || '07:00')}" /></label>
+            <label>Término<input name="end_time" type="time" required value="${escapeHtml(v.end_time || '16:48')}" /></label>
           </div>
+          <div class="inline-form">
+            <label>Intervalo das<input name="break_start" type="time" value="${escapeHtml(v.break_start ?? '12:00')}" /></label>
+            <label>às<input name="break_end" type="time" value="${escapeHtml(v.break_end ?? '13:00')}" /></label>
+          </div>
+          <p class="hint">Tempo de trabalho: <strong data-schedule-total>-</strong> por dia (referência da base: 8h48 = 528 min).</p>
           <fieldset><legend>Dias de trabalho</legend>
             ${[1, 2, 3, 4, 5, 6, 0].map(d => `<label class="checkbox-line"><input type="checkbox" name="weekdays" value="${d}" ${weekdays.includes(String(d)) ? 'checked' : ''} /> ${WEEKDAY_LABELS[d]}</label>`).join('')}
           </fieldset>
-          <button class="btn" type="submit">Salvar jornada</button>
+          <div class="actions"><button class="btn" type="submit">${editing ? 'Salvar alterações' : 'Salvar jornada'}</button>${editing ? '<a class="btn secondary" href="/cadastros#jornadas">Cancelar</a>' : ''}</div>
         </form>
-        <p class="hint">Lançamentos fora da jornada da colaboradora (dia, horário ou feriado) mostram a opção "Conta para eficiência e prêmio". A base de cálculo continua 528 min por dia útil (seg–sex).</p>
+        <script>
+          (() => {
+            const f = document.querySelector('[data-schedule-form]');
+            if (!f) return;
+            const m = v => { const p = String(v || '').split(':'); return p.length === 2 ? Number(p[0]) * 60 + Number(p[1]) : null; };
+            const out = f.querySelector('[data-schedule-total]');
+            const calc = () => {
+              const s = m(f.start_time.value), e = m(f.end_time.value), bs = m(f.break_start.value), be = m(f.break_end.value);
+              if (s === null || e === null || e <= s) { out.textContent = '-'; return; }
+              const total = e - s - (bs !== null && be !== null && be > bs ? be - bs : 0);
+              out.textContent = Math.floor(total / 60) + 'h' + String(total % 60).padStart(2, '0') + ' (' + total + ' min)';
+            };
+            f.addEventListener('input', calc);
+            calc();
+          })();
+        </script>
+        <p class="hint">Lançamento por hora fora do início/término, no intervalo, em dia fora da jornada ou feriado mostra a opção "Conta para eficiência e prêmio". A base de cálculo continua 528 min por dia útil (seg–sex).</p>
       </section>
       <section class="panel">
         <h3>Jornadas cadastradas</h3>
         <table>
-          <thead><tr><th>Jornada</th><th>Colaboradoras ativas</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th>Jornada</th><th>Trabalho/dia</th><th>Colaboradoras ativas</th><th>Status</th><th></th></tr></thead>
           <tbody>
-            ${list.map(item => `<tr><td>${escapeHtml(formatWorkSchedule(item))}</td><td>${usage.get(item.id) || 0}</td><td>${item.is_active ? 'Ativa' : 'Inativa'}</td><td><form method="post" action="/work-schedules/${item.id}/toggle"><button class="btn secondary" type="submit">${item.is_active ? 'Inativar' : 'Ativar'}</button></form></td></tr>`).join('') || '<tr><td colspan="4">Nenhuma jornada cadastrada.</td></tr>'}
+            ${list.map(item => `<tr><td>${escapeHtml(formatWorkSchedule(item))}</td><td>${formatMinutesAsHours(getScheduleWorkMinutes(item))}</td><td>${usage.get(item.id) || 0}</td><td>${item.is_active ? 'Ativa' : 'Inativa'}</td><td class="actions"><a class="btn secondary" href="/cadastros?edit_schedule=${item.id}#jornadas">Editar</a><form method="post" action="/work-schedules/${item.id}/toggle"><button class="btn secondary" type="submit">${item.is_active ? 'Inativar' : 'Ativar'}</button></form></td></tr>`).join('') || '<tr><td colspan="5">Nenhuma jornada cadastrada.</td></tr>'}
           </tbody>
         </table>
         <p class="hint">Vincule a jornada no cadastro de cada colaboradora (menu Colaboradores).</p>
@@ -6587,25 +6667,62 @@ function renderWorkSchedulesSection(values = {}) {
     </div>`;
 }
 
-function handleCreateWorkSchedule(form, res, role) {
-  if (!isAdminRole(role)) return requireAdmin(null, res, role);
+function parseWorkScheduleForm(form) {
   const name = String(form.schedule_name || '').trim();
-  const startHour = Number(form.start_hour);
-  const endHour = Number(form.end_hour);
+  const startTime = String(form.start_time || '').trim();
+  const endTime = String(form.end_time || '').trim();
+  const breakStart = String(form.break_start || '').trim();
+  const breakEnd = String(form.break_end || '').trim();
   const weekdays = (Array.isArray(form.weekdays) ? form.weekdays : [form.weekdays]).filter(v => v !== undefined && v !== '').map(Number).filter(d => d >= 0 && d <= 6);
   const back = { ...form, weekdays_list: weekdays.join(',') };
-  if (!name) return sendHtml(res, renderCadastrosPage({}, back, 'Informe o nome da jornada.', role), 422);
-  if (!Number.isInteger(startHour) || !Number.isInteger(endHour) || startHour < 0 || endHour > 24 || startHour >= endHour) {
-    return sendHtml(res, renderCadastrosPage({}, back, 'Horário inválido: o início deve ser menor que o fim (0 a 24h).', role), 422);
-  }
-  if (!weekdays.length) return sendHtml(res, renderCadastrosPage({}, back, 'Marque ao menos um dia de trabalho.', role), 422);
+  const s = timeToMinutes(startTime), e = timeToMinutes(endTime), bs = timeToMinutes(breakStart), be = timeToMinutes(breakEnd);
+  let error = '';
+  if (!name) error = 'Informe o nome da jornada.';
+  else if (s === null || e === null || s >= e) error = 'Horário inválido: o início deve ser antes do término.';
+  else if ((breakStart || breakEnd) && (bs === null || be === null || bs >= be || bs < s || be > e)) error = 'Intervalo inválido: precisa ter início e fim, dentro da jornada.';
+  else if (!weekdays.length) error = 'Marque ao menos um dia de trabalho.';
+  return {
+    error,
+    back,
+    row: {
+      name, startTime, endTime,
+      breakStart: breakStart && breakEnd ? breakStart : null,
+      breakEnd: breakStart && breakEnd ? breakEnd : null,
+      startHour: s === null ? 0 : Math.floor(s / 60),
+      endHour: e === null ? 24 : Math.min(Math.ceil(e / 60), 24),
+      weekdays: [...new Set(weekdays)].sort().join(',')
+    }
+  };
+}
+
+function handleCreateWorkSchedule(form, res, role) {
+  if (!isAdminRole(role)) return requireAdmin(null, res, role);
+  const { error, back, row } = parseWorkScheduleForm(form);
+  if (error) return sendHtml(res, renderCadastrosPage({}, back, error, role), 422);
   try {
-    db.prepare('INSERT INTO work_schedules (name, start_hour, end_hour, weekdays) VALUES (?, ?, ?, ?)')
-      .run(name, startHour, endHour, [...new Set(weekdays)].sort().join(','));
-    redirect(res, `/cadastros?notice=${encodeURIComponent('Jornada cadastrada com sucesso.')}`);
-  } catch (error) {
-    const msg = error.message.includes('UNIQUE') ? 'Já existe uma jornada com esse nome.' : `Erro ao salvar jornada: ${error.message}`;
+    db.prepare(`INSERT INTO work_schedules (name, start_hour, end_hour, start_time, end_time, break_start, break_end, weekdays)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(row.name, row.startHour, row.endHour, row.startTime, row.endTime, row.breakStart, row.breakEnd, row.weekdays);
+    redirect(res, `/cadastros?notice=${encodeURIComponent('Jornada cadastrada com sucesso.')}#jornadas`);
+  } catch (err) {
+    const msg = err.message.includes('UNIQUE') ? 'Já existe uma jornada com esse nome.' : `Erro ao salvar jornada: ${err.message}`;
     sendHtml(res, renderCadastrosPage({}, back, msg, role), 422);
+  }
+}
+
+function handleUpdateWorkSchedule(id, form, res, role) {
+  if (!isAdminRole(role)) return requireAdmin(null, res, role);
+  const { error, back, row } = parseWorkScheduleForm(form);
+  if (error) return sendHtml(res, renderCadastrosPage({ edit_schedule: String(id) }, back, error, role), 422);
+  try {
+    const result = db.prepare(`UPDATE work_schedules SET name = ?, start_hour = ?, end_hour = ?, start_time = ?, end_time = ?,
+      break_start = ?, break_end = ?, weekdays = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+      .run(row.name, row.startHour, row.endHour, row.startTime, row.endTime, row.breakStart, row.breakEnd, row.weekdays, id);
+    if (!result.changes) return redirect(res, `/cadastros?error=${encodeURIComponent('Jornada não encontrada.')}`);
+    redirect(res, `/cadastros?notice=${encodeURIComponent('Jornada atualizada.')}#jornadas`);
+  } catch (err) {
+    const msg = err.message.includes('UNIQUE') ? 'Já existe uma jornada com esse nome.' : `Erro ao salvar jornada: ${err.message}`;
+    sendHtml(res, renderCadastrosPage({ edit_schedule: String(id) }, back, msg, role), 422);
   }
 }
 
@@ -8981,6 +9098,8 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && pathname === '/work-schedules') return handleCreateWorkSchedule(await parseBody(req), res, role);
       const workScheduleToggleMatch = pathname.match(/^\/work-schedules\/(\d+)\/toggle$/);
       if (req.method === 'POST' && workScheduleToggleMatch) return handleToggleWorkSchedule(Number(workScheduleToggleMatch[1]), res, role);
+      const workScheduleUpdateMatch = pathname.match(/^\/work-schedules\/(\d+)$/);
+      if (req.method === 'POST' && workScheduleUpdateMatch) return handleUpdateWorkSchedule(Number(workScheduleUpdateMatch[1]), await parseBody(req), res, role);
       if (req.method === 'GET' && pathname === '/cells/report') return sendHtml(res, renderCellReportPage(query, role));
       if (req.method === 'GET' && pathname === '/cells/closures') return sendHtml(res, renderCellClosuresPage(query, {}, '', role));
       if (req.method === 'POST' && pathname === '/cells/closures') return handleCreateCellClosure(await parseBody(req), res, role);
