@@ -928,6 +928,92 @@ function migrateDatabase(tenantDb = db) {
     JOIN employees e ON e.id = p.employee_id
     GROUP BY p.employee_id, e.registration_code, e.full_name, e.start_date, e.termination_date, p.production_date
   `);
+
+  migrateWorkSchedulesAndPrizeFlag(tenantDb);
+}
+
+// T0.3/T0.4 — Jornadas de trabalho e flag "conta para prêmio" nos lançamentos.
+function migrateWorkSchedulesAndPrizeFlag(tenantDb) {
+  tenantDb.exec(`
+    CREATE TABLE IF NOT EXISTS work_schedules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      start_hour INTEGER NOT NULL CHECK (start_hour BETWEEN 0 AND 23),
+      end_hour INTEGER NOT NULL CHECK (end_hour BETWEEN 1 AND 24),
+      weekdays TEXT NOT NULL DEFAULT '1,2,3,4,5',
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  ensureColumn(tenantDb, 'employees', 'work_schedule_id', 'INTEGER REFERENCES work_schedules(id)');
+  ensureColumn(tenantDb, 'op_daily_productions', 'counts_for_prize', 'INTEGER NOT NULL DEFAULT 1');
+  ensureColumn(tenantDb, 'hourly_productions', 'counts_for_prize', 'INTEGER NOT NULL DEFAULT 1');
+  tenantDb.exec(`
+    CREATE TABLE IF NOT EXISTS prize_flag_migration_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      daily_production_id INTEGER NOT NULL,
+      production_date TEXT NOT NULL,
+      employee_id INTEGER NOT NULL,
+      produced_minutes REAL NOT NULL,
+      reason TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  // Migração única: lançamentos antigos em sábado, domingo, feriado ou fora do período
+  // ativo da colaboradora passam a NÃO contar para eficiência/prêmio (decisão do dono, 26/10/2026).
+  const done = tenantDb.prepare("SELECT value FROM app_settings WHERE key = 'migration_prize_flag_v1'").get();
+  if (done) return;
+
+  const setting = key => tenantDb.prepare('SELECT value FROM app_settings WHERE key = ?').get(key)?.value || '';
+  const holidays = buildHolidaySet(setting('holiday_dates'), setting('holiday_recurring_mmdd'), setting('worked_holiday_dates'));
+  const rows = tenantDb.prepare(`
+    SELECT p.id, p.production_date, p.employee_id, p.produced_minutes, e.start_date, e.termination_date
+    FROM op_daily_productions p
+    JOIN employees e ON e.id = p.employee_id
+    WHERE p.is_reversed = 0 AND p.counts_for_prize = 1
+  `).all();
+  const mark = tenantDb.prepare('UPDATE op_daily_productions SET counts_for_prize = 0 WHERE id = ?');
+  const markHourly = tenantDb.prepare('UPDATE hourly_productions SET counts_for_prize = 0 WHERE validated_daily_production_id = ?');
+  const log = tenantDb.prepare('INSERT INTO prize_flag_migration_log (daily_production_id, production_date, employee_id, produced_minutes, reason) VALUES (?, ?, ?, ?, ?)');
+  tenantDb.exec('BEGIN');
+  try {
+    for (const row of rows) {
+      const reason = getNonPrizeReason(row.production_date, row, holidays);
+      if (!reason) continue;
+      mark.run(row.id);
+      markHourly.run(row.id);
+      log.run(row.id, row.production_date, row.employee_id, Number(row.produced_minutes || 0), reason);
+    }
+    tenantDb.prepare("INSERT INTO app_settings (key, value, updated_at) VALUES ('migration_prize_flag_v1', ?, CURRENT_TIMESTAMP)").run(new Date().toISOString());
+    tenantDb.exec('COMMIT');
+  } catch (error) {
+    tenantDb.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+function buildHolidaySet(explicitRaw, recurringRaw, workedOverrideRaw) {
+  const split = raw => String(raw || '').split(/[,\n;]/).map(item => item.trim()).filter(Boolean);
+  const all = new Set(split(explicitRaw));
+  for (const mmdd of split(recurringRaw)) {
+    if (!/^\d{2}-\d{2}$/.test(mmdd)) continue;
+    for (let year = 2020; year <= 2035; year += 1) all.add(`${year}-${mmdd}`);
+  }
+  for (const workedDate of split(workedOverrideRaw)) all.delete(workedDate);
+  return all;
+}
+
+// Motivo pelo qual um dia NÃO é dia útil da colaboradora (vazio = dia útil normal)
+function getNonPrizeReason(dateValue, employee, holidays) {
+  if (employee?.start_date && dateValue < employee.start_date) return 'antes_admissao';
+  if (employee?.termination_date && dateValue > employee.termination_date) return 'apos_desligamento';
+  if (holidays.has(dateValue)) return 'feriado';
+  const weekday = new Date(`${dateValue}T00:00:00Z`).getUTCDay();
+  if (weekday === 6) return 'sabado';
+  if (weekday === 0) return 'domingo';
+  return '';
 }
 
 
@@ -1692,42 +1778,11 @@ function getCompanyName() {
 }
 
 function getHolidayDateSet() {
-  const explicitRaw = getAppSetting('holiday_dates', '');
-  const recurringRaw = getAppSetting('holiday_recurring_mmdd', '');
-  const workedOverrideRaw = getAppSetting('worked_holiday_dates', '');
-
-  const explicit = String(explicitRaw || '')
-    .split(/[,\n;]/)
-    .map(item => item.trim())
-    .filter(Boolean);
-
-  const recurring = String(recurringRaw || '')
-    .split(/[,\n;]/)
-    .map(item => item.trim())
-    .filter(Boolean);
-
-  const workedOverrides = new Set(
-    String(workedOverrideRaw || '')
-      .split(/[,\n;]/)
-      .map(item => item.trim())
-      .filter(Boolean)
+  return buildHolidaySet(
+    getAppSetting('holiday_dates', ''),
+    getAppSetting('holiday_recurring_mmdd', ''),
+    getAppSetting('worked_holiday_dates', '')
   );
-
-  const all = new Set(explicit);
-  for (const mmdd of recurring) {
-    if (!/^\d{2}-\d{2}$/.test(mmdd)) continue;
-    const [month, day] = mmdd.split('-').map(Number);
-    for (let year = 2020; year <= 2035; year += 1) {
-      const isoDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-      all.add(isoDate);
-    }
-  }
-
-  for (const workedDate of workedOverrides) {
-    all.delete(workedDate);
-  }
-
-  return all;
 }
 
 function setAppSetting(key, value) {
@@ -2008,54 +2063,32 @@ function getDashboardData(period = 'day', date = today(), opType = 'mostruario',
     ${launchWhere.length ? 'AND' : 'WHERE'} p.production_date BETWEEN ? AND ?
   `).get(...launchParams, dailyRange.start, dailyRange.end);
 
-  const employeeOpConditions = [];
-  const employeeOpParams = [];
-  if (opType) {
-    employeeOpConditions.push('o.op_type = ?');
-    employeeOpParams.push(opType);
-    employeeOpConditions.push("COALESCE(o.lifecycle_type, 'normal') NOT IN ('nao_industrializada', 'devolvida_sem_producao')");
-  }
-  if (brand) {
-    employeeOpConditions.push('o.brand = ?');
-    employeeOpParams.push(brand);
-  }
-  const employeeOpJoinSql = employeeOpConditions.length ? ` AND ${employeeOpConditions.join(' AND ')}` : '';
-
-  const employeeRows = db.prepare(`
-    SELECT
-      e.id,
-      e.registration_code,
-      e.full_name,
-      e.start_date,
-      e.termination_date,
-      e.is_active,
-      COALESCE(SUM(p.produced_minutes), 0) AS produced_minutes,
-      COALESCE(SUM(p.produced_quantity), 0) AS produced_quantity
-    FROM employees e
-    LEFT JOIN op_daily_productions p
-      ON p.employee_id = e.id
-      AND p.is_reversed = 0
-      AND p.production_date BETWEEN ? AND ?
-    LEFT JOIN ops o ON o.id = p.op_id${employeeOpJoinSql}
-    GROUP BY e.id, e.registration_code, e.full_name, e.start_date, e.termination_date, e.is_active
-    ORDER BY produced_minutes DESC, e.full_name ASC
-  `).all(dailyRange.start, dailyRange.end, ...employeeOpParams);
-
-  const employees = employeeRows
+  // Eficiência das colaboradoras: regra oficial única, todas as OPs, até o corte
+  // (último dia útil anterior a hoje), igual ao Acompanhamento diário.
+  const efficiencyCutoff = [dailyRange.end, getPreviousBusinessDay(today())].sort()[0];
+  const allEmployees = db.prepare(`
+    SELECT id, registration_code, full_name, start_date, termination_date, is_active
+    FROM employees
+  `).all();
+  const countedMap = efficiencyCutoff >= dailyRange.start
+    ? getCountedProductionByEmployee(dailyRange.start, efficiencyCutoff, allEmployees)
+    : new Map();
+  const employees = allEmployees
     .map(employee => {
-      const activeDays = getEmployeeBusinessDaysInRange(employee, dailyRange.start, dailyRange.end).length;
-      const availableMinutes = round2(activeDays * AVAILABLE_MINUTES_DAY);
-      const efficiencyPercent = availableMinutes > 0
-        ? round2((Number(employee.produced_minutes || 0) / availableMinutes) * 100)
-        : 0;
+      const counted = countedMap.get(employee.id);
+      const producedMinutes = round2(counted?.minutes || 0);
+      const eff = calculateEmployeeEfficiency(employee, producedMinutes, dailyRange.start, dailyRange.end, efficiencyCutoff);
       return {
         ...employee,
-        active_days: activeDays,
-        available_minutes: availableMinutes,
-        efficiency_percent: efficiencyPercent
+        produced_minutes: producedMinutes,
+        produced_quantity: Number(counted?.qty || 0),
+        active_days: eff.business_days,
+        available_minutes: eff.available_minutes,
+        efficiency_percent: eff.efficiency_percent
       };
     })
-    .filter(employee => employee.active_days > 0);
+    .filter(employee => getEmployeeBusinessDaysInRange(employee, dailyRange.start, dailyRange.end).length > 0)
+    .sort((x, y) => (y.produced_minutes - x.produced_minutes) || String(x.full_name).localeCompare(String(y.full_name)));
 
   const opRows = db.prepare(`
     SELECT
@@ -2160,6 +2193,7 @@ function getDashboardData(period = 'day', date = today(), opType = 'mostruario',
     opRows,
     pinkOpRows,
     brands,
+    efficiencyCutoff,
     status: {
       ...cardSource,
       pink_sewing_minutes: cardSource.pink_sewing_minutes || 0,
@@ -2183,9 +2217,7 @@ function getEmployeeDailyResultRows(rangeStart, rangeEnd, employeeId = '') {
     SELECT p.employee_id, p.production_date, ROUND(SUM(p.produced_minutes), 3) AS produced_minutes, SUM(p.produced_quantity) AS produced_quantity
     FROM op_daily_productions p
     JOIN ops o ON o.id = p.op_id
-    WHERE p.is_reversed = 0
-      AND o.is_reversed = 0
-      AND COALESCE(o.lifecycle_type, 'normal') NOT IN ('nao_industrializada', 'devolvida_sem_producao')
+    WHERE ${COUNTED_PRODUCTION_WHERE}
       AND p.production_date BETWEEN ? AND ?
     GROUP BY p.employee_id, p.production_date
   `).all(rangeStart, rangeEnd);
@@ -2829,6 +2861,68 @@ function getEmployeeBusinessDaysInRange(employee, rangeStart, rangeEnd) {
   return enumerateDates(effective.start, effective.end).filter(isBusinessDay);
 }
 
+// ===================== REGRA OFICIAL DE EFICIÊNCIA (T0.3) =====================
+// Usada por Dashboard, Acompanhamento diário, Fechamento e Prêmio. Não duplicar.
+// Minutos que contam: lançamento ativo, marcado "conta para prêmio", em OP não estornada
+// e industrializada, de qualquer tipo de OP, dentro do período ativo da colaboradora.
+// Base: 528 min × dias úteis (seg–sex, sem feriado) do período ativo da colaboradora.
+const COUNTED_PRODUCTION_WHERE = `
+  p.is_reversed = 0
+  AND COALESCE(p.counts_for_prize, 1) = 1
+  AND COALESCE(o.is_reversed, 0) = 0
+  AND COALESCE(o.lifecycle_type, 'normal') NOT IN ('nao_industrializada', 'devolvida_sem_producao')
+`;
+
+function getCountedProductionByEmployee(rangeStart, rangeEnd, employees) {
+  const rows = db.prepare(`
+    SELECT p.employee_id, p.production_date,
+      SUM(p.produced_quantity) AS qty,
+      SUM(p.normal_minutes) AS normal_minutes,
+      SUM(p.extra_minutes) AS extra_minutes,
+      SUM(p.produced_minutes) AS minutes
+    FROM op_daily_productions p
+    JOIN ops o ON o.id = p.op_id
+    WHERE ${COUNTED_PRODUCTION_WHERE}
+      AND p.production_date BETWEEN ? AND ?
+    GROUP BY p.employee_id, p.production_date
+  `).all(rangeStart, rangeEnd);
+  const employeeById = new Map((employees || []).map(employee => [employee.id, employee]));
+  const result = new Map();
+  for (const row of rows) {
+    const employee = employeeById.get(row.employee_id);
+    if (employee) {
+      const effective = getEmployeeEffectiveRange(employee, rangeStart, rangeEnd);
+      if (!effective || row.production_date < effective.start || row.production_date > effective.end) continue;
+    }
+    const acc = result.get(row.employee_id) || { qty: 0, normal_minutes: 0, extra_minutes: 0, minutes: 0, last_production_date: '' };
+    acc.qty += Number(row.qty || 0);
+    acc.normal_minutes += Number(row.normal_minutes || 0);
+    acc.extra_minutes += Number(row.extra_minutes || 0);
+    acc.minutes += Number(row.minutes || 0);
+    if (row.production_date > acc.last_production_date) acc.last_production_date = row.production_date;
+    result.set(row.employee_id, acc);
+  }
+  for (const acc of result.values()) {
+    acc.normal_minutes = round2(acc.normal_minutes);
+    acc.extra_minutes = round2(acc.extra_minutes);
+    acc.minutes = round2(acc.minutes);
+  }
+  return result;
+}
+
+// Eficiência de uma colaboradora. cutoff informado = "até o corte"; vazio = período cheio.
+function calculateEmployeeEfficiency(employee, producedMinutes, rangeStart, rangeEnd, cutoff = '') {
+  const end = cutoff && cutoff < rangeEnd ? cutoff : rangeEnd;
+  const businessDays = end >= rangeStart ? getEmployeeBusinessDaysInRange(employee, rangeStart, end) : [];
+  const availableMinutes = round2(businessDays.length * AVAILABLE_MINUTES_DAY);
+  return {
+    business_days: businessDays.length,
+    available_minutes: availableMinutes,
+    efficiency_percent: availableMinutes > 0 ? round2((Number(producedMinutes || 0) / availableMinutes) * 100) : 0
+  };
+}
+// =============================================================================
+
 function getClosureStatusLabel(item) {
   if (item.has_production) return 'Com lançamento';
   if (item.absence_type) return `Ausência: ${item.absence_type}`;
@@ -2866,15 +2960,19 @@ function getMonthlyClosureData(baseDate = today(), period = 'month', employeeId 
     ? employees.filter(employee => employee.id === employeeFilterId)
     : employees;
 
+  // Presença no dia considera qualquer lançamento; minutos consideram só o que conta (regra oficial)
   const productionRows = db.prepare(`
-    SELECT employee_id, production_date, COUNT(*) AS launches, SUM(produced_quantity) AS qty,
-      ROUND(SUM(normal_minutes), 2) AS normal_minutes,
-      ROUND(SUM(extra_minutes), 2) AS extra_minutes,
-      ROUND(SUM(produced_minutes), 2) AS minutes
-    FROM op_daily_productions
-    WHERE is_reversed = 0 AND production_date BETWEEN ? AND ?
-    GROUP BY employee_id, production_date
+    SELECT p.employee_id, p.production_date, COUNT(*) AS launches,
+      SUM(CASE WHEN ${COUNTED_PRODUCTION_WHERE} THEN p.produced_quantity ELSE 0 END) AS qty,
+      ROUND(SUM(CASE WHEN ${COUNTED_PRODUCTION_WHERE} THEN p.normal_minutes ELSE 0 END), 2) AS normal_minutes,
+      ROUND(SUM(CASE WHEN ${COUNTED_PRODUCTION_WHERE} THEN p.extra_minutes ELSE 0 END), 2) AS extra_minutes,
+      ROUND(SUM(CASE WHEN ${COUNTED_PRODUCTION_WHERE} THEN p.produced_minutes ELSE 0 END), 2) AS minutes
+    FROM op_daily_productions p
+    JOIN ops o ON o.id = p.op_id
+    WHERE p.is_reversed = 0 AND p.production_date BETWEEN ? AND ?
+    GROUP BY p.employee_id, p.production_date
   `).all(range.start, range.end);
+  const countedMap = getCountedProductionByEmployee(range.start, range.end, employees);
 
   const closureRows = db.prepare(`
     SELECT employee_id, work_date, status_type, justification, notes, updated_at
@@ -2982,8 +3080,14 @@ function getMonthlyClosureData(baseDate = today(), period = 'month', employeeId 
       }
     }
 
-    const availableMinutes = round2(businessDays.length * AVAILABLE_MINUTES_DAY);
-    const efficiencyPercent = availableMinutes > 0 ? round2((producedMinutes / availableMinutes) * 100) : 0;
+    // Totais da colaboradora pela regra oficial (inclui sábado/feriado marcado "conta para prêmio")
+    const counted = countedMap.get(employee.id);
+    producedQuantity = Number(counted?.qty || 0);
+    producedNormalMinutes = round2(counted?.normal_minutes || 0);
+    producedExtraMinutes = round2(counted?.extra_minutes || 0);
+    producedMinutes = round2(counted?.minutes || 0);
+    const { available_minutes: availableMinutes, efficiency_percent: efficiencyPercent } =
+      calculateEmployeeEfficiency(employee, producedMinutes, range.start, range.end);
 
     const summary = {
       ...employee,
@@ -3140,7 +3244,7 @@ function renderClosureCards(data) {
       <article class="card"><span>Min. normais</span><strong>${data.totals.normalMinutes.toFixed(2)}</strong><small>Base sem tempo extra</small></article>
       <article class="card"><span>Min. extras</span><strong>${data.totals.extraMinutes.toFixed(2)}</strong><small>Tempo extra aplicado no período</small></article>
       <article class="card"><span>Minutos produzidos</span><strong>${data.totals.producedMinutes.toFixed(2)}</strong><small>Total de costura lançada</small></article>
-      <article class="card"><span>Eficiência do período</span><strong>${data.totals.efficiencyPercent.toFixed(2)}%</strong><small>Minutos produzidos ÷ base monitorada</small></article>
+      <article class="card"><span>Eficiência do período cheio</span><strong>${data.totals.efficiencyPercent.toFixed(2)}%</strong><small>Minutos que contam para prêmio ÷ base do período inteiro</small></article>
     </div>
   `;
 }
@@ -3195,19 +3299,9 @@ function getDailyTrackingData(baseDate = today(), period = 'month', employeeId =
     ? employees.filter(employee => employee.id === employeeFilterId)
     : employees;
 
-  const accumulatedRows = db.prepare(`
-    SELECT
-      employee_id,
-      SUM(produced_quantity) AS qty,
-      ROUND(SUM(normal_minutes), 2) AS normal_minutes,
-      ROUND(SUM(extra_minutes), 2) AS extra_minutes,
-      ROUND(SUM(produced_minutes), 2) AS minutes,
-      MAX(production_date) AS last_production_date
-    FROM op_daily_productions
-    WHERE is_reversed = 0 AND production_date BETWEEN ? AND ?
-    GROUP BY employee_id
-  `).all(range.start, progressEnd);
-  const accumulatedMap = new Map(accumulatedRows.map(row => [row.employee_id, row]));
+  const accumulatedMap = progressEnd >= range.start
+    ? getCountedProductionByEmployee(range.start, progressEnd, employees)
+    : new Map();
 
   const employeeSummaries = [];
   for (const employee of filteredEmployees) {
@@ -3372,9 +3466,9 @@ function renderDailyTrackingCards(data) {
       <article class="card"><span>Minutos acumulados</span><strong>${data.totals.producedMinutes.toFixed(2)}</strong><small>Total lançado até o corte atual</small></article>
       <article class="card tracking-status-good"><span>Já em 60%+</span><strong>${data.totals.reachedCurrentTarget}</strong><small>${data.management.hitRatePercent.toFixed(2)}% do time no alvo</small></article>
       <article class="card tracking-status-risk"><span>Abaixo de 60%</span><strong>${data.totals.belowCurrentTarget}</strong><small>Quem ainda pede reação no período</small></article>
-      <article class="card"><span>% atual geral</span><strong>${data.totals.currentPercent.toFixed(2)}%</strong><small>Contra os minutos úteis já decorridos</small></article>
+      <article class="card"><span>Eficiência até o corte (${formatDatePtBr(data.progressEnd)})</span><strong>${data.totals.currentPercent.toFixed(2)}%</strong><small>Contra os minutos úteis já decorridos</small></article>
       <article class="card"><span>Faltam para 60%</span><strong>${data.totals.minutesToCurrentTarget.toFixed(2)}</strong><small>Gap consolidado até a meta atual</small></article>
-      <article class="card"><span>% sobre período cheio</span><strong>${data.totals.fullPeriodPercent.toFixed(2)}%</strong><small>Leitura conservadora do mês completo</small></article>
+      <article class="card"><span>Eficiência do período cheio</span><strong>${data.totals.fullPeriodPercent.toFixed(2)}%</strong><small>Minutos até o corte ÷ base do período inteiro</small></article>
     </div>
   `;
 }
@@ -3382,7 +3476,7 @@ function renderDailyTrackingCards(data) {
 function renderDailyTrackingRankingTable(data) {
   return `
     <table>
-      <thead><tr><th>Rank</th><th>Colaboradora</th><th>Status</th><th>Dias úteis</th><th>Minutos acumulados</th><th>Base atual</th><th>% atual</th><th>Meta atual 60%</th><th>Faltam p/ 60%</th><th>% período cheio</th><th>Último lançamento</th></tr></thead>
+      <thead><tr><th>Rank</th><th>Colaboradora</th><th>Status</th><th>Dias úteis</th><th>Minutos acumulados</th><th>Base atual</th><th>% até o corte</th><th>Meta atual 60%</th><th>Faltam p/ 60%</th><th>% período cheio</th><th>Último lançamento</th></tr></thead>
       <tbody>
         ${data.employeeSummaries.map(emp => `<tr class="${emp.status_meta.rowClass}"><td><strong>#${emp.ranking_position}</strong></td><td><strong>${escapeHtml(emp.full_name)}</strong><br /><span class="hint">${escapeHtml(emp.registration_code)}</span></td><td><span class="${emp.status_meta.badgeClass}">${emp.status_meta.label}</span></td><td>${emp.business_days_elapsed}/${emp.business_days_total}</td><td>${emp.produced_minutes.toFixed(2)}</td><td>${emp.elapsed_available_minutes.toFixed(2)}</td><td class="${emp.status_meta.textClass}">${emp.current_percent.toFixed(2)}%</td><td>${emp.current_target_minutes.toFixed(2)}</td><td>${emp.minutes_to_current_target.toFixed(2)}</td><td>${emp.full_period_percent.toFixed(2)}%</td><td>${emp.last_production_date ? formatDatePtBr(emp.last_production_date) : '-'}</td></tr>`).join('') || '<tr><td colspan="11">Nenhum colaborador ativo nesse período.</td></tr>'}
       </tbody>
@@ -3393,7 +3487,7 @@ function renderDailyTrackingRankingTable(data) {
 function renderDailyTrackingPrintTable(data) {
   return `
     <table>
-      <thead><tr><th>Rank</th><th>Registro</th><th>Colaboradora</th><th>Status</th><th>Dias úteis</th><th>Peças</th><th>Min. normais</th><th>Min. extras</th><th>Min. acumulados</th><th>Base atual</th><th>% atual</th><th>Meta 60%</th><th>Gap 60%</th><th>% período cheio</th><th>Último lançamento</th></tr></thead>
+      <thead><tr><th>Rank</th><th>Registro</th><th>Colaboradora</th><th>Status</th><th>Dias úteis</th><th>Peças</th><th>Min. normais</th><th>Min. extras</th><th>Min. acumulados</th><th>Base atual</th><th>% até o corte</th><th>Meta 60%</th><th>Gap 60%</th><th>% período cheio</th><th>Último lançamento</th></tr></thead>
       <tbody>
         ${data.employeeSummaries.map(emp => `<tr class="${emp.status_meta.rowClass}"><td><strong>#${emp.ranking_position}</strong></td><td>${escapeHtml(emp.registration_code)}</td><td><strong>${escapeHtml(emp.full_name)}</strong></td><td><span class="${emp.status_meta.badgeClass}">${emp.status_meta.label}</span></td><td>${emp.business_days_elapsed}/${emp.business_days_total}</td><td>${emp.produced_quantity}</td><td>${emp.normal_minutes.toFixed(2)}</td><td>${emp.extra_minutes.toFixed(2)}</td><td>${emp.produced_minutes.toFixed(2)}</td><td>${emp.elapsed_available_minutes.toFixed(2)}</td><td class="${emp.status_meta.textClass}">${emp.current_percent.toFixed(2)}%</td><td>${emp.current_target_minutes.toFixed(2)}</td><td>${emp.minutes_to_current_target.toFixed(2)}</td><td>${emp.full_period_percent.toFixed(2)}%</td><td>${emp.last_production_date ? formatDatePtBr(emp.last_production_date) : '-'}</td></tr>`).join('') || '<tr><td colspan="15">Nenhum colaborador ativo nesse período.</td></tr>'}
       </tbody>
@@ -3567,16 +3661,7 @@ function getProductionPrizeData(baseDate = today(), period = 'month', employeeId
     ? employees.filter(employee => employee.id === employeeFilterId)
     : employees;
 
-  const productionRows = db.prepare(`
-    SELECT employee_id, SUM(produced_quantity) AS qty,
-      ROUND(SUM(normal_minutes), 2) AS normal_minutes,
-      ROUND(SUM(extra_minutes), 2) AS extra_minutes,
-      ROUND(SUM(produced_minutes), 2) AS minutes
-    FROM op_daily_productions
-    WHERE is_reversed = 0 AND production_date BETWEEN ? AND ?
-    GROUP BY employee_id
-  `).all(range.start, range.end);
-  const productionMap = new Map(productionRows.map(row => [row.employee_id, row]));
+  const productionMap = getCountedProductionByEmployee(range.start, range.end, employees);
 
   const employeeSummaries = [];
   for (const employee of filteredEmployees) {
@@ -3723,7 +3808,7 @@ function renderProductionPrizeCards(data) {
       <article class="card"><span>Min. normais</span><strong>${data.totals.normalMinutes.toFixed(2)}</strong><small>Base sem o tempo extra</small></article>
       <article class="card"><span>Min. extras</span><strong>${data.totals.producedExtraMinutes.toFixed(2)}</strong><small>Tempo extra já incluído na eficiência</small></article>
       <article class="card"><span>Total previsto</span><strong>R$ ${data.totals.totalPrize.toFixed(2)}</strong><small>Soma das três colunas do relatório</small></article>
-      <article class="card"><span>Eficiência do período</span><strong>${data.totals.efficiencyPercent.toFixed(2)}%</strong><small>Minutos produzidos ÷ base monitorada</small></article>
+      <article class="card"><span>Eficiência do período cheio</span><strong>${data.totals.efficiencyPercent.toFixed(2)}%</strong><small>Minutos que contam para prêmio ÷ base do período inteiro</small></article>
     </div>
   `;
 }
@@ -4483,8 +4568,8 @@ function handleCreateEmployee(form, res) {
   const birthDate = form.birth_date || null;
   const jobRole = form.job_role || null;
   try {
-    db.prepare('INSERT INTO employees (registration_code, full_name, birth_date, start_date, termination_date, job_role, notes) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(form.registration_code.trim(), form.full_name.trim(), birthDate, startDate, terminationDate, jobRole, form.notes || null);
+    db.prepare('INSERT INTO employees (registration_code, full_name, birth_date, start_date, termination_date, job_role, notes, work_schedule_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(form.registration_code.trim(), form.full_name.trim(), birthDate, startDate, terminationDate, jobRole, form.notes || null, Number(form.work_schedule_id || 0) || null);
     redirect(res, `/employees?notice=${encodeURIComponent('Colaborador cadastrado com sucesso.')}`);
   } catch (error) {
     const msg = error.message.includes('UNIQUE')
@@ -4520,9 +4605,10 @@ function handleUpdateEmployee(employeeId, form, res) {
           termination_date = ?,
           job_role = ?,
           notes = ?,
+          work_schedule_id = ?,
           updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `).run(form.registration_code.trim(), form.full_name.trim(), birthDate, startDate, terminationDate, jobRole, form.notes || null, employeeId);
+    `).run(form.registration_code.trim(), form.full_name.trim(), birthDate, startDate, terminationDate, jobRole, form.notes || null, Number(form.work_schedule_id || 0) || null, employeeId);
     redirect(res, `/employees?notice=${encodeURIComponent('Colaborador atualizado com sucesso.')}`);
   } catch (error) {
     const msg = error.message.includes('UNIQUE')
@@ -4601,8 +4687,9 @@ function handleCreateProduction(form, res) {
   db.prepare(`
     INSERT INTO op_daily_productions (
       op_id, employee_id, production_date, produced_quantity, used_minutes_f21, normal_minutes, extra_minutes, produced_minutes,
-      extra_time_id, extra_reason_snapshot, extra_description_snapshot, extra_effective_date_snapshot, extra_minutes_per_piece_snapshot
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      extra_time_id, extra_reason_snapshot, extra_description_snapshot, extra_effective_date_snapshot, extra_minutes_per_piece_snapshot,
+      counts_for_prize
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     opId,
     employeeId,
@@ -4616,7 +4703,8 @@ function handleCreateProduction(form, res) {
     metrics.extraSnapshot.extra_reason_snapshot,
     metrics.extraSnapshot.extra_description_snapshot,
     metrics.extraSnapshot.extra_effective_date_snapshot,
-    metrics.extraSnapshot.extra_minutes_per_piece_snapshot
+    metrics.extraSnapshot.extra_minutes_per_piece_snapshot,
+    resolveCountsForPrize(form, employee, productionDate)
   );
 
   recalculateOpStatus(opId);
@@ -5141,7 +5229,7 @@ function renderDashboard(query, role = 'adm') {
   const defaultMonthBase = getPeriodRange('month', today()).start;
   const currentDay = today();
   const firstDayCurrentMonth = `${currentDay.slice(0, 8)}01`;
-  const employeeStartDate = query.employee_start_date || firstDayCurrentMonth;
+  const employeeStartDate = query.employee_start_date || defaultMonthBase;
   const employeeEndDate = query.employee_end_date || currentDay;
   const mostruarioCustomFilter = Boolean(query.mostruario_start_date || query.mostruario_end_date);
   const producaoCustomFilter = Boolean(query.producao_start_date || query.producao_end_date);
@@ -5323,13 +5411,13 @@ function renderDashboard(query, role = 'adm') {
             <article class="mini-card"><span>Total filtrado</span><strong>${minutesTotal.toFixed(2)}</strong></article>
           </div>
           <div class="company-total ${companyClass}">
-            <span>Totalizador geral da empresa</span>
+            <span>Eficiência até o corte (${escapeHtml(formatDatePtBr(employeeData.efficiencyCutoff))})</span>
             <strong>${companyPercent.toFixed(2)}%</strong>
             <small>${companyLabel}</small>
             <p>Média geral: ${companyAverageMinutes.toFixed(2)} minutos por operador (${operatorCount} operadores ativos no período).</p><p>Base ativa total: ${companyAvailableMinutes.toFixed(2)} minutos (${companyActiveDays} dias ativos somados).</p>
             <p>${companyAction}</p>
           </div>
-          <p class="subtle-note"><strong>Base atual:</strong> ${escapeHtml(employeeData.range.start.split('-').reverse().join('/'))} até ${escapeHtml(employeeData.range.end.split('-').reverse().join('/'))}</p>
+          <p class="subtle-note"><strong>Período:</strong> ${escapeHtml(formatDatePtBr(employeeData.range.start))} até ${escapeHtml(formatDatePtBr(employeeData.range.end))} · minutos e base contados até o corte (último dia útil anterior), igual ao Acompanhamento diário.</p>
           <p class="subtle-note">Filtro exclusivo para resultados de colaboradores: ${escapeHtml(employeeData.range.start)} até ${escapeHtml(employeeData.range.end)}.${selectedEmployeeId ? ` Colaborador filtrado: ${escapeHtml(employeeOptions.find(item => item.id === selectedEmployeeId)?.full_name || '')}.` : ''}</p>
         </section>
 
@@ -5351,7 +5439,7 @@ function renderDashboard(query, role = 'adm') {
             <a class="btn secondary" href="/premios/producao${getProductionPrizeQueryString(dailyTrackingData.filters)}">Validar próximo passo</a>
           </div>
           <table>
-            <thead><tr><th>Rank</th><th>Registro</th><th>Colaboradora</th><th>Status</th><th>Dias úteis</th><th>Minutos</th><th>% atual</th><th>Faltam p/ 60%</th></tr></thead>
+            <thead><tr><th>Rank</th><th>Registro</th><th>Colaboradora</th><th>Status</th><th>Dias úteis</th><th>Minutos</th><th>% até o corte</th><th>Faltam p/ 60%</th></tr></thead>
             <tbody>
               ${dailyTrackingTopRows.map(emp => `<tr class="${emp.status_meta.rowClass}"><td><strong>#${emp.ranking_position}</strong></td><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td><span class="${emp.status_meta.badgeClass}">${emp.status_meta.label}</span></td><td>${emp.business_days_elapsed}/${emp.business_days_total}</td><td>${emp.produced_minutes.toFixed(2)}</td><td class="${emp.status_meta.textClass}">${emp.current_percent.toFixed(2)}%</td><td>${emp.minutes_to_current_target.toFixed(2)}</td></tr>`).join('') || '<tr><td colspan="8">Nenhum colaborador ativo no mês operacional atual.</td></tr>'}
             </tbody>
@@ -6226,9 +6314,176 @@ function renderCadastrosPage(query = {}, values = {}, error = '', role = 'adm') 
         </table>
       </section>
     </div>
+
+    ${renderWorkSchedulesSection(values)}
   `;
   return pageLayout({ title: 'Cadastros', content, notice: query.notice || '', error: error || query.error || '', role });
 }
+
+// ===================== JORNADAS DE TRABALHO =====================
+const WEEKDAY_LABELS = { 0: 'Dom', 1: 'Seg', 2: 'Ter', 3: 'Qua', 4: 'Qui', 5: 'Sex', 6: 'Sáb' };
+
+function getWorkSchedules({ onlyActive = false } = {}) {
+  return db.prepare(`SELECT * FROM work_schedules ${onlyActive ? 'WHERE is_active = 1' : ''} ORDER BY name ASC`).all();
+}
+
+function formatWorkSchedule(schedule) {
+  if (!schedule) return 'Sem jornada';
+  const days = String(schedule.weekdays || '').split(',').filter(Boolean).map(d => WEEKDAY_LABELS[d]).join(', ');
+  return `${schedule.name} · ${String(schedule.start_hour).padStart(2, '0')}h–${String(schedule.end_hour).padStart(2, '0')}h · ${days}`;
+}
+
+// Lançamento fora da jornada oficial? Retorna o motivo (vazio = dentro da jornada).
+// Sem jornada vinculada: só sábado, domingo e feriado pedem a flag.
+function getOutsideScheduleReason(employee, productionDate, hourSlot = '') {
+  if (!employee || !productionDate) return '';
+  const holidays = getHolidayDateSet();
+  if (holidays.has(productionDate)) return 'feriado';
+  const weekday = new Date(`${productionDate}T00:00:00Z`).getUTCDay();
+  const schedule = employee.work_schedule_id
+    ? db.prepare('SELECT * FROM work_schedules WHERE id = ?').get(employee.work_schedule_id)
+    : null;
+  const workDays = schedule ? String(schedule.weekdays || '').split(',').map(Number) : [1, 2, 3, 4, 5];
+  if (!workDays.includes(weekday)) return weekday === 6 ? 'sábado' : (weekday === 0 ? 'domingo' : 'dia fora da jornada');
+  if (schedule && hourSlot) {
+    const hour = Number(String(hourSlot).slice(0, 2));
+    if (hour < Number(schedule.start_hour) || hour >= Number(schedule.end_hour)) return 'horário extra';
+  }
+  return '';
+}
+
+function resolveCountsForPrize(form, employee, productionDate, hourSlot = '') {
+  // Dentro da jornada sempre conta. Fora dela, vale a flag (padrão: conta).
+  if (!getOutsideScheduleReason(employee, productionDate, hourSlot)) return 1;
+  if (form.counts_for_prize === undefined) return 1;
+  return parseCountsForPrizeFlag(form.counts_for_prize);
+}
+
+// Valor da flag enviado pelo formulário (hidden 0 + checkbox 1)
+function parseCountsForPrizeFlag(value) {
+  const list = Array.isArray(value) ? value : [value];
+  return list.map(String).includes('1') ? 1 : 0;
+}
+
+// Script de cliente: mostra a flag "Conta para prêmio" quando a data/hora sai da jornada
+function renderPrizeFlagScript({ formSelector, employeeFieldSelector, dateFieldSelector, hourFieldSelector = '' }) {
+  const schedules = Object.fromEntries(getWorkSchedules().map(item => [item.id, { s: item.start_hour, e: item.end_hour, d: String(item.weekdays).split(',').map(Number) }]));
+  const employeeSchedules = Object.fromEntries(db.prepare('SELECT id, work_schedule_id FROM employees').all().map(item => [item.id, item.work_schedule_id || 0]));
+  const holidays = [...getHolidayDateSet()].filter(d => d >= '2025-01-01');
+  return `<script>
+  (() => {
+    const form = document.querySelector(${JSON.stringify(formSelector)});
+    if (!form) return;
+    const box = form.querySelector('[data-prize-flag]');
+    if (!box) return;
+    const schedules = ${JSON.stringify(schedules)};
+    const empSchedule = ${JSON.stringify(employeeSchedules)};
+    const holidays = new Set(${JSON.stringify(holidays)});
+    const emp = form.querySelector(${JSON.stringify(employeeFieldSelector)});
+    const date = form.querySelector(${JSON.stringify(dateFieldSelector)});
+    const hour = ${hourFieldSelector ? `form.querySelector(${JSON.stringify(hourFieldSelector)})` : 'null'};
+    const reasonEl = box.querySelector('[data-prize-reason]');
+    const check = () => {
+      const d = date && date.value;
+      let reason = '';
+      if (d) {
+        const sch = schedules[empSchedule[emp && emp.value] || 0];
+        const wd = new Date(d + 'T00:00:00Z').getUTCDay();
+        const days = sch ? sch.d : [1, 2, 3, 4, 5];
+        if (holidays.has(d)) reason = 'feriado';
+        else if (!days.includes(wd)) reason = wd === 6 ? 'sábado' : (wd === 0 ? 'domingo' : 'dia fora da jornada');
+        else if (sch && hour && hour.value) {
+          const h = Number(String(hour.value).replace(/\D/g, '').padStart(4, '0').slice(0, 2));
+          if (h < sch.s || h >= sch.e) reason = 'horário extra';
+        }
+      }
+      box.hidden = !reason;
+      if (reasonEl) reasonEl.textContent = reason;
+    };
+    ['change', 'input'].forEach(evt => [emp, date, hour].forEach(el => el && el.addEventListener(evt, check)));
+    check();
+  })();
+  </script>`;
+}
+
+function renderPrizeFlagField(values = {}) {
+  const checked = values.counts_for_prize === undefined ? true : parseCountsForPrizeFlag(values.counts_for_prize) === 1;
+  return `<div class="prize-flag" data-prize-flag hidden>
+    <input type="hidden" name="counts_for_prize" value="0" />
+    <label class="checkbox-line"><input type="checkbox" name="counts_for_prize" value="1" ${checked ? 'checked' : ''} /> Conta para eficiência e prêmio</label>
+    <small class="hint">Lançamento fora da jornada (<span data-prize-reason></span>). Desmarque se esse trabalho não deve entrar no prêmio.</small>
+  </div>`;
+}
+
+function renderWorkScheduleSelect(selectedId) {
+  const options = getWorkSchedules().filter(item => item.is_active || item.id === Number(selectedId));
+  return `<label>Jornada de trabalho<select name="work_schedule_id"><option value="">Sem jornada (só sáb/dom/feriado pedem a flag)</option>${options.map(item => `<option value="${item.id}" ${Number(selectedId) === item.id ? 'selected' : ''}>${escapeHtml(formatWorkSchedule(item))}</option>`).join('')}</select></label>`;
+}
+
+function renderWorkSchedulesSection(values = {}) {
+  const weekdays = String(values.weekdays_list || '1,2,3,4,5').split(',');
+  const list = getWorkSchedules();
+  const usage = new Map(db.prepare('SELECT work_schedule_id AS id, COUNT(*) AS n FROM employees WHERE work_schedule_id IS NOT NULL AND is_active = 1 GROUP BY work_schedule_id').all().map(r => [r.id, r.n]));
+  return `
+    <div class="two-columns cadastros-grid">
+      <section class="panel">
+        <h3>Nova jornada de trabalho</h3>
+        <form class="stack-form" method="post" action="/work-schedules">
+          <label>Nome<input name="schedule_name" required value="${escapeHtml(values.schedule_name || '')}" placeholder="Ex.: Costura 07h–17h" /></label>
+          <div class="inline-form">
+            <label>Início (hora)<input name="start_hour" type="number" min="0" max="23" required value="${escapeHtml(values.start_hour || '7')}" inputmode="numeric" /></label>
+            <label>Fim (hora)<input name="end_hour" type="number" min="1" max="24" required value="${escapeHtml(values.end_hour || '17')}" inputmode="numeric" /></label>
+          </div>
+          <fieldset><legend>Dias de trabalho</legend>
+            ${[1, 2, 3, 4, 5, 6, 0].map(d => `<label class="checkbox-line"><input type="checkbox" name="weekdays" value="${d}" ${weekdays.includes(String(d)) ? 'checked' : ''} /> ${WEEKDAY_LABELS[d]}</label>`).join('')}
+          </fieldset>
+          <button class="btn" type="submit">Salvar jornada</button>
+        </form>
+        <p class="hint">Lançamentos fora da jornada da colaboradora (dia, horário ou feriado) mostram a opção "Conta para eficiência e prêmio". A base de cálculo continua 528 min por dia útil (seg–sex).</p>
+      </section>
+      <section class="panel">
+        <h3>Jornadas cadastradas</h3>
+        <table>
+          <thead><tr><th>Jornada</th><th>Colaboradoras ativas</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            ${list.map(item => `<tr><td>${escapeHtml(formatWorkSchedule(item))}</td><td>${usage.get(item.id) || 0}</td><td>${item.is_active ? 'Ativa' : 'Inativa'}</td><td><form method="post" action="/work-schedules/${item.id}/toggle"><button class="btn secondary" type="submit">${item.is_active ? 'Inativar' : 'Ativar'}</button></form></td></tr>`).join('') || '<tr><td colspan="4">Nenhuma jornada cadastrada.</td></tr>'}
+          </tbody>
+        </table>
+        <p class="hint">Vincule a jornada no cadastro de cada colaboradora (menu Colaboradores).</p>
+      </section>
+    </div>`;
+}
+
+function handleCreateWorkSchedule(form, res, role) {
+  if (!isAdminRole(role)) return requireAdmin(null, res, role);
+  const name = String(form.schedule_name || '').trim();
+  const startHour = Number(form.start_hour);
+  const endHour = Number(form.end_hour);
+  const weekdays = (Array.isArray(form.weekdays) ? form.weekdays : [form.weekdays]).filter(v => v !== undefined && v !== '').map(Number).filter(d => d >= 0 && d <= 6);
+  const back = { ...form, weekdays_list: weekdays.join(',') };
+  if (!name) return sendHtml(res, renderCadastrosPage({}, back, 'Informe o nome da jornada.', role), 422);
+  if (!Number.isInteger(startHour) || !Number.isInteger(endHour) || startHour < 0 || endHour > 24 || startHour >= endHour) {
+    return sendHtml(res, renderCadastrosPage({}, back, 'Horário inválido: o início deve ser menor que o fim (0 a 24h).', role), 422);
+  }
+  if (!weekdays.length) return sendHtml(res, renderCadastrosPage({}, back, 'Marque ao menos um dia de trabalho.', role), 422);
+  try {
+    db.prepare('INSERT INTO work_schedules (name, start_hour, end_hour, weekdays) VALUES (?, ?, ?, ?)')
+      .run(name, startHour, endHour, [...new Set(weekdays)].sort().join(','));
+    redirect(res, `/cadastros?notice=${encodeURIComponent('Jornada cadastrada com sucesso.')}`);
+  } catch (error) {
+    const msg = error.message.includes('UNIQUE') ? 'Já existe uma jornada com esse nome.' : `Erro ao salvar jornada: ${error.message}`;
+    sendHtml(res, renderCadastrosPage({}, back, msg, role), 422);
+  }
+}
+
+function handleToggleWorkSchedule(id, res, role) {
+  if (!isAdminRole(role)) return requireAdmin(null, res, role);
+  const item = db.prepare('SELECT * FROM work_schedules WHERE id = ?').get(id);
+  if (!item) return redirect(res, `/cadastros?error=${encodeURIComponent('Jornada não encontrada.')}`);
+  db.prepare('UPDATE work_schedules SET is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(item.is_active ? 0 : 1, id);
+  redirect(res, `/cadastros?notice=${encodeURIComponent(`Jornada ${item.is_active ? 'inativada' : 'ativada'}.`)}`);
+}
+// ===============================================================
 
 function handleCreateBrand(form, res, role) {
   if (!isAdminRole(role)) return requireAdmin(null, res, role);
@@ -6611,6 +6866,7 @@ function renderEmployeeForm(values = {}, error = '') {
 
 function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
   const employees = db.prepare('SELECT * FROM employees ORDER BY full_name').all();
+  const scheduleNames = new Map(getWorkSchedules().map(item => [item.id, formatWorkSchedule(item)]));
   const editingId = Number(query.edit || 0);
   const showForm = query.new === '1' || Boolean(error);
   const content = `
@@ -6625,6 +6881,7 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
         <label>Data de início<input type="date" name="start_date" value="${formatDateInput(values.start_date)}" /></label>
         <label>Data de rescisão<input type="date" name="termination_date" value="${formatDateInput(values.termination_date)}" /></label>
         <label>Função<input name="job_role" value="${escapeHtml(values.job_role || '')}" /></label>
+        ${renderWorkScheduleSelect(values.work_schedule_id)}
         <label class="full">Observações<textarea name="notes" rows="3">${escapeHtml(values.notes || '')}</textarea></label>
         <div class="full actions"><button class="btn" type="submit">Salvar colaborador</button><a class="btn secondary" href="/employees">Cancelar</a></div>
       </form>
@@ -6632,13 +6889,13 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
     </section>` : ''}
     <section class="panel">
       <table>
-        <thead><tr><th>Registro</th><th>Nome</th><th>Nascimento</th><th>Início</th><th>Rescisão</th><th>Status</th><th>Função</th><th>Observações</th><th>Ações</th></tr></thead>
+        <thead><tr><th>Registro</th><th>Nome</th><th>Nascimento</th><th>Início</th><th>Rescisão</th><th>Status</th><th>Função</th><th>Jornada</th><th>Observações</th><th>Ações</th></tr></thead>
         <tbody>
           ${employees.map(emp => {
             const isEditing = editingId === emp.id;
             if (isEditing) {
               return `<tr>
-                <td colspan="9">
+                <td colspan="10">
                   <form class="form-grid" method="post" action="/employees/${emp.id}">
                     <label>Registro<input name="registration_code" required value="${escapeHtml(emp.registration_code || '')}" /></label>
                     <label>Nome completo<input name="full_name" required value="${escapeHtml(emp.full_name || '')}" /></label>
@@ -6646,14 +6903,15 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
                     <label>Data de início<input type="date" name="start_date" value="${formatDateInput(emp.start_date)}" /></label>
                     <label>Data de rescisão<input type="date" name="termination_date" value="${formatDateInput(emp.termination_date)}" /></label>
                     <label>Função<input name="job_role" value="${escapeHtml(emp.job_role || '')}" /></label>
+                    ${renderWorkScheduleSelect(emp.work_schedule_id)}
                     <label class="full">Observações<textarea name="notes" rows="3">${escapeHtml(emp.notes || '')}</textarea></label>
                     <div class="full actions"><button class="btn" type="submit">Salvar edição</button><a class="btn secondary" href="/employees">Cancelar</a></div>
                   </form>
                 </td>
               </tr>`;
             }
-            return `<tr><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td>${escapeHtml(emp.birth_date || '-')}</td><td>${escapeHtml(emp.start_date || '-')}</td><td>${escapeHtml(emp.termination_date || '-')}</td><td>${escapeHtml(describeEmployeeStatus(emp))}</td><td>${escapeHtml(emp.job_role || '-')}</td><td>${escapeHtml(emp.notes || '-')}</td><td><a href="/employees?edit=${emp.id}">Editar</a></td></tr>`;
-          }).join('') || '<tr><td colspan="9">Nenhum colaborador cadastrado.</td></tr>'}
+            return `<tr><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td>${escapeHtml(emp.birth_date || '-')}</td><td>${escapeHtml(emp.start_date || '-')}</td><td>${escapeHtml(emp.termination_date || '-')}</td><td>${escapeHtml(describeEmployeeStatus(emp))}</td><td>${escapeHtml(emp.job_role || '-')}</td><td>${escapeHtml(scheduleNames.get(emp.work_schedule_id) || 'Sem jornada')}</td><td>${escapeHtml(emp.notes || '-')}</td><td><a href="/employees?edit=${emp.id}">Editar</a></td></tr>`;
+          }).join('') || '<tr><td colspan="10">Nenhum colaborador cadastrado.</td></tr>'}
         </tbody>
       </table>
     </section>
@@ -6854,8 +7112,8 @@ function handleCreateHourlyProduction(form, res) {
       op_id, employee_id, production_date, hour_slot, produced_quantity, used_minutes_f21,
       normal_minutes, extra_minutes, produced_minutes, extra_time_id,
       extra_reason_snapshot, extra_description_snapshot, extra_effective_date_snapshot,
-      extra_minutes_per_piece_snapshot, notes, created_by_user_id, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, CURRENT_TIMESTAMP)
+      extra_minutes_per_piece_snapshot, notes, created_by_user_id, updated_at, counts_for_prize
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, CURRENT_TIMESTAMP, ?)
   `).run(
     op.id,
     employeeId,
@@ -6871,7 +7129,8 @@ function handleCreateHourlyProduction(form, res) {
     metrics.extraSnapshot.extra_description_snapshot,
     metrics.extraSnapshot.extra_effective_date_snapshot,
     metrics.extraSnapshot.extra_minutes_per_piece_snapshot,
-    notes
+    notes,
+    resolveCountsForPrize(form, employee, productionDate, hourSlot)
   );
 
   redirectQuery.set('notice', `Lançamento da hora ${hourSlot} salvo para ${employee.full_name}.`);
@@ -6894,11 +7153,13 @@ function handleValidateHourlyProductionDay(form, res) {
 
   const grouped = new Map();
   for (const row of pendingRows) {
-    const key = `${row.employee_id}|${row.op_id}`;
+    const countsForPrize = Number(row.counts_for_prize ?? 1) === 1 ? 1 : 0;
+    const key = `${row.employee_id}|${row.op_id}|${countsForPrize}`;
     if (!grouped.has(key)) {
       grouped.set(key, {
         employee_id: row.employee_id,
         op_id: row.op_id,
+        counts_for_prize: countsForPrize,
         production_date: row.production_date,
         produced_quantity: 0,
         used_minutes_f21: Number(row.used_minutes_f21 || 0),
@@ -6928,8 +7189,9 @@ function handleValidateHourlyProductionDay(form, res) {
         SELECT *
         FROM op_daily_productions
         WHERE op_id = ? AND employee_id = ? AND production_date = ? AND is_reversed = 0
+          AND COALESCE(counts_for_prize, 1) = ?
         LIMIT 1
-      `).get(item.op_id, item.employee_id, item.production_date);
+      `).get(item.op_id, item.employee_id, item.production_date, item.counts_for_prize);
       let dailyId = existing?.id || null;
       if (existing) {
         db.prepare(`
@@ -6964,8 +7226,8 @@ function handleValidateHourlyProductionDay(form, res) {
             op_id, employee_id, production_date, produced_quantity, used_minutes_f21,
             normal_minutes, extra_minutes, produced_minutes, extra_time_id,
             extra_reason_snapshot, extra_description_snapshot, extra_effective_date_snapshot,
-            extra_minutes_per_piece_snapshot
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            extra_minutes_per_piece_snapshot, counts_for_prize
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           item.op_id,
           item.employee_id,
@@ -6979,7 +7241,8 @@ function handleValidateHourlyProductionDay(form, res) {
           item.extra_reason_snapshot,
           item.extra_description_snapshot,
           item.extra_effective_date_snapshot,
-          item.extra_minutes_per_piece_snapshot
+          item.extra_minutes_per_piece_snapshot,
+          item.counts_for_prize
         );
         dailyId = Number(result.lastInsertRowid);
       }
@@ -7066,11 +7329,13 @@ function renderHourlyProductionPage(values = {}, error = '', notice = '', role =
         <label>Observação
           <input name="notes" value="${escapeHtml(values.notes || '')}" placeholder="Opcional" />
         </label>
+        <div class="full">${renderPrizeFlagField(values)}</div>
         <div class="full actions">
           <button class="btn" type="submit">Salvar rápido</button>
           <button class="btn secondary" type="button" onclick="window.location.href='/productions/hourly?employee_id=' + encodeURIComponent(document.querySelector('[data-hourly-field=employee-id]').value) + '&production_date=' + encodeURIComponent(document.querySelector('[data-hourly-field=date]').value)">Atualizar tela</button>
         </div>
       </form>
+      ${renderPrizeFlagScript({ formSelector: '[data-hourly-launch]', employeeFieldSelector: '[name=employee_id]', dateFieldSelector: '[name=production_date]', hourFieldSelector: '[name=hour_slot]' })}
       ${quickPreview ? `
         <div class="quick-op-preview ${quickPreview.is_in_cell ? 'is-blocked' : (quickPreview.remaining_quantity <= 0 ? 'is-finished' : '')}">
           <strong>${escapeHtml(quickPreview.op_number)} · ${escapeHtml(quickPreview.product_name)}</strong>
@@ -7231,11 +7496,13 @@ function renderProductionForm(values = {}, error = '', notice = '', role = 'adm'
         <label>Quantidade produzida
           <input type="number" min="1" name="produced_quantity" required value="${escapeHtml(values.produced_quantity || '')}" data-quick-field="quantity" />
         </label>
+        <div class="full">${renderPrizeFlagField(values)}</div>
         <div class="full actions">
           <button class="btn" type="submit">Salvar e seguir</button>
           <a class="btn secondary" href="/ops">Consultar OPs</a>
         </div>
       </form>
+      ${renderPrizeFlagScript({ formSelector: '[data-quick-launch]', employeeFieldSelector: '[name=employee_id]', dateFieldSelector: '[name=production_date]' })}
       <div class="quick-launch-tip">Atalho: Enter avança para o próximo campo; no campo quantidade, Enter salva.</div>
       ${quickPreview ? `
         <div class="quick-op-preview ${quickPreview.is_in_cell ? 'is-blocked' : (quickPreview.remaining_quantity <= 0 ? 'is-finished' : '')}">
@@ -7306,7 +7573,7 @@ function renderProductionForm(values = {}, error = '', notice = '', role = 'adm'
       </div>
       <a class="btn" href="/productions/new?mode=quick">Abrir lançamento rápido</a>
     </section>
-    <form class="panel form-grid" method="post" action="/productions">
+    <form class="panel form-grid" method="post" action="/productions" data-full-launch>
       <input type="hidden" name="mode" value="default" />
       <label>Colaborador
         <select name="employee_id" required>
@@ -7323,9 +7590,11 @@ function renderProductionForm(values = {}, error = '', notice = '', role = 'adm'
       <label>Minutos F21 do lançamento<input type="number" min="0.001" step="0.001" name="used_minutes_f21" value="${escapeHtml(values.used_minutes_f21 || '')}" /></label>
       <label>Quantidade produzida<input type="number" min="1" name="produced_quantity" required value="${escapeHtml(values.produced_quantity || '')}" /></label>
       <label>Data<input type="date" name="production_date" value="${escapeHtml(selectedDate)}" /></label>
+      <div class="full">${renderPrizeFlagField(values)}</div>
       <div class="full actions"><button class="btn" type="submit">Salvar lançamento</button><a class="btn secondary" href="/ops">Consultar OPs</a></div>
       <p class="hint full">${blockedCellOps.length ? `${blockedCellOps.length} OP(s) em célula foram retiradas da lista normal até o retorno. Confira as rosas em /ops?status=rosa.` : 'Nenhuma OP bloqueada por célula no momento.'}</p>
     </form>
+    ${renderPrizeFlagScript({ formSelector: '[data-full-launch]', employeeFieldSelector: '[name=employee_id]', dateFieldSelector: '[name=production_date]' })}
 
     <section class="panel">
       <h3>Últimos lançamentos</h3>
@@ -8572,6 +8841,9 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && pathname === '/brands') return handleCreateBrand(await parseBody(req), res, role);
       if (req.method === 'POST' && pathname === '/collections') return handleCreateCollection(await parseBody(req), res, role);
       if (req.method === 'POST' && pathname === '/cells') return handleCreateCell(await parseBody(req), res, role);
+      if (req.method === 'POST' && pathname === '/work-schedules') return handleCreateWorkSchedule(await parseBody(req), res, role);
+      const workScheduleToggleMatch = pathname.match(/^\/work-schedules\/(\d+)\/toggle$/);
+      if (req.method === 'POST' && workScheduleToggleMatch) return handleToggleWorkSchedule(Number(workScheduleToggleMatch[1]), res, role);
       if (req.method === 'GET' && pathname === '/cells/report') return sendHtml(res, renderCellReportPage(query, role));
       if (req.method === 'GET' && pathname === '/cells/closures') return sendHtml(res, renderCellClosuresPage(query, {}, '', role));
       if (req.method === 'POST' && pathname === '/cells/closures') return handleCreateCellClosure(await parseBody(req), res, role);

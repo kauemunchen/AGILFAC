@@ -121,3 +121,11 @@
 .tracking-dashboard-summary{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:14px;padding:12px 14px;border-radius:14px;background:#f8fafc;border:1px solid #e2e8f0}
 .tracking-dashboard-summary p{margin:4px 0 0}
 @media (max-width:700px){.tracking-dashboard-summary{flex-direction:column}.tracking-inline-actions .btn{width:100%}}
+
+/* T0.3 — flag "conta para prêmio" e jornadas */
+[hidden] { display: none !important; }
+.prize-flag { border: 1px dashed #f59e0b; background: rgba(245, 158, 11, .08); border-radius: 10px; padding: 10px 12px; }
+.prize-flag .checkbox-line { font-weight: 600; }
+.checkbox-line { display: inline-flex; align-items: center; gap: 8px; margin-right: 14px; }
+.checkbox-line input { width: auto; min-height: 0; }
+fieldset { border: 1px solid rgba(148, 163, 184, .35); border-radius: 10px; padding: 8px 12px; }
