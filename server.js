@@ -2456,6 +2456,22 @@ function formatDateInput(value) {
 }
 
 
+// T0.7 — formatação pt-BR única para a interface
+const NUMBER_FORMATTERS = new Map();
+function fmtNum(value, decimals = 2) {
+  if (!NUMBER_FORMATTERS.has(decimals)) {
+    NUMBER_FORMATTERS.set(decimals, new Intl.NumberFormat('pt-BR', { minimumFractionDigits: decimals, maximumFractionDigits: decimals }));
+  }
+  const n = Number(value);
+  return NUMBER_FORMATTERS.get(decimals).format(Number.isFinite(n) ? n : 0);
+}
+
+const MONEY_FORMATTER = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
+function fmtMoney(value) {
+  const n = Number(value);
+  return MONEY_FORMATTER.format(Number.isFinite(n) ? n : 0);
+}
+
 function formatDatePtBr(value) {
   if (!value) return '-';
   const [year, month, day] = String(value).split('-');
@@ -2614,8 +2630,8 @@ function buildCellClosureItems(itemRates) {
 function summarizeCellClosureRates(items, key) {
   const rates = Array.from(new Set(items.map(item => Number(item[key] || 0).toFixed(4))));
   if (!rates.length) return '-';
-  if (rates.length === 1) return `${Number(rates[0]).toFixed(4)} por min.`;
-  return `${Number(rates[0]).toFixed(4)} a ${Number(rates[rates.length - 1]).toFixed(4)} por min.`;
+  if (rates.length === 1) return `${fmtNum(Number(rates[0]), 4)} por min.`;
+  return `${fmtNum(Number(rates[0]), 4)} a ${fmtNum(Number(rates[rates.length - 1]), 4)} por min.`;
 }
 
 function validateCellClosureForm(form) {
@@ -2713,8 +2729,8 @@ function renderCellClosureForm(values = {}, previewItems = [], error = '') {
       <section class="panel">
         <div class="panel-header"><h3>Prévia dos itens que serão salvos</h3><span class="hint">${previewTotals.total_ops} OP(s)</span></div>
         <table><thead><tr><th>OP</th><th>Produto</th><th>Célula atual</th><th>Peças</th><th>Min/pç</th><th>Minutos</th><th>Fornecedor/min.</th><th>Célula/min.</th><th>Recebido</th><th>Pago</th><th>Lucro</th></tr></thead><tbody>
-          ${previewItems.map(item => `<tr><td>${escapeHtml(item.op_number)}</td><td>${escapeHtml(item.product_name)}</td><td>${escapeHtml(item.active_cell_name || '-')}</td><td>${item.total_pieces}</td><td>${Number(item.minutes_per_piece || 0).toFixed(3)}</td><td>${Number(item.total_minutes || 0).toFixed(2)}</td><td>${Number(item.supplier_rate_per_minute || 0).toFixed(4)}</td><td>${Number(item.cell_rate_per_minute || 0).toFixed(4)}</td><td>${escapeHtml(formatMoneyBr(item.received_amount))}</td><td>${escapeHtml(formatMoneyBr(item.paid_amount))}</td><td>${escapeHtml(formatMoneyBr(item.profit_amount))}</td></tr>`).join('')}
-        </tbody><tfoot><tr><th colspan="3">Totais</th><th>${previewTotals.total_pieces}</th><th>-</th><th>${round2(previewTotals.total_minutes).toFixed(2)}</th><th>-</th><th>-</th><th>${escapeHtml(formatMoneyBr(previewTotals.total_received_amount))}</th><th>${escapeHtml(formatMoneyBr(previewTotals.total_paid_amount))}</th><th>${escapeHtml(formatMoneyBr(previewTotals.total_profit_amount))}</th></tr></tfoot></table>
+          ${previewItems.map(item => `<tr><td>${escapeHtml(item.op_number)}</td><td>${escapeHtml(item.product_name)}</td><td>${escapeHtml(item.active_cell_name || '-')}</td><td>${item.total_pieces}</td><td>${fmtNum(Number(item.minutes_per_piece || 0), 3)}</td><td>${fmtNum(Number(item.total_minutes || 0), 2)}</td><td>${fmtNum(Number(item.supplier_rate_per_minute || 0), 4)}</td><td>${fmtNum(Number(item.cell_rate_per_minute || 0), 4)}</td><td>${escapeHtml(formatMoneyBr(item.received_amount))}</td><td>${escapeHtml(formatMoneyBr(item.paid_amount))}</td><td>${escapeHtml(formatMoneyBr(item.profit_amount))}</td></tr>`).join('')}
+        </tbody><tfoot><tr><th colspan="3">Totais</th><th>${previewTotals.total_pieces}</th><th>-</th><th>${fmtNum(round2(previewTotals.total_minutes), 2)}</th><th>-</th><th>-</th><th>${escapeHtml(formatMoneyBr(previewTotals.total_received_amount))}</th><th>${escapeHtml(formatMoneyBr(previewTotals.total_paid_amount))}</th><th>${escapeHtml(formatMoneyBr(previewTotals.total_profit_amount))}</th></tr></tfoot></table>
       </section>
     ` : ''}
     <script>
@@ -2869,7 +2885,7 @@ function renderCellClosureDetailPage(id, query = {}, role = 'adm') {
 
     <div class="cards">
       <article class="card"><span>OPs</span><strong>${closure.total_ops}</strong><small>${closure.total_pieces} peças</small></article>
-      <article class="card"><span>Minutos</span><strong>${closure.total_minutes.toFixed(2)}</strong><small>F21 × quantidade total</small></article>
+      <article class="card"><span>Minutos</span><strong>${fmtNum(closure.total_minutes, 2)}</strong><small>F21 × quantidade total</small></article>
       <article class="card status-card bg-yellow"><span>Recebido</span><strong>${escapeHtml(formatMoneyBr(closure.total_received_amount))}</strong><small>${escapeHtml(summarizeCellClosureRates(items, 'supplier_rate_per_minute'))}</small></article>
       <article class="card status-card bg-blue"><span>Pago</span><strong>${escapeHtml(formatMoneyBr(closure.total_paid_amount))}</strong><small>${escapeHtml(summarizeCellClosureRates(items, 'cell_rate_per_minute'))}</small></article>
       <article class="card status-card bg-green"><span>Lucro</span><strong>${escapeHtml(formatMoneyBr(closure.total_profit_amount))}</strong><small>Observação salva no detalhe</small></article>
@@ -2890,7 +2906,7 @@ function renderCellClosureDetailPage(id, query = {}, role = 'adm') {
     <section class="panel">
       <div class="panel-header"><h3>OPs do fechamento</h3><span class="hint">Cada linha guarda seu próprio preço por minuto</span></div>
       <table><thead><tr><th>OP</th><th>Produto</th><th>Marca</th><th>Peças</th><th>Min/pç</th><th>Minutos</th><th>Fornecedor/min.</th><th>Célula/min.</th><th>Recebido</th><th>Pago</th><th>Lucro</th></tr></thead><tbody>
-        ${items.map(item => `<tr><td><a href="/ops/${item.op_id}">${escapeHtml(item.op_number)}</a></td><td>${escapeHtml(item.product_name)}</td><td>${escapeHtml(item.brand || '-')}</td><td>${item.total_pieces}</td><td>${item.minutes_per_piece.toFixed(3)}</td><td>${item.total_minutes.toFixed(2)}</td><td>${item.supplier_rate_per_minute.toFixed(4)}</td><td>${item.cell_rate_per_minute.toFixed(4)}</td><td>${escapeHtml(formatMoneyBr(item.received_amount))}</td><td>${escapeHtml(formatMoneyBr(item.paid_amount))}</td><td>${escapeHtml(formatMoneyBr(item.profit_amount))}</td></tr>`).join('') || '<tr><td colspan="11">Nenhuma OP encontrada neste fechamento.</td></tr>'}
+        ${items.map(item => `<tr><td><a href="/ops/${item.op_id}">${escapeHtml(item.op_number)}</a></td><td>${escapeHtml(item.product_name)}</td><td>${escapeHtml(item.brand || '-')}</td><td>${item.total_pieces}</td><td>${fmtNum(item.minutes_per_piece, 3)}</td><td>${fmtNum(item.total_minutes, 2)}</td><td>${fmtNum(item.supplier_rate_per_minute, 4)}</td><td>${fmtNum(item.cell_rate_per_minute, 4)}</td><td>${escapeHtml(formatMoneyBr(item.received_amount))}</td><td>${escapeHtml(formatMoneyBr(item.paid_amount))}</td><td>${escapeHtml(formatMoneyBr(item.profit_amount))}</td></tr>`).join('') || '<tr><td colspan="11">Nenhuma OP encontrada neste fechamento.</td></tr>'}
       </tbody></table>
     </section>
   `;
@@ -3358,10 +3374,10 @@ function renderClosureCards(data) {
       <article class="card"><span>Dias resolvidos</span><strong>${data.totals.resolved}</strong><small>Justificados ou como ausência</small></article>
       <article class="card"><span>Ausências no período</span><strong>${data.totals.absences}</strong><small>Faltas, atestados, férias etc.</small></article>
       <article class="card"><span>Peças lançadas</span><strong>${data.totals.producedQuantity}</strong><small>Total produzido no período</small></article>
-      <article class="card"><span>Min. normais</span><strong>${data.totals.normalMinutes.toFixed(2)}</strong><small>Base sem tempo extra</small></article>
-      <article class="card"><span>Min. extras</span><strong>${data.totals.extraMinutes.toFixed(2)}</strong><small>Tempo extra aplicado no período</small></article>
-      <article class="card"><span>Minutos produzidos</span><strong>${data.totals.producedMinutes.toFixed(2)}</strong><small>Total de costura lançada</small></article>
-      <article class="card"><span>Eficiência do período cheio</span><strong>${data.totals.efficiencyPercent.toFixed(2)}%</strong><small>Minutos que contam para prêmio ÷ base do período inteiro</small></article>
+      <article class="card"><span>Min. normais</span><strong>${fmtNum(data.totals.normalMinutes, 2)}</strong><small>Base sem tempo extra</small></article>
+      <article class="card"><span>Min. extras</span><strong>${fmtNum(data.totals.extraMinutes, 2)}</strong><small>Tempo extra aplicado no período</small></article>
+      <article class="card"><span>Minutos produzidos</span><strong>${fmtNum(data.totals.producedMinutes, 2)}</strong><small>Total de costura lançada</small></article>
+      <article class="card"><span>Eficiência do período cheio</span><strong>${fmtNum(data.totals.efficiencyPercent, 2)}%</strong><small>Minutos que contam para prêmio ÷ base do período inteiro</small></article>
     </div>
   `;
 }
@@ -3516,7 +3532,7 @@ function getDailyTrackingData(baseDate = today(), period = 'month', employeeId =
     attentionRows,
     hitRatePercent: totals.employees > 0 ? round2((totals.reachedCurrentTarget / totals.employees) * 100) : 0,
     nextActionLabel: attentionRows.length
-      ? `Priorizar ${attentionRows[0].full_name} (${attentionRows[0].current_percent.toFixed(2)}%) · faltam ${attentionRows[0].minutes_to_current_target.toFixed(2)} min para 60%.`
+      ? `Priorizar ${attentionRows[0].full_name} (${fmtNum(attentionRows[0].current_percent, 2)}%) · faltam ${fmtNum(attentionRows[0].minutes_to_current_target, 2)} min para 60%.`
       : 'Time inteiro acima de 60% no corte atual.'
   };
 
@@ -3580,12 +3596,12 @@ function renderDailyTrackingCards(data) {
       <article class="card"><span>Colaboradores no painel</span><strong>${data.totals.employees}</strong><small>Ativos no período filtrado</small></article>
       <article class="card"><span>Dias úteis decorridos</span><strong>${data.totals.businessDaysElapsed}</strong><small>Soma por colaboradora</small></article>
       <article class="card"><span>Dias úteis do período</span><strong>${data.totals.businessDaysTotal}</strong><small>Faixa total 26 → 25 ou personalizada</small></article>
-      <article class="card"><span>Minutos acumulados</span><strong>${data.totals.producedMinutes.toFixed(2)}</strong><small>Total lançado até o corte atual</small></article>
-      <article class="card tracking-status-good"><span>Já em 60%+</span><strong>${data.totals.reachedCurrentTarget}</strong><small>${data.management.hitRatePercent.toFixed(2)}% do time no alvo</small></article>
+      <article class="card"><span>Minutos acumulados</span><strong>${fmtNum(data.totals.producedMinutes, 2)}</strong><small>Total lançado até o corte atual</small></article>
+      <article class="card tracking-status-good"><span>Já em 60%+</span><strong>${data.totals.reachedCurrentTarget}</strong><small>${fmtNum(data.management.hitRatePercent, 2)}% do time no alvo</small></article>
       <article class="card tracking-status-risk"><span>Abaixo de 60%</span><strong>${data.totals.belowCurrentTarget}</strong><small>Quem ainda pede reação no período</small></article>
-      <article class="card"><span>Eficiência até o corte (${formatDatePtBr(data.progressEnd)})</span><strong>${data.totals.currentPercent.toFixed(2)}%</strong><small>Contra os minutos úteis já decorridos</small></article>
-      <article class="card"><span>Faltam para 60%</span><strong>${data.totals.minutesToCurrentTarget.toFixed(2)}</strong><small>Gap consolidado até a meta atual</small></article>
-      <article class="card"><span>Eficiência do período cheio</span><strong>${data.totals.fullPeriodPercent.toFixed(2)}%</strong><small>Minutos até o corte ÷ base do período inteiro</small></article>
+      <article class="card"><span>Eficiência até o corte (${formatDatePtBr(data.progressEnd)})</span><strong>${fmtNum(data.totals.currentPercent, 2)}%</strong><small>Contra os minutos úteis já decorridos</small></article>
+      <article class="card"><span>Faltam para 60%</span><strong>${fmtNum(data.totals.minutesToCurrentTarget, 2)}</strong><small>Gap consolidado até a meta atual</small></article>
+      <article class="card"><span>Eficiência do período cheio</span><strong>${fmtNum(data.totals.fullPeriodPercent, 2)}%</strong><small>Minutos até o corte ÷ base do período inteiro</small></article>
     </div>
   `;
 }
@@ -3595,7 +3611,7 @@ function renderDailyTrackingRankingTable(data) {
     <table>
       <thead><tr><th>Rank</th><th>Colaboradora</th><th>Status</th><th>Dias úteis</th><th>Minutos acumulados</th><th>Base atual</th><th>% até o corte</th><th>Meta atual 60%</th><th>Faltam p/ 60%</th><th>% período cheio</th><th>Último lançamento</th></tr></thead>
       <tbody>
-        ${data.employeeSummaries.map(emp => `<tr class="${emp.status_meta.rowClass}"><td><strong>#${emp.ranking_position}</strong></td><td><strong>${escapeHtml(emp.full_name)}</strong><br /><span class="hint">${escapeHtml(emp.registration_code)}</span></td><td><span class="${emp.status_meta.badgeClass}">${emp.status_meta.label}</span></td><td>${emp.business_days_elapsed}/${emp.business_days_total}</td><td>${emp.produced_minutes.toFixed(2)}</td><td>${emp.elapsed_available_minutes.toFixed(2)}</td><td class="${emp.status_meta.textClass}">${emp.current_percent.toFixed(2)}%</td><td>${emp.current_target_minutes.toFixed(2)}</td><td>${emp.minutes_to_current_target.toFixed(2)}</td><td>${emp.full_period_percent.toFixed(2)}%</td><td>${emp.last_production_date ? formatDatePtBr(emp.last_production_date) : '-'}</td></tr>`).join('') || '<tr><td colspan="11">Nenhum colaborador ativo nesse período.</td></tr>'}
+        ${data.employeeSummaries.map(emp => `<tr class="${emp.status_meta.rowClass}"><td><strong>#${emp.ranking_position}</strong></td><td><strong>${escapeHtml(emp.full_name)}</strong><br /><span class="hint">${escapeHtml(emp.registration_code)}</span></td><td><span class="${emp.status_meta.badgeClass}">${emp.status_meta.label}</span></td><td>${emp.business_days_elapsed}/${emp.business_days_total}</td><td>${fmtNum(emp.produced_minutes, 2)}</td><td>${fmtNum(emp.elapsed_available_minutes, 2)}</td><td class="${emp.status_meta.textClass}">${fmtNum(emp.current_percent, 2)}%</td><td>${fmtNum(emp.current_target_minutes, 2)}</td><td>${fmtNum(emp.minutes_to_current_target, 2)}</td><td>${fmtNum(emp.full_period_percent, 2)}%</td><td>${emp.last_production_date ? formatDatePtBr(emp.last_production_date) : '-'}</td></tr>`).join('') || '<tr><td colspan="11">Nenhum colaborador ativo nesse período.</td></tr>'}
       </tbody>
     </table>
   `;
@@ -3606,7 +3622,7 @@ function renderDailyTrackingPrintTable(data) {
     <table>
       <thead><tr><th>Rank</th><th>Registro</th><th>Colaboradora</th><th>Status</th><th>Dias úteis</th><th>Peças</th><th>Min. normais</th><th>Min. extras</th><th>Min. acumulados</th><th>Base atual</th><th>% até o corte</th><th>Meta 60%</th><th>Gap 60%</th><th>% período cheio</th><th>Último lançamento</th></tr></thead>
       <tbody>
-        ${data.employeeSummaries.map(emp => `<tr class="${emp.status_meta.rowClass}"><td><strong>#${emp.ranking_position}</strong></td><td>${escapeHtml(emp.registration_code)}</td><td><strong>${escapeHtml(emp.full_name)}</strong></td><td><span class="${emp.status_meta.badgeClass}">${emp.status_meta.label}</span></td><td>${emp.business_days_elapsed}/${emp.business_days_total}</td><td>${emp.produced_quantity}</td><td>${emp.normal_minutes.toFixed(2)}</td><td>${emp.extra_minutes.toFixed(2)}</td><td>${emp.produced_minutes.toFixed(2)}</td><td>${emp.elapsed_available_minutes.toFixed(2)}</td><td class="${emp.status_meta.textClass}">${emp.current_percent.toFixed(2)}%</td><td>${emp.current_target_minutes.toFixed(2)}</td><td>${emp.minutes_to_current_target.toFixed(2)}</td><td>${emp.full_period_percent.toFixed(2)}%</td><td>${emp.last_production_date ? formatDatePtBr(emp.last_production_date) : '-'}</td></tr>`).join('') || '<tr><td colspan="15">Nenhum colaborador ativo nesse período.</td></tr>'}
+        ${data.employeeSummaries.map(emp => `<tr class="${emp.status_meta.rowClass}"><td><strong>#${emp.ranking_position}</strong></td><td>${escapeHtml(emp.registration_code)}</td><td><strong>${escapeHtml(emp.full_name)}</strong></td><td><span class="${emp.status_meta.badgeClass}">${emp.status_meta.label}</span></td><td>${emp.business_days_elapsed}/${emp.business_days_total}</td><td>${emp.produced_quantity}</td><td>${fmtNum(emp.normal_minutes, 2)}</td><td>${fmtNum(emp.extra_minutes, 2)}</td><td>${fmtNum(emp.produced_minutes, 2)}</td><td>${fmtNum(emp.elapsed_available_minutes, 2)}</td><td class="${emp.status_meta.textClass}">${fmtNum(emp.current_percent, 2)}%</td><td>${fmtNum(emp.current_target_minutes, 2)}</td><td>${fmtNum(emp.minutes_to_current_target, 2)}</td><td>${fmtNum(emp.full_period_percent, 2)}%</td><td>${emp.last_production_date ? formatDatePtBr(emp.last_production_date) : '-'}</td></tr>`).join('') || '<tr><td colspan="15">Nenhum colaborador ativo nesse período.</td></tr>'}
       </tbody>
     </table>
   `;
@@ -3649,21 +3665,21 @@ function renderDailyTrackingPage(query = {}, role = 'adm') {
         <div class="tracking-kpi-stack">
           <div class="tracking-kpi-item">
             <span>Líder do período</span>
-            <strong>${data.management.leader ? `${escapeHtml(data.management.leader.full_name)} · ${data.management.leader.current_percent.toFixed(2)}%` : 'Sem líder no filtro'}</strong>
+            <strong>${data.management.leader ? `${escapeHtml(data.management.leader.full_name)} · ${fmtNum(data.management.leader.current_percent, 2)}%` : 'Sem líder no filtro'}</strong>
             <small>${data.management.leader ? `Ranking #${data.management.leader.ranking_position} · ${escapeHtml(data.management.leader.registration_code)}` : 'Ajuste o filtro para visualizar um ranking válido.'}</small>
           </div>
           <div class="tracking-kpi-item">
             <span>Última colocação</span>
-            <strong>${data.management.lastPlace ? `${escapeHtml(data.management.lastPlace.full_name)} · ${data.management.lastPlace.current_percent.toFixed(2)}%` : 'Sem dados'}</strong>
-            <small>${data.management.lastPlace ? `Gap atual: ${data.management.lastPlace.minutes_to_current_target.toFixed(2)} min para chegar em 60%.` : 'Nenhum colaborador ativo no período.'}</small>
+            <strong>${data.management.lastPlace ? `${escapeHtml(data.management.lastPlace.full_name)} · ${fmtNum(data.management.lastPlace.current_percent, 2)}%` : 'Sem dados'}</strong>
+            <small>${data.management.lastPlace ? `Gap atual: ${fmtNum(data.management.lastPlace.minutes_to_current_target, 2)} min para chegar em 60%.` : 'Nenhum colaborador ativo no período.'}</small>
           </div>
           <div class="tracking-kpi-item tracking-kpi-next-step">
-            <span>Próxima etapa visível/testável</span>
-            <strong>Conferir prêmio e fechamento no mesmo recorte</strong>
+            <span>Atalhos do período</span>
+            <strong>Ver prêmio e fechamento deste período</strong>
             <small>${escapeHtml(data.management.nextActionLabel)}</small>
             <div class="actions tracking-inline-actions">
-              <a class="btn secondary" href="/premios/producao${getProductionPrizeQueryString(data.filters)}">Testar prêmio de produção</a>
-              <a class="btn secondary" href="/closures${getClosureQueryString(data.filters)}">Testar fechamento</a>
+              <a class="btn secondary" href="/premios/producao${getProductionPrizeQueryString(data.filters)}">Ver prêmio de produção</a>
+              <a class="btn secondary" href="/closures${getClosureQueryString(data.filters)}">Ver fechamento</a>
             </div>
           </div>
         </div>
@@ -3672,7 +3688,7 @@ function renderDailyTrackingPage(query = {}, role = 'adm') {
       <article class="panel tracking-management-panel">
         <div class="panel-header"><h3>Radar abaixo de 60%</h3><span class="hint">Quem está pedindo atenção primeiro.</span></div>
         <div class="tracking-alert-list">
-          ${data.management.attentionRows.map(emp => `<div class="tracking-alert-item ${emp.status_meta.cardClass}"><strong>${escapeHtml(emp.full_name)}</strong><span>${escapeHtml(emp.registration_code)} · ${emp.current_percent.toFixed(2)}%</span><small>Faltam ${emp.minutes_to_current_target.toFixed(2)} minutos para alcançar 60%.</small></div>`).join('') || '<p class="hint">Nenhuma colaboradora abaixo de 60% no recorte atual.</p>'}
+          ${data.management.attentionRows.map(emp => `<div class="tracking-alert-item ${emp.status_meta.cardClass}"><strong>${escapeHtml(emp.full_name)}</strong><span>${escapeHtml(emp.registration_code)} · ${fmtNum(emp.current_percent, 2)}%</span><small>Faltam ${fmtNum(emp.minutes_to_current_target, 2)} minutos para alcançar 60%.</small></div>`).join('') || '<p class="hint">Nenhuma colaboradora abaixo de 60% no recorte atual.</p>'}
         </div>
       </article>
     </section>
@@ -3687,10 +3703,10 @@ function renderDailyTrackingPage(query = {}, role = 'adm') {
       <ul>
         <li>O período padrão usa o <strong>mês operacional de 26 até 25</strong>.</li>
         <li><strong>Minutos acumulados</strong> consideram somente lançamentos até o <strong>último dia útil anterior</strong> à data base exibida.</li>
-        <li><strong>% atual</strong> compara o acumulado com os <strong>dias úteis já decorridos</strong> para cada colaboradora.</li>
+        <li><strong>% até o corte</strong> compara o acumulado com os <strong>dias úteis já decorridos</strong> para cada colaboradora.</li>
         <li>O ranking já destaca visualmente quem <strong>bateu 60%</strong> e quem ainda está <strong>abaixo</strong>.</li>
         <li>A contagem de dias úteis respeita <strong>feriados configurados</strong> e também datas de início/rescisão do cadastro.</li>
-        <li>Os botões de <strong>próxima etapa</strong> permitem validar no app, usando o mesmo filtro, os módulos de <strong>Prêmio de produção</strong> e <strong>Fechamento</strong>.</li>
+        <li>Os atalhos abrem o <strong>Prêmio de produção</strong> e o <strong>Fechamento</strong> com o mesmo filtro.</li>
       </ul>
     </section>
   `;
@@ -3727,13 +3743,13 @@ function renderDailyTrackingExportPage(query = {}, role = 'adm') {
         <div class="tracking-kpi-stack">
           <div class="tracking-kpi-item">
             <span>Líder do período</span>
-            <strong>${data.management.leader ? `${escapeHtml(data.management.leader.full_name)} · ${data.management.leader.current_percent.toFixed(2)}%` : 'Sem líder no filtro'}</strong>
+            <strong>${data.management.leader ? `${escapeHtml(data.management.leader.full_name)} · ${fmtNum(data.management.leader.current_percent, 2)}%` : 'Sem líder no filtro'}</strong>
             <small>${data.management.leader ? `Ranking #${data.management.leader.ranking_position} · ${escapeHtml(data.management.leader.registration_code)}` : 'Ajuste o filtro para visualizar um ranking válido.'}</small>
           </div>
           <div class="tracking-kpi-item">
             <span>Última colocação</span>
-            <strong>${data.management.lastPlace ? `${escapeHtml(data.management.lastPlace.full_name)} · ${data.management.lastPlace.current_percent.toFixed(2)}%` : 'Sem dados'}</strong>
-            <small>${data.management.lastPlace ? `Gap atual: ${data.management.lastPlace.minutes_to_current_target.toFixed(2)} min para chegar em 60%.` : 'Nenhum colaborador ativo no período.'}</small>
+            <strong>${data.management.lastPlace ? `${escapeHtml(data.management.lastPlace.full_name)} · ${fmtNum(data.management.lastPlace.current_percent, 2)}%` : 'Sem dados'}</strong>
+            <small>${data.management.lastPlace ? `Gap atual: ${fmtNum(data.management.lastPlace.minutes_to_current_target, 2)} min para chegar em 60%.` : 'Nenhum colaborador ativo no período.'}</small>
           </div>
           <div class="tracking-kpi-item tracking-kpi-next-step">
             <span>Próxima ação gerencial</span>
@@ -3746,7 +3762,7 @@ function renderDailyTrackingExportPage(query = {}, role = 'adm') {
       <article class="panel tracking-management-panel">
         <div class="panel-header"><h3>Radar abaixo de 60%</h3><span class="hint">Prioridade rápida para conferência.</span></div>
         <div class="tracking-alert-list">
-          ${data.management.attentionRows.map(emp => `<div class="tracking-alert-item ${emp.status_meta.cardClass}"><strong>${escapeHtml(emp.full_name)}</strong><span>${escapeHtml(emp.registration_code)} · ${emp.current_percent.toFixed(2)}%</span><small>Faltam ${emp.minutes_to_current_target.toFixed(2)} minutos para alcançar 60%.</small></div>`).join('') || '<p class="hint">Nenhuma colaboradora abaixo de 60% no recorte atual.</p>'}
+          ${data.management.attentionRows.map(emp => `<div class="tracking-alert-item ${emp.status_meta.cardClass}"><strong>${escapeHtml(emp.full_name)}</strong><span>${escapeHtml(emp.registration_code)} · ${fmtNum(emp.current_percent, 2)}%</span><small>Faltam ${fmtNum(emp.minutes_to_current_target, 2)} minutos para alcançar 60%.</small></div>`).join('') || '<p class="hint">Nenhuma colaboradora abaixo de 60% no recorte atual.</p>'}
         </div>
       </article>
     </section>
@@ -3919,13 +3935,13 @@ function renderProductionPrizeCards(data) {
       <article class="card"><span>Colaboradores no período</span><strong>${data.totals.employees}</strong><small>Ativos dentro do intervalo filtrado</small></article>
       <article class="card"><span>Com prêmio</span><strong>${data.totals.awardedEmployees}</strong><small>Recebem alguma bonificação</small></article>
       <article class="card"><span>Atingiram 60%</span><strong>${data.totals.reachedSixty}</strong><small>Ganham prêmio fixo de 400</small></article>
-      <article class="card"><span>Prêmio produção</span><strong>R$ ${data.totals.productionPrize.toFixed(2)}</strong><small>Faixas de 40%, 45% e 50%</small></article>
-      <article class="card"><span>Prêmio 60%</span><strong>R$ ${data.totals.sixtyPrize.toFixed(2)}</strong><small>400 por colaboradora que atinge a meta</small></article>
-      <article class="card"><span>Prêmio extra</span><strong>R$ ${data.totals.extraPrize.toFixed(2)}</strong><small>10 a cada 100 min acima da meta</small></article>
-      <article class="card"><span>Min. normais</span><strong>${data.totals.normalMinutes.toFixed(2)}</strong><small>Base sem o tempo extra</small></article>
-      <article class="card"><span>Min. extras</span><strong>${data.totals.producedExtraMinutes.toFixed(2)}</strong><small>Tempo extra já incluído na eficiência</small></article>
-      <article class="card"><span>Total previsto</span><strong>R$ ${data.totals.totalPrize.toFixed(2)}</strong><small>Soma das três colunas do relatório</small></article>
-      <article class="card"><span>Eficiência do período cheio</span><strong>${data.totals.efficiencyPercent.toFixed(2)}%</strong><small>Minutos que contam para prêmio ÷ base do período inteiro</small></article>
+      <article class="card"><span>Prêmio produção</span><strong>${fmtMoney(data.totals.productionPrize)}</strong><small>Faixas de 40%, 45% e 50%</small></article>
+      <article class="card"><span>Prêmio 60%</span><strong>${fmtMoney(data.totals.sixtyPrize)}</strong><small>400 por colaboradora que atinge a meta</small></article>
+      <article class="card"><span>Prêmio extra</span><strong>${fmtMoney(data.totals.extraPrize)}</strong><small>10 a cada 100 min acima da meta</small></article>
+      <article class="card"><span>Min. normais</span><strong>${fmtNum(data.totals.normalMinutes, 2)}</strong><small>Base sem o tempo extra</small></article>
+      <article class="card"><span>Min. extras</span><strong>${fmtNum(data.totals.producedExtraMinutes, 2)}</strong><small>Tempo extra já incluído na eficiência</small></article>
+      <article class="card"><span>Total previsto</span><strong>${fmtMoney(data.totals.totalPrize)}</strong><small>Soma das três colunas do relatório</small></article>
+      <article class="card"><span>Eficiência do período cheio</span><strong>${fmtNum(data.totals.efficiencyPercent, 2)}%</strong><small>Minutos que contam para prêmio ÷ base do período inteiro</small></article>
     </div>
   `;
 }
@@ -3942,7 +3958,7 @@ function renderProductionPrizePage(query = {}, role = 'adm') {
     <section class="page-header">
       <div>
         <h2>Prêmio de produção</h2>
-        <p>Primeira versão funcional do módulo para cálculo por costureira, usando minutos lançados e a meta de 60% do período.</p>
+        <p>Cálculo do prêmio por costureira com base nos minutos que contam para prêmio e na meta de 60% do período.</p>
       </div>
     </section>
 
@@ -3950,13 +3966,13 @@ function renderProductionPrizePage(query = {}, role = 'adm') {
     ${renderProductionPrizeCards(data)}
 
     <section class="panel section-gap">
-      <div class="panel-header"><h3>Relatório por colaboradora</h3><span class="hint">Estrutura pedida: nome / prêmio produção / prêmio 60% / prêmio extra.</span></div>
+      <div class="panel-header"><h3>Relatório por colaboradora</h3><span class="hint">Prêmio produção, prêmio 60% e prêmio extra por colaboradora.</span></div>
       <table>
         <thead><tr><th>Nome</th><th>Prêmio produção</th><th>Prêmio 60%</th><th>Prêmio extra</th><th>Total</th><th>Normal</th><th>Extra</th><th>Minutos</th><th>Meta 60%</th><th>Base</th><th>Eficiência</th><th>Dias úteis</th></tr></thead>
         <tbody>
           ${data.employeeSummaries.map(emp => {
             const perfClass = emp.efficiency_percent < 40 ? 'perf-low' : (emp.efficiency_percent < 60 ? 'perf-mid' : 'perf-high');
-            return `<tr><td><strong>${escapeHtml(emp.full_name)}</strong><br /><span class="hint">${escapeHtml(emp.registration_code)}</span></td><td>R$ ${emp.production_prize.toFixed(2)}</td><td>R$ ${emp.sixty_prize.toFixed(2)}</td><td>R$ ${emp.extra_prize.toFixed(2)}</td><td><strong>R$ ${emp.total_prize.toFixed(2)}</strong></td><td>${emp.normal_minutes.toFixed(2)}</td><td>${emp.produced_extra_minutes.toFixed(2)}</td><td>${emp.produced_minutes.toFixed(2)}</td><td>${emp.target_minutes_60.toFixed(2)}</td><td>${emp.available_minutes.toFixed(2)}</td><td class="${perfClass}">${emp.efficiency_percent.toFixed(2)}%</td><td>${emp.business_days}</td></tr>`;
+            return `<tr><td><strong>${escapeHtml(emp.full_name)}</strong><br /><span class="hint">${escapeHtml(emp.registration_code)}</span></td><td>${fmtMoney(emp.production_prize)}</td><td>${fmtMoney(emp.sixty_prize)}</td><td>${fmtMoney(emp.extra_prize)}</td><td><strong>${fmtMoney(emp.total_prize)}</strong></td><td>${fmtNum(emp.normal_minutes, 2)}</td><td>${fmtNum(emp.produced_extra_minutes, 2)}</td><td>${fmtNum(emp.produced_minutes, 2)}</td><td>${fmtNum(emp.target_minutes_60, 2)}</td><td>${fmtNum(emp.available_minutes, 2)}</td><td class="${perfClass}">${fmtNum(emp.efficiency_percent, 2)}%</td><td>${emp.business_days}</td></tr>`;
           }).join('') || '<tr><td colspan="12">Nenhum colaborador ativo nesse período.</td></tr>'}
         </tbody>
       </table>
@@ -4004,7 +4020,7 @@ function renderProductionPrizeExportPage(query = {}, role = 'adm') {
       <table>
         <thead><tr><th>Nome</th><th>Prêmio produção</th><th>Prêmio 60%</th><th>Prêmio extra</th><th>Total</th><th>Normal</th><th>Extra</th><th>Minutos</th><th>Meta 60%</th><th>Base</th><th>Eficiência</th></tr></thead>
         <tbody>
-          ${data.employeeSummaries.map(emp => `<tr><td>${escapeHtml(emp.full_name)}</td><td>R$ ${emp.production_prize.toFixed(2)}</td><td>R$ ${emp.sixty_prize.toFixed(2)}</td><td>R$ ${emp.extra_prize.toFixed(2)}</td><td>R$ ${emp.total_prize.toFixed(2)}</td><td>${emp.normal_minutes.toFixed(2)}</td><td>${emp.produced_extra_minutes.toFixed(2)}</td><td>${emp.produced_minutes.toFixed(2)}</td><td>${emp.target_minutes_60.toFixed(2)}</td><td>${emp.available_minutes.toFixed(2)}</td><td>${emp.efficiency_percent.toFixed(2)}%</td></tr>`).join('') || '<tr><td colspan="11">Sem dados para o filtro selecionado.</td></tr>'}
+          ${data.employeeSummaries.map(emp => `<tr><td>${escapeHtml(emp.full_name)}</td><td>${fmtMoney(emp.production_prize)}</td><td>${fmtMoney(emp.sixty_prize)}</td><td>${fmtMoney(emp.extra_prize)}</td><td>${fmtMoney(emp.total_prize)}</td><td>${fmtNum(emp.normal_minutes, 2)}</td><td>${fmtNum(emp.produced_extra_minutes, 2)}</td><td>${fmtNum(emp.produced_minutes, 2)}</td><td>${fmtNum(emp.target_minutes_60, 2)}</td><td>${fmtNum(emp.available_minutes, 2)}</td><td>${fmtNum(emp.efficiency_percent, 2)}%</td></tr>`).join('') || '<tr><td colspan="11">Sem dados para o filtro selecionado.</td></tr>'}
         </tbody>
       </table>
     </section>
@@ -4039,7 +4055,7 @@ function renderMonthlyClosurePage(query = {}, role = 'adm') {
           ${data.employeeSummaries.map(emp => {
             const perfClass = emp.efficiency_percent < 50 ? 'perf-low' : (emp.efficiency_percent <= 60 ? 'perf-mid' : 'perf-high');
             const rangeLabel = emp.effective_range ? `${formatDatePtBr(emp.effective_range.start)} até ${formatDatePtBr(emp.effective_range.end)}` : '-';
-            return `<tr><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td>${rangeLabel}</td><td>${emp.business_days}</td><td>${emp.with_production}</td><td>${emp.justified_days}</td><td>${emp.absence_days}</td><td><strong>${emp.pending_days}</strong></td><td>${emp.produced_quantity}</td><td>${emp.produced_minutes.toFixed(2)}</td><td>${emp.available_minutes.toFixed(2)}</td><td class="${perfClass}">${emp.efficiency_percent.toFixed(2)}%</td></tr>`;
+            return `<tr><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td>${rangeLabel}</td><td>${emp.business_days}</td><td>${emp.with_production}</td><td>${emp.justified_days}</td><td>${emp.absence_days}</td><td><strong>${emp.pending_days}</strong></td><td>${emp.produced_quantity}</td><td>${fmtNum(emp.produced_minutes, 2)}</td><td>${fmtNum(emp.available_minutes, 2)}</td><td class="${perfClass}">${fmtNum(emp.efficiency_percent, 2)}%</td></tr>`;
           }).join('') || '<tr><td colspan="12">Nenhum colaborador ativo nesse período.</td></tr>'}
         </tbody>
       </table>
@@ -4116,7 +4132,7 @@ function renderMonthlyClosurePage(query = {}, role = 'adm') {
         <table>
           <thead><tr><th>Data</th><th>Ativos</th><th>Com lançamento</th><th>Resolvidos</th><th>Ausências</th><th>Pendentes</th><th>Peças</th><th>Normal</th><th>Extra</th><th>Total</th><th>Eficiência</th></tr></thead>
           <tbody>
-            ${data.dailyRows.map(day => `<tr><td>${formatDatePtBr(day.work_date)}</td><td>${day.employees_active}</td><td>${day.with_production}</td><td>${day.resolved}</td><td>${day.absences}</td><td><strong>${day.pending}</strong></td><td>${day.produced_quantity}</td><td>${day.normal_minutes.toFixed(2)}</td><td>${day.extra_minutes.toFixed(2)}</td><td>${day.produced_minutes.toFixed(2)}</td><td>${day.efficiency_percent.toFixed(2)}%</td></tr>`).join('') || '<tr><td colspan="11">Sem dias úteis encontrados na faixa selecionada.</td></tr>'}
+            ${data.dailyRows.map(day => `<tr><td>${formatDatePtBr(day.work_date)}</td><td>${day.employees_active}</td><td>${day.with_production}</td><td>${day.resolved}</td><td>${day.absences}</td><td><strong>${day.pending}</strong></td><td>${day.produced_quantity}</td><td>${fmtNum(day.normal_minutes, 2)}</td><td>${fmtNum(day.extra_minutes, 2)}</td><td>${fmtNum(day.produced_minutes, 2)}</td><td>${fmtNum(day.efficiency_percent, 2)}%</td></tr>`).join('') || '<tr><td colspan="11">Sem dias úteis encontrados na faixa selecionada.</td></tr>'}
           </tbody>
         </table>
       </section>
@@ -4130,7 +4146,7 @@ function renderMonthlyClosurePage(query = {}, role = 'adm') {
           <tbody>
             ${data.rankingRows.map(emp => {
               const perfClass = emp.efficiency_percent < 50 ? 'perf-low' : (emp.efficiency_percent <= 60 ? 'perf-mid' : 'perf-high');
-              return `<tr><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td>${emp.produced_minutes.toFixed(2)}</td><td>${emp.available_minutes.toFixed(2)}</td><td class="${perfClass}">${emp.efficiency_percent.toFixed(2)}%</td><td>${emp.pending_days}</td></tr>`;
+              return `<tr><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td>${fmtNum(emp.produced_minutes, 2)}</td><td>${fmtNum(emp.available_minutes, 2)}</td><td class="${perfClass}">${fmtNum(emp.efficiency_percent, 2)}%</td><td>${emp.pending_days}</td></tr>`;
             }).join('') || '<tr><td colspan="6">Sem dados de ranking para esse filtro.</td></tr>'}
           </tbody>
         </table>
@@ -4176,7 +4192,7 @@ function renderClosureExportPage(query = {}, role = 'adm') {
       <table>
         <thead><tr><th>Registro</th><th>Colaborador</th><th>Dias úteis</th><th>Com lançamento</th><th>Justificados</th><th>Ausências</th><th>Pendentes</th><th>Peças</th><th>Normal</th><th>Extra</th><th>Total</th><th>Base</th><th>Eficiência</th></tr></thead>
         <tbody>
-          ${data.employeeSummaries.map(emp => `<tr><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td>${emp.business_days}</td><td>${emp.with_production}</td><td>${emp.justified_days}</td><td>${emp.absence_days}</td><td>${emp.pending_days}</td><td>${emp.produced_quantity}</td><td>${emp.normal_minutes.toFixed(2)}</td><td>${emp.extra_minutes.toFixed(2)}</td><td>${emp.produced_minutes.toFixed(2)}</td><td>${emp.available_minutes.toFixed(2)}</td><td>${emp.efficiency_percent.toFixed(2)}%</td></tr>`).join('') || '<tr><td colspan="13">Sem dados para o filtro selecionado.</td></tr>'}
+          ${data.employeeSummaries.map(emp => `<tr><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td>${emp.business_days}</td><td>${emp.with_production}</td><td>${emp.justified_days}</td><td>${emp.absence_days}</td><td>${emp.pending_days}</td><td>${emp.produced_quantity}</td><td>${fmtNum(emp.normal_minutes, 2)}</td><td>${fmtNum(emp.extra_minutes, 2)}</td><td>${fmtNum(emp.produced_minutes, 2)}</td><td>${fmtNum(emp.available_minutes, 2)}</td><td>${fmtNum(emp.efficiency_percent, 2)}%</td></tr>`).join('') || '<tr><td colspan="13">Sem dados para o filtro selecionado.</td></tr>'}
         </tbody>
       </table>
     </section>
@@ -4185,7 +4201,7 @@ function renderClosureExportPage(query = {}, role = 'adm') {
       <table>
         <thead><tr><th>Data</th><th>Ativos</th><th>Com lançamento</th><th>Resolvidos</th><th>Ausências</th><th>Pendentes</th><th>Peças</th><th>Normal</th><th>Extra</th><th>Total</th><th>Eficiência</th></tr></thead>
         <tbody>
-          ${data.dailyRows.map(day => `<tr><td>${formatDatePtBr(day.work_date)}</td><td>${day.employees_active}</td><td>${day.with_production}</td><td>${day.resolved}</td><td>${day.absences}</td><td>${day.pending}</td><td>${day.produced_quantity}</td><td>${day.normal_minutes.toFixed(2)}</td><td>${day.extra_minutes.toFixed(2)}</td><td>${day.produced_minutes.toFixed(2)}</td><td>${day.efficiency_percent.toFixed(2)}%</td></tr>`).join('') || '<tr><td colspan="11">Sem dados diários no intervalo.</td></tr>'}
+          ${data.dailyRows.map(day => `<tr><td>${formatDatePtBr(day.work_date)}</td><td>${day.employees_active}</td><td>${day.with_production}</td><td>${day.resolved}</td><td>${day.absences}</td><td>${day.pending}</td><td>${day.produced_quantity}</td><td>${fmtNum(day.normal_minutes, 2)}</td><td>${fmtNum(day.extra_minutes, 2)}</td><td>${fmtNum(day.produced_minutes, 2)}</td><td>${fmtNum(day.efficiency_percent, 2)}%</td></tr>`).join('') || '<tr><td colspan="11">Sem dados diários no intervalo.</td></tr>'}
         </tbody>
       </table>
     </section>
@@ -4794,7 +4810,7 @@ function handleCreateProduction(form, res) {
 
   const remainingPieces = Math.max(Number(op.total_pieces || 0) - futureTotal, 0);
 
-  let message = `Lançamento salvo para ${op.op_number}. Normal: ${metrics.normalMinutes.toFixed(3)} min · Extra: ${metrics.extraMinutes.toFixed(3)} min · Total: ${metrics.totalMinutes.toFixed(3)} min.`;
+  let message = `Lançamento salvo para ${op.op_number}. Normal: ${fmtNum(metrics.normalMinutes, 3)} min · Extra: ${fmtNum(metrics.extraMinutes, 3)} min · Total: ${fmtNum(metrics.totalMinutes, 3)} min.`;
   if (futureTotal >= Number(op.total_pieces || 0) && Number(op.total_pieces || 0) > 0) {
     message += ' A OP atingiu o total de peças consideradas e ficou azul.';
   } else {
@@ -5083,7 +5099,7 @@ function renderBillingReconciliationPage(values = {}, error = '', result = null,
             <thead><tr><th>OP</th><th>Motivo</th></tr></thead>
             <tbody>
               ${[
-                ...result.alreadyBilled.map(item => `<tr><td>${escapeHtml(item.op_number)}</td><td>Já cobrada em ${escapeHtml(item.billed_at || '-')}</td></tr>`),
+                ...result.alreadyBilled.map(item => `<tr><td>${escapeHtml(item.op_number)}</td><td>Já cobrada em ${escapeHtml(nowPt(item.billed_at))}</td></tr>`),
                 ...result.invalid.map(item => `<tr><td>${escapeHtml(item.op_number)}</td><td>${escapeHtml(item.reason)}</td></tr>`),
                 ...result.duplicateNumbers.map(item => `<tr><td>${escapeHtml(item)}</td><td>Duplicada no texto informado.</td></tr>`)
               ].join('') || '<tr><td colspan="2">Nenhuma inconsistência.</td></tr>'}
@@ -5096,7 +5112,7 @@ function renderBillingReconciliationPage(values = {}, error = '', result = null,
 
   const content = `
     <section class="page-header">
-      <div><h2>Conciliação de cobrança</h2><p>Primeira versão para informar OPs cobradas em lote, validar a base e guardar histórico simples.</p></div>
+      <div><h2>Conciliação de cobrança</h2><p>Informe as OPs cobradas em lote, valide a base e mantenha o histórico de cobranças.</p></div>
       <a class="btn secondary" href="/ops?billing_status=not_billed">Ver OPs não cobradas</a>
     </section>
     <form class="panel stack-form" method="post" action="/billing-reconciliation">
@@ -5108,7 +5124,7 @@ function renderBillingReconciliationPage(values = {}, error = '', result = null,
         <textarea name="op_numbers" rows="12" required placeholder="Ex.:&#10;OP-1001&#10;OP-1002&#10;OP-1003">${escapeHtml(values.op_numbers || '')}</textarea>
       </label>
       <div class="actions"><button class="btn" type="submit">Validar e marcar como cobradas</button></div>
-      <p class="hint">Regras desta versão: OP inexistente entra como inválida; OP devolvida fica fora da cobrança; OP já cobrada não é remarcada; as válidas recebem data/observação e entram no histórico.</p>
+      <p class="hint">Regras: OP inexistente entra como inválida; OP devolvida fica fora da cobrança; OP já cobrada não é remarcada; as válidas recebem data/observação e entram no histórico.</p>
     </form>
     ${resultSummary}
     <section class="panel">
@@ -5116,7 +5132,7 @@ function renderBillingReconciliationPage(values = {}, error = '', result = null,
       <table>
         <thead><tr><th>Data</th><th>OP</th><th>Produto</th><th>Observação</th><th>Lote</th></tr></thead>
         <tbody>
-          ${recent.map(item => `<tr><td>${escapeHtml(item.billed_at)}</td><td><a href="/ops/${item.op_id}">${escapeHtml(item.op_number)}</a></td><td>${escapeHtml(item.product_name)}</td><td>${escapeHtml(item.notes || '-')}</td><td>${escapeHtml(item.batch_reference || '-')}</td></tr>`).join('') || '<tr><td colspan="5">Nenhum histórico de cobrança ainda.</td></tr>'}
+          ${recent.map(item => `<tr><td>${escapeHtml(nowPt(item.billed_at))}</td><td><a href="/ops/${item.op_id}">${escapeHtml(item.op_number)}</a></td><td>${escapeHtml(item.product_name)}</td><td>${escapeHtml(item.notes || '-')}</td><td>${escapeHtml(item.batch_reference || '-')}</td></tr>`).join('') || '<tr><td colspan="5">Nenhum histórico de cobrança ainda.</td></tr>'}
         </tbody>
       </table>
     </section>
@@ -5433,11 +5449,11 @@ function renderDashboard(query, role = 'adm') {
       <div class="shipment-summary-grid section-gap">
         <article class="mini-card"><span>Costureiras com hora lançada</span><strong id="hourly-total-seamstresses">${hourlyDashboardData.seamstressCount}</strong></article>
         <article class="mini-card"><span>Peças lançadas hoje</span><strong id="hourly-total-quantity">${hourlyDashboardData.totalQuantity}</strong></article>
-        <article class="mini-card"><span>Minutos lançados hoje</span><strong id="hourly-total-minutes">${hourlyDashboardData.totalMinutes.toFixed(3)}</strong></article>
+        <article class="mini-card"><span>Minutos lançados hoje</span><strong id="hourly-total-minutes">${fmtNum(hourlyDashboardData.totalMinutes, 3)}</strong></article>
         <article class="mini-card"><span>% geral até agora</span><strong id="hourly-total-percent">0,00%</strong></article>
       </div>
       <div class="tracking-alert-list" id="hourly-dashboard-list">
-        ${hourlyDashboardData.rows.map(item => `<div class="tracking-alert-item" data-hourly-card data-first-hour="${item.first_hour_number}" data-minutes="${item.total_minutes}" style="margin-bottom:10px;"><div style="display:flex;justify-content:space-between;gap:12px;align-items:center;"><strong>${escapeHtml(item.full_name)}${item.termination_date && item.termination_date <= currentDay ? ' <span style="color:#ef4444;font-weight:600;">(Inativa)</span>' : ''}</strong><span data-hourly-percent>0,00%</span></div><div style="margin-top:8px;background:rgba(148,163,184,.18);border-radius:999px;height:10px;overflow:hidden;"><div data-hourly-bar style="width:2%;height:10px;background:#22c55e;"></div></div><small>${item.total_quantity} peça(s) · ${item.total_minutes.toFixed(3)} min · ${item.launched_hours} hora(s) lançada(s) · início ${escapeHtml(item.first_hour_slot || '-')}</small></div>`).join('') || '<p class="hint">Nenhum lançamento por hora hoje.</p>'}
+        ${hourlyDashboardData.rows.map(item => `<div class="tracking-alert-item" data-hourly-card data-first-hour="${item.first_hour_number}" data-minutes="${item.total_minutes}" style="margin-bottom:10px;"><div style="display:flex;justify-content:space-between;gap:12px;align-items:center;"><strong>${escapeHtml(item.full_name)}${item.termination_date && item.termination_date <= currentDay ? ' <span style="color:#ef4444;font-weight:600;">(Inativa)</span>' : ''}</strong><span data-hourly-percent>0,00%</span></div><div style="margin-top:8px;background:rgba(148,163,184,.18);border-radius:999px;height:10px;overflow:hidden;"><div data-hourly-bar style="width:2%;height:10px;background:#22c55e;"></div></div><small>${item.total_quantity} peça(s) · ${fmtNum(item.total_minutes, 3)} min · ${item.launched_hours} hora(s) lançada(s) · início ${escapeHtml(item.first_hour_slot || '-')}</small></div>`).join('') || '<p class="hint">Nenhum lançamento por hora hoje.</p>'}
       </div>
       <script>
         (() => {
@@ -5507,7 +5523,7 @@ function renderDashboard(query, role = 'adm') {
                 const isInactive = emp.termination_date && emp.termination_date <= employeeData.range.end;
                 const tone = needsAttention ? '#ef4444' : (pct >= 60 ? '#22c55e' : '#f59e0b');
                 const bg = needsAttention ? 'rgba(239,68,68,.10)' : (pct >= 60 ? 'rgba(34,197,94,.10)' : 'rgba(245,158,11,.10)');
-                return `<div style="display:grid;grid-template-columns:44px 1fr 84px;gap:12px;align-items:center;padding:12px 14px;border-radius:14px;background:${bg};border:1px solid rgba(148,163,184,.18);"><div style="display:flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:999px;background:white;font-weight:700;color:${tone};">${index + 1}</div><div><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><strong style="font-size:15px;">${escapeHtml(emp.full_name)}</strong>${isInactive ? '<span style="font-size:12px;color:#ef4444;font-weight:700;">INATIVA</span>' : ''}</div><div style="margin-top:8px;background:rgba(15,23,42,.08);border-radius:999px;height:10px;overflow:hidden;"><div style="width:${barWidth}%;height:10px;background:${tone};"></div></div><div style="margin-top:6px;font-size:12px;color:#64748b;">${round2(emp.produced_minutes).toFixed(2)} min · ${needsAttention ? 'Necessita atenção' : 'Dentro da leitura esperada'}${isInactive ? ` · Inativa desde ${formatDatePtBr(emp.termination_date)}` : ''}</div></div><div style="text-align:right;"><div style="font-size:22px;font-weight:800;color:${tone};line-height:1;">${pct.toFixed(2)}%</div><div style="font-size:12px;color:#64748b;margin-top:4px;">resultado</div></div></div>`;
+                return `<div style="display:grid;grid-template-columns:44px 1fr 84px;gap:12px;align-items:center;padding:12px 14px;border-radius:14px;background:${bg};border:1px solid rgba(148,163,184,.18);"><div style="display:flex;align-items:center;justify-content:center;width:44px;height:44px;border-radius:999px;background:white;font-weight:700;color:${tone};">${index + 1}</div><div><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><strong style="font-size:15px;">${escapeHtml(emp.full_name)}</strong>${isInactive ? '<span style="font-size:12px;color:#ef4444;font-weight:700;">INATIVA</span>' : ''}</div><div style="margin-top:8px;background:rgba(15,23,42,.08);border-radius:999px;height:10px;overflow:hidden;"><div style="width:${barWidth}%;height:10px;background:${tone};"></div></div><div style="margin-top:6px;font-size:12px;color:#64748b;">${fmtNum(round2(emp.produced_minutes), 2)} min · ${needsAttention ? 'Necessita atenção' : 'Dentro da leitura esperada'}${isInactive ? ` · Inativa desde ${formatDatePtBr(emp.termination_date)}` : ''}</div></div><div style="text-align:right;"><div style="font-size:22px;font-weight:800;color:${tone};line-height:1;">${fmtNum(pct, 2)}%</div><div style="font-size:12px;color:#64748b;margin-top:4px;">resultado</div></div></div>`;
               }).join('') || '<p class="hint">Nenhuma costureira ativa no período.</p>'}
             </div>
           </section>
@@ -5518,20 +5534,20 @@ function renderDashboard(query, role = 'adm') {
                 const pct = round2(emp.efficiency_percent || 0);
                 const cls = pct < 50 ? 'perf-low' : (pct <= 60 ? 'perf-mid' : 'perf-high');
                 const isInactive = emp.termination_date && emp.termination_date <= employeeData.range.end;
-                return `<tr><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}${isInactive ? ' <span style="color:#ef4444;font-weight:600;">(Inativa)</span>' : ''}</td><td>${emp.active_days}</td><td>${round2(emp.produced_minutes).toFixed(2)}</td><td>${round2(emp.available_minutes).toFixed(2)}</td><td class="${cls}">${pct.toFixed(2)}%</td></tr>`;
+                return `<tr><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}${isInactive ? ' <span style="color:#ef4444;font-weight:600;">(Inativa)</span>' : ''}</td><td>${emp.active_days}</td><td>${fmtNum(round2(emp.produced_minutes), 2)}</td><td>${fmtNum(round2(emp.available_minutes), 2)}</td><td class="${cls}">${fmtNum(pct, 2)}%</td></tr>`;
               }).join('') || '<tr><td colspan="6">Nenhum colaborador ativo no período.</td></tr>'}
             </tbody>
           </table>
           <div class="shipment-summary-grid section-gap">
-            <article class="mini-card"><span>Minutos produção</span><strong>${minutesProducao.toFixed(2)}</strong></article>
-            <article class="mini-card"><span>Minutos mostruário</span><strong>${minutesMostruario.toFixed(2)}</strong></article>
-            <article class="mini-card"><span>Total filtrado</span><strong>${minutesTotal.toFixed(2)}</strong></article>
+            <article class="mini-card"><span>Minutos produção</span><strong>${fmtNum(minutesProducao, 2)}</strong></article>
+            <article class="mini-card"><span>Minutos mostruário</span><strong>${fmtNum(minutesMostruario, 2)}</strong></article>
+            <article class="mini-card"><span>Total filtrado</span><strong>${fmtNum(minutesTotal, 2)}</strong></article>
           </div>
           <div class="company-total ${companyClass}">
             <span>Eficiência até o corte (${escapeHtml(formatDatePtBr(employeeData.efficiencyCutoff))})</span>
-            <strong>${companyPercent.toFixed(2)}%</strong>
+            <strong>${fmtNum(companyPercent, 2)}%</strong>
             <small>${companyLabel}</small>
-            <p>Média geral: ${companyAverageMinutes.toFixed(2)} minutos por operador (${operatorCount} operadores ativos no período).</p><p>Base ativa total: ${companyAvailableMinutes.toFixed(2)} minutos (${companyActiveDays} dias ativos somados).</p>
+            <p>Média geral: ${fmtNum(companyAverageMinutes, 2)} minutos por operador (${operatorCount} operadores ativos no período).</p><p>Base ativa total: ${fmtNum(companyAvailableMinutes, 2)} minutos (${companyActiveDays} dias ativos somados).</p>
             <p>${companyAction}</p>
           </div>
           <p class="subtle-note"><strong>Período:</strong> ${escapeHtml(formatDatePtBr(employeeData.range.start))} até ${escapeHtml(formatDatePtBr(employeeData.range.end))} · minutos e base contados até o corte (último dia útil anterior), igual ao Acompanhamento diário.</p>
@@ -5542,23 +5558,23 @@ function renderDashboard(query, role = 'adm') {
           <div class="panel-header"><h3>Acompanhamento diário do mês operacional</h3><a class="btn secondary" href="/acompanhamento/diario${getDailyTrackingQueryString(dailyTrackingData.filters)}">Abrir painel completo</a></div>
           <p class="hint"><strong>Período 26 → 25:</strong> ${formatDatePtBr(dailyTrackingData.range.start)} até ${formatDatePtBr(dailyTrackingData.range.end)} · <strong>corte atual:</strong> ${formatDatePtBr(dailyTrackingData.progressEnd)}.</p>
           <div class="shipment-summary-grid section-gap">
-            <article class="mini-card"><span>Minutos acumulados</span><strong>${dailyTrackingData.totals.producedMinutes.toFixed(2)}</strong></article>
+            <article class="mini-card"><span>Minutos acumulados</span><strong>${fmtNum(dailyTrackingData.totals.producedMinutes, 2)}</strong></article>
             <article class="mini-card tracking-status-good"><span>Já em 60%+</span><strong>${dailyTrackingData.totals.reachedCurrentTarget}</strong></article>
             <article class="mini-card tracking-status-risk"><span>Abaixo de 60%</span><strong>${dailyTrackingData.totals.belowCurrentTarget}</strong></article>
-            <article class="mini-card"><span>% atual geral</span><strong>${dailyTrackingData.totals.currentPercent.toFixed(2)}%</strong></article>
+            <article class="mini-card"><span>% atual geral</span><strong>${fmtNum(dailyTrackingData.totals.currentPercent, 2)}%</strong></article>
           </div>
           <div class="tracking-dashboard-summary">
             <div>
               <span class="hint">Resumo gerencial do acompanhamento</span>
-              <p><strong>Líder:</strong> ${dailyTrackingData.management.leader ? `${escapeHtml(dailyTrackingData.management.leader.full_name)} (${dailyTrackingData.management.leader.current_percent.toFixed(2)}%)` : 'sem dados'}.</p>
+              <p><strong>Líder:</strong> ${dailyTrackingData.management.leader ? `${escapeHtml(dailyTrackingData.management.leader.full_name)} (${fmtNum(dailyTrackingData.management.leader.current_percent, 2)}%)` : 'sem dados'}.</p>
               <p><strong>Próxima ação:</strong> ${escapeHtml(dailyTrackingData.management.nextActionLabel)}</p>
             </div>
-            <a class="btn secondary" href="/premios/producao${getProductionPrizeQueryString(dailyTrackingData.filters)}">Validar próximo passo</a>
+            <a class="btn secondary" href="/premios/producao${getProductionPrizeQueryString(dailyTrackingData.filters)}">Ver prêmio de produção</a>
           </div>
           <table>
             <thead><tr><th>Rank</th><th>Registro</th><th>Colaboradora</th><th>Status</th><th>Dias úteis</th><th>Minutos</th><th>% até o corte</th><th>Faltam p/ 60%</th></tr></thead>
             <tbody>
-              ${dailyTrackingTopRows.map(emp => `<tr class="${emp.status_meta.rowClass}"><td><strong>#${emp.ranking_position}</strong></td><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td><span class="${emp.status_meta.badgeClass}">${emp.status_meta.label}</span></td><td>${emp.business_days_elapsed}/${emp.business_days_total}</td><td>${emp.produced_minutes.toFixed(2)}</td><td class="${emp.status_meta.textClass}">${emp.current_percent.toFixed(2)}%</td><td>${emp.minutes_to_current_target.toFixed(2)}</td></tr>`).join('') || '<tr><td colspan="8">Nenhum colaborador ativo no mês operacional atual.</td></tr>'}
+              ${dailyTrackingTopRows.map(emp => `<tr class="${emp.status_meta.rowClass}"><td><strong>#${emp.ranking_position}</strong></td><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td><span class="${emp.status_meta.badgeClass}">${emp.status_meta.label}</span></td><td>${emp.business_days_elapsed}/${emp.business_days_total}</td><td>${fmtNum(emp.produced_minutes, 2)}</td><td class="${emp.status_meta.textClass}">${fmtNum(emp.current_percent, 2)}%</td><td>${fmtNum(emp.minutes_to_current_target, 2)}</td></tr>`).join('') || '<tr><td colspan="8">Nenhum colaborador ativo no mês operacional atual.</td></tr>'}
             </tbody>
           </table>
         </section>
@@ -5571,7 +5587,7 @@ function renderDashboard(query, role = 'adm') {
               ${dailyEmployeeRows.map(row => {
                 const pct = round2(row.result_percent || 0);
                 const cls = pct < 50 ? 'perf-low' : (pct <= 60 ? 'perf-mid' : 'perf-high');
-                return `<tr><td>${formatDatePtBr(row.production_date)}</td><td>${escapeHtml(row.registration_code)}</td><td>${escapeHtml(row.full_name)}</td><td>${row.produced_quantity}</td><td>${round2(row.produced_minutes).toFixed(2)}</td><td>${round2(row.available_minutes).toFixed(2)}</td><td class="${cls}">${pct.toFixed(2)}%</td></tr>`;
+                return `<tr><td>${formatDatePtBr(row.production_date)}</td><td>${escapeHtml(row.registration_code)}</td><td>${escapeHtml(row.full_name)}</td><td>${row.produced_quantity}</td><td>${fmtNum(round2(row.produced_minutes), 2)}</td><td>${fmtNum(round2(row.available_minutes), 2)}</td><td class="${cls}">${fmtNum(pct, 2)}%</td></tr>`;
               }).join('') || '<tr><td colspan="7">Nenhum dia útil encontrado no filtro informado.</td></tr>'}
             </tbody>
           </table>
@@ -5602,11 +5618,11 @@ function renderDashboard(query, role = 'adm') {
           </form>
           <p class="hint">${mostruarioCustomFilter ? `Embarques filtrados de ${escapeHtml(mostruarioData.range.start)} até ${escapeHtml(mostruarioData.range.end)}.` : `Resultados filtrados de ${escapeHtml(mostruarioData.range.start)} até ${escapeHtml(mostruarioData.range.end)}.`}</p>
           <div class="cards">
-            <article class="card status-card bg-green"><span>Verde (a produzir)</span><strong>${mostruarioData.cards.greenSewingMinutes.toFixed(2)}</strong><small>Minutos</small></article>
-            <article class="card status-card bg-yellow"><span>Amarelo (com pendência)</span><strong>${mostruarioData.cards.yellowSewingMinutes.toFixed(2)}</strong><small>Minutos</small></article>
-            <article class="card status-card bg-blue"><span>Azul (finalizados)</span><strong>${mostruarioData.cards.blueSewingMinutes.toFixed(2)}</strong><small>Minutos</small></article>
-            <article class="card status-card bg-pink"><span>Rosa (em célula)</span><strong>${mostruarioData.cards.pinkSewingMinutes.toFixed(2)}</strong><small>Minutos fora do fluxo comum</small></article>
-            <article class="card status-card bg-red"><span>Vermelho (embarcado)</span><strong>${mostruarioData.cards.redSewingMinutes.toFixed(2)}</strong><small>Minutos</small></article>
+            <article class="card status-card bg-green"><span>Verde (a produzir)</span><strong>${fmtNum(mostruarioData.cards.greenSewingMinutes, 2)}</strong><small>Minutos</small></article>
+            <article class="card status-card bg-yellow"><span>Amarelo (com pendência)</span><strong>${fmtNum(mostruarioData.cards.yellowSewingMinutes, 2)}</strong><small>Minutos</small></article>
+            <article class="card status-card bg-blue"><span>Azul (finalizados)</span><strong>${fmtNum(mostruarioData.cards.blueSewingMinutes, 2)}</strong><small>Minutos</small></article>
+            <article class="card status-card bg-pink"><span>Rosa (em célula)</span><strong>${fmtNum(mostruarioData.cards.pinkSewingMinutes, 2)}</strong><small>Minutos fora do fluxo comum</small></article>
+            <article class="card status-card bg-red"><span>Vermelho (embarcado)</span><strong>${fmtNum(mostruarioData.cards.redSewingMinutes, 2)}</strong><small>Minutos</small></article>
           </div>
         </section>
 
@@ -5628,11 +5644,11 @@ function renderDashboard(query, role = 'adm') {
           </form>
           <p class="hint">${producaoCustomFilter ? `Embarques filtrados de ${escapeHtml(producaoData.range.start)} até ${escapeHtml(producaoData.range.end)}.` : `Resultados filtrados de ${escapeHtml(producaoData.range.start)} até ${escapeHtml(producaoData.range.end)}.`}</p>
           <div class="cards">
-            <article class="card status-card bg-green"><span>Verde (a produzir)</span><strong>${producaoData.cards.greenSewingMinutes.toFixed(2)}</strong><small>Minutos</small></article>
-            <article class="card status-card bg-yellow"><span>Amarelo (com pendência)</span><strong>${producaoData.cards.yellowSewingMinutes.toFixed(2)}</strong><small>Minutos</small></article>
-            <article class="card status-card bg-blue"><span>Azul (finalizados)</span><strong>${producaoData.cards.blueSewingMinutes.toFixed(2)}</strong><small>Minutos</small></article>
-            <article class="card status-card bg-pink"><span>Rosa (em célula)</span><strong>${producaoData.cards.pinkSewingMinutes.toFixed(2)}</strong><small>Minutos fora do fluxo comum</small></article>
-            <article class="card status-card bg-red"><span>Vermelho (embarcado)</span><strong>${producaoData.cards.redSewingMinutes.toFixed(2)}</strong><small>Minutos</small></article>
+            <article class="card status-card bg-green"><span>Verde (a produzir)</span><strong>${fmtNum(producaoData.cards.greenSewingMinutes, 2)}</strong><small>Minutos</small></article>
+            <article class="card status-card bg-yellow"><span>Amarelo (com pendência)</span><strong>${fmtNum(producaoData.cards.yellowSewingMinutes, 2)}</strong><small>Minutos</small></article>
+            <article class="card status-card bg-blue"><span>Azul (finalizados)</span><strong>${fmtNum(producaoData.cards.blueSewingMinutes, 2)}</strong><small>Minutos</small></article>
+            <article class="card status-card bg-pink"><span>Rosa (em célula)</span><strong>${fmtNum(producaoData.cards.pinkSewingMinutes, 2)}</strong><small>Minutos fora do fluxo comum</small></article>
+            <article class="card status-card bg-red"><span>Vermelho (embarcado)</span><strong>${fmtNum(producaoData.cards.redSewingMinutes, 2)}</strong><small>Minutos</small></article>
           </div>
         </section>
 
@@ -5641,7 +5657,7 @@ function renderDashboard(query, role = 'adm') {
           <table>
             <thead><tr><th>Marca</th><th>A produzir</th><th>Em aberto</th><th>Finalizado</th><th>Em célula</th><th>Embarcado</th></tr></thead>
             <tbody>
-              ${mostruarioData.brands.map(item => `<tr><td>${escapeHtml(item.brand)}</td><td>${Number(item.green_minutes).toFixed(2)}</td><td>${Number(item.yellow_minutes).toFixed(2)}</td><td>${Number(item.blue_minutes).toFixed(2)}</td><td>${Number(item.pink_minutes || 0).toFixed(2)}</td><td>${Number(item.red_minutes).toFixed(2)}</td></tr>`).join('') || '<tr><td colspan="6">Sem dados de mostruário.</td></tr>'}
+              ${mostruarioData.brands.map(item => `<tr><td>${escapeHtml(item.brand)}</td><td>${fmtNum(Number(item.green_minutes), 2)}</td><td>${fmtNum(Number(item.yellow_minutes), 2)}</td><td>${fmtNum(Number(item.blue_minutes), 2)}</td><td>${fmtNum(Number(item.pink_minutes || 0), 2)}</td><td>${fmtNum(Number(item.red_minutes), 2)}</td></tr>`).join('') || '<tr><td colspan="6">Sem dados de mostruário.</td></tr>'}
             </tbody>
           </table>
         </section>
@@ -5651,7 +5667,7 @@ function renderDashboard(query, role = 'adm') {
           <table>
             <thead><tr><th>Marca</th><th>A produzir</th><th>Em aberto</th><th>Finalizado</th><th>Em célula</th><th>Embarcado</th></tr></thead>
             <tbody>
-              ${producaoData.brands.map(item => `<tr><td>${escapeHtml(item.brand)}</td><td>${Number(item.green_minutes).toFixed(2)}</td><td>${Number(item.yellow_minutes).toFixed(2)}</td><td>${Number(item.blue_minutes).toFixed(2)}</td><td>${Number(item.pink_minutes || 0).toFixed(2)}</td><td>${Number(item.red_minutes).toFixed(2)}</td></tr>`).join('') || '<tr><td colspan="6">Sem dados de produção.</td></tr>'}
+              ${producaoData.brands.map(item => `<tr><td>${escapeHtml(item.brand)}</td><td>${fmtNum(Number(item.green_minutes), 2)}</td><td>${fmtNum(Number(item.yellow_minutes), 2)}</td><td>${fmtNum(Number(item.blue_minutes), 2)}</td><td>${fmtNum(Number(item.pink_minutes || 0), 2)}</td><td>${fmtNum(Number(item.red_minutes), 2)}</td></tr>`).join('') || '<tr><td colspan="6">Sem dados de produção.</td></tr>'}
             </tbody>
           </table>
         </section>
@@ -5661,7 +5677,7 @@ function renderDashboard(query, role = 'adm') {
           <table>
             <thead><tr><th>OP</th><th>Produto</th><th>Marca</th><th>Status</th><th>Célula</th><th>Saldo peças</th><th>Saldo minutos</th></tr></thead>
             <tbody>
-              ${dashboardPinkRows.map(op => `<tr><td><a href="/ops/${op.id}">${escapeHtml(op.op_number)}</a></td><td>${escapeHtml(op.product_name)}</td><td>${escapeHtml(op.brand || '-')}</td><td>${statusBadge(op.status_color)}</td><td>${escapeHtml(op.active_cell_name || '-')}</td><td>${op.remaining}</td><td>${Number(op.remaining_minutes || 0).toFixed(3)}</td></tr>`).join('') || '<tr><td colspan="7">Nenhuma OP rosa neste filtro.</td></tr>'}
+              ${dashboardPinkRows.map(op => `<tr><td><a href="/ops/${op.id}">${escapeHtml(op.op_number)}</a></td><td>${escapeHtml(op.product_name)}</td><td>${escapeHtml(op.brand || '-')}</td><td>${statusBadge(op.status_color)}</td><td>${escapeHtml(op.active_cell_name || '-')}</td><td>${op.remaining}</td><td>${fmtNum(Number(op.remaining_minutes || 0), 3)}</td></tr>`).join('') || '<tr><td colspan="7">Nenhuma OP rosa neste filtro.</td></tr>'}
             </tbody>
           </table>
         </section>
@@ -5684,14 +5700,14 @@ function billingStatusLabel(op) {
     return '<span class="badge azul">Devolvida</span>';
   }
   if (Number(op.is_billed || 0)) {
-    return `<span class="badge azul">Cobrada em ${escapeHtml(op.billed_at || '-')}</span>`;
+    return `<span class="badge azul">Cobrada em ${escapeHtml(nowPt(op.billed_at))}</span>`;
   }
   return '<span class="badge badge-neutral">Não cobrada</span>';
 }
 
 function billingStatusText(op) {
   if (isReturnedWithoutProductionLifecycle(op.lifecycle_type)) return 'Devolvida';
-  return Number(op.is_billed || 0) ? `Cobrada em ${escapeHtml(op.billed_at || '-')}` : 'Não cobrada';
+  return Number(op.is_billed || 0) ? `Cobrada em ${escapeHtml(nowPt(op.billed_at))}` : 'Não cobrada';
 }
 
 function lifecycleFlowLabel(lifecycleType) {
@@ -5726,7 +5742,7 @@ function renderWithoutIndustrializationShortcut(op, role = 'adm', redirectTo = '
       <div class="actions">
         <button class="${buttonClass}" type="submit">Devolução sem costurar</button>
       </div>
-      <p class="hint">Atalho ADM: zera o saldo da operação, marca a OP como devolvida, não soma como costurada e mantém a liberação para embarque sem minutos.</p>
+      <p class="hint">Somente administrador: zera o saldo da operação, marca a OP como devolvida, não soma como costurada e mantém a liberação para embarque sem minutos.</p>
     </form>
   `;
 }
@@ -6094,9 +6110,9 @@ function renderOpExtraTimeReportPage(query = {}, role = 'adm') {
       <article class="card"><span>Colaboradoras impactadas</span><strong>${data.summary.employees}</strong><small>No filtro atual</small></article>
       <article class="card"><span>OPs com extra</span><strong>${data.summary.ops}</strong><small>Com produção no período</small></article>
       <article class="card"><span>Peças com extra</span><strong>${data.summary.producedQuantity}</strong><small>Quantidade produzida nos lançamentos filtrados</small></article>
-      <article class="card"><span>Min. normais</span><strong>${data.summary.normalMinutes.toFixed(2)}</strong><small>Base normal preservada</small></article>
-      <article class="card"><span>Min. extras</span><strong>${data.summary.extraMinutes.toFixed(2)}</strong><small>${data.summary.extraSharePercent.toFixed(2)}% do total filtrado</small></article>
-      <article class="card"><span>Min. totais</span><strong>${data.summary.producedMinutes.toFixed(2)}</strong><small>Normais + extras aplicados</small></article>
+      <article class="card"><span>Min. normais</span><strong>${fmtNum(data.summary.normalMinutes, 2)}</strong><small>Base normal preservada</small></article>
+      <article class="card"><span>Min. extras</span><strong>${fmtNum(data.summary.extraMinutes, 2)}</strong><small>${fmtNum(data.summary.extraSharePercent, 2)}% do total filtrado</small></article>
+      <article class="card"><span>Min. totais</span><strong>${fmtNum(data.summary.producedMinutes, 2)}</strong><small>Normais + extras aplicados</small></article>
     </div>
 
     <div class="two-columns closure-report-grid">
@@ -6105,7 +6121,7 @@ function renderOpExtraTimeReportPage(query = {}, role = 'adm') {
         <table>
           <thead><tr><th>Registro</th><th>Colaboradora</th><th>Lanç.</th><th>OPs</th><th>Peças</th><th>Normal</th><th>Extra</th><th>Total</th><th>% extra</th></tr></thead>
           <tbody>
-            ${data.byEmployee.map(item => `<tr><td>${escapeHtml(item.registration_code)}</td><td>${escapeHtml(item.full_name)}</td><td>${item.launch_count}</td><td>${item.ops_count}</td><td>${item.produced_quantity}</td><td>${item.normal_minutes.toFixed(2)}</td><td>${item.extra_minutes.toFixed(2)}</td><td>${item.produced_minutes.toFixed(2)}</td><td>${item.extra_share_percent.toFixed(2)}%</td></tr>`).join('') || '<tr><td colspan="9">Nenhum lançamento com tempo extra nesse filtro.</td></tr>'}
+            ${data.byEmployee.map(item => `<tr><td>${escapeHtml(item.registration_code)}</td><td>${escapeHtml(item.full_name)}</td><td>${item.launch_count}</td><td>${item.ops_count}</td><td>${item.produced_quantity}</td><td>${fmtNum(item.normal_minutes, 2)}</td><td>${fmtNum(item.extra_minutes, 2)}</td><td>${fmtNum(item.produced_minutes, 2)}</td><td>${fmtNum(item.extra_share_percent, 2)}%</td></tr>`).join('') || '<tr><td colspan="9">Nenhum lançamento com tempo extra nesse filtro.</td></tr>'}
           </tbody>
         </table>
       </section>
@@ -6115,7 +6131,7 @@ function renderOpExtraTimeReportPage(query = {}, role = 'adm') {
         <table>
           <thead><tr><th>OP</th><th>Produto</th><th>Tipo</th><th>Lanç.</th><th>Colab.</th><th>Peças</th><th>Extra</th><th>Total</th><th>% extra</th></tr></thead>
           <tbody>
-            ${data.byOp.map(item => `<tr><td><a href="/ops/${item.op_id}">${escapeHtml(item.op_number)}</a></td><td>${escapeHtml(item.product_name)}</td><td>${escapeHtml(item.op_type)}</td><td>${item.launch_count}</td><td>${item.employees_count}</td><td>${item.produced_quantity}</td><td>${item.extra_minutes.toFixed(2)}</td><td>${item.produced_minutes.toFixed(2)}</td><td>${item.extra_share_percent.toFixed(2)}%</td></tr>`).join('') || '<tr><td colspan="9">Nenhuma OP com tempo extra aplicado nesse filtro.</td></tr>'}
+            ${data.byOp.map(item => `<tr><td><a href="/ops/${item.op_id}">${escapeHtml(item.op_number)}</a></td><td>${escapeHtml(item.product_name)}</td><td>${escapeHtml(item.op_type)}</td><td>${item.launch_count}</td><td>${item.employees_count}</td><td>${item.produced_quantity}</td><td>${fmtNum(item.extra_minutes, 2)}</td><td>${fmtNum(item.produced_minutes, 2)}</td><td>${fmtNum(item.extra_share_percent, 2)}%</td></tr>`).join('') || '<tr><td colspan="9">Nenhuma OP com tempo extra aplicado nesse filtro.</td></tr>'}
           </tbody>
         </table>
       </section>
@@ -6127,7 +6143,7 @@ function renderOpExtraTimeReportPage(query = {}, role = 'adm') {
         <table>
           <thead><tr><th>Data</th><th>Lanç.</th><th>Colab.</th><th>OPs</th><th>Peças</th><th>Normal</th><th>Extra</th><th>Total</th><th>% extra</th></tr></thead>
           <tbody>
-            ${data.byDay.map(item => `<tr><td>${formatDatePtBr(item.work_date)}</td><td>${item.launch_count}</td><td>${item.employees_count}</td><td>${item.ops_count}</td><td>${item.produced_quantity}</td><td>${item.normal_minutes.toFixed(2)}</td><td>${item.extra_minutes.toFixed(2)}</td><td>${item.produced_minutes.toFixed(2)}</td><td>${item.extra_share_percent.toFixed(2)}%</td></tr>`).join('') || '<tr><td colspan="9">Sem movimentação com tempo extra no período.</td></tr>'}
+            ${data.byDay.map(item => `<tr><td>${formatDatePtBr(item.work_date)}</td><td>${item.launch_count}</td><td>${item.employees_count}</td><td>${item.ops_count}</td><td>${item.produced_quantity}</td><td>${fmtNum(item.normal_minutes, 2)}</td><td>${fmtNum(item.extra_minutes, 2)}</td><td>${fmtNum(item.produced_minutes, 2)}</td><td>${fmtNum(item.extra_share_percent, 2)}%</td></tr>`).join('') || '<tr><td colspan="9">Sem movimentação com tempo extra no período.</td></tr>'}
           </tbody>
         </table>
       </section>
@@ -6148,7 +6164,7 @@ function renderOpExtraTimeReportPage(query = {}, role = 'adm') {
       <table>
         <thead><tr><th>Data</th><th>Registro</th><th>Colaboradora</th><th>OP</th><th>Produto</th><th>Tipo</th><th>Qtd</th><th>Normal</th><th>Extra</th><th>Total</th><th>Extra/pç</th><th>Motivo aplicado</th></tr></thead>
         <tbody>
-          ${data.rows.map(row => `<tr><td>${formatDatePtBr(row.production_date)}</td><td>${escapeHtml(row.registration_code)}</td><td>${escapeHtml(row.full_name)}</td><td><a href="/ops/${row.op_id}">${escapeHtml(row.op_number)}</a></td><td>${escapeHtml(row.product_name)}</td><td>${escapeHtml(row.op_type)}</td><td>${row.produced_quantity}</td><td>${Number(row.normal_minutes || 0).toFixed(2)}</td><td>${Number(row.extra_minutes || 0).toFixed(2)}</td><td>${Number(row.produced_minutes || 0).toFixed(2)}</td><td>${Number(row.extra_minutes_per_piece || 0).toFixed(3)}</td><td>${escapeHtml(row.extra_reason || '-')}</td></tr>`).join('') || '<tr><td colspan="12">Nenhum lançamento com tempo extra encontrado.</td></tr>'}
+          ${data.rows.map(row => `<tr><td>${formatDatePtBr(row.production_date)}</td><td>${escapeHtml(row.registration_code)}</td><td>${escapeHtml(row.full_name)}</td><td><a href="/ops/${row.op_id}">${escapeHtml(row.op_number)}</a></td><td>${escapeHtml(row.product_name)}</td><td>${escapeHtml(row.op_type)}</td><td>${row.produced_quantity}</td><td>${fmtNum(Number(row.normal_minutes || 0), 2)}</td><td>${fmtNum(Number(row.extra_minutes || 0), 2)}</td><td>${fmtNum(Number(row.produced_minutes || 0), 2)}</td><td>${fmtNum(Number(row.extra_minutes_per_piece || 0), 3)}</td><td>${escapeHtml(row.extra_reason || '-')}</td></tr>`).join('') || '<tr><td colspan="12">Nenhum lançamento com tempo extra encontrado.</td></tr>'}
         </tbody>
       </table>
     </section>
@@ -6176,9 +6192,9 @@ function renderOpExtraTimeExportPage(query = {}, role = 'adm') {
       <article class="card"><span>Colaboradoras impactadas</span><strong>${data.summary.employees}</strong><small>No filtro atual</small></article>
       <article class="card"><span>OPs com extra</span><strong>${data.summary.ops}</strong><small>Com produção no período</small></article>
       <article class="card"><span>Peças com extra</span><strong>${data.summary.producedQuantity}</strong><small>Quantidade produzida nos lançamentos filtrados</small></article>
-      <article class="card"><span>Min. normais</span><strong>${data.summary.normalMinutes.toFixed(2)}</strong><small>Base normal preservada</small></article>
-      <article class="card"><span>Min. extras</span><strong>${data.summary.extraMinutes.toFixed(2)}</strong><small>${data.summary.extraSharePercent.toFixed(2)}% do total filtrado</small></article>
-      <article class="card"><span>Min. totais</span><strong>${data.summary.producedMinutes.toFixed(2)}</strong><small>Normais + extras aplicados</small></article>
+      <article class="card"><span>Min. normais</span><strong>${fmtNum(data.summary.normalMinutes, 2)}</strong><small>Base normal preservada</small></article>
+      <article class="card"><span>Min. extras</span><strong>${fmtNum(data.summary.extraMinutes, 2)}</strong><small>${fmtNum(data.summary.extraSharePercent, 2)}% do total filtrado</small></article>
+      <article class="card"><span>Min. totais</span><strong>${fmtNum(data.summary.producedMinutes, 2)}</strong><small>Normais + extras aplicados</small></article>
     </div>
 
     <section class="panel section-gap">
@@ -6186,7 +6202,7 @@ function renderOpExtraTimeExportPage(query = {}, role = 'adm') {
       <table>
         <thead><tr><th>Registro</th><th>Colaboradora</th><th>Lanç.</th><th>OPs</th><th>Peças</th><th>Normal</th><th>Extra</th><th>Total</th><th>% extra</th></tr></thead>
         <tbody>
-          ${data.byEmployee.map(item => `<tr><td>${escapeHtml(item.registration_code)}</td><td>${escapeHtml(item.full_name)}</td><td>${item.launch_count}</td><td>${item.ops_count}</td><td>${item.produced_quantity}</td><td>${item.normal_minutes.toFixed(2)}</td><td>${item.extra_minutes.toFixed(2)}</td><td>${item.produced_minutes.toFixed(2)}</td><td>${item.extra_share_percent.toFixed(2)}%</td></tr>`).join('') || '<tr><td colspan="9">Nenhum lançamento com tempo extra nesse filtro.</td></tr>'}
+          ${data.byEmployee.map(item => `<tr><td>${escapeHtml(item.registration_code)}</td><td>${escapeHtml(item.full_name)}</td><td>${item.launch_count}</td><td>${item.ops_count}</td><td>${item.produced_quantity}</td><td>${fmtNum(item.normal_minutes, 2)}</td><td>${fmtNum(item.extra_minutes, 2)}</td><td>${fmtNum(item.produced_minutes, 2)}</td><td>${fmtNum(item.extra_share_percent, 2)}%</td></tr>`).join('') || '<tr><td colspan="9">Nenhum lançamento com tempo extra nesse filtro.</td></tr>'}
         </tbody>
       </table>
     </section>
@@ -6196,7 +6212,7 @@ function renderOpExtraTimeExportPage(query = {}, role = 'adm') {
       <table>
         <thead><tr><th>OP</th><th>Produto</th><th>Tipo</th><th>Lanç.</th><th>Colab.</th><th>Peças</th><th>Extra</th><th>Total</th><th>% extra</th></tr></thead>
         <tbody>
-          ${data.byOp.map(item => `<tr><td>${escapeHtml(item.op_number)}</td><td>${escapeHtml(item.product_name)}</td><td>${escapeHtml(item.op_type)}</td><td>${item.launch_count}</td><td>${item.employees_count}</td><td>${item.produced_quantity}</td><td>${item.extra_minutes.toFixed(2)}</td><td>${item.produced_minutes.toFixed(2)}</td><td>${item.extra_share_percent.toFixed(2)}%</td></tr>`).join('') || '<tr><td colspan="9">Nenhuma OP com tempo extra aplicada nesse filtro.</td></tr>'}
+          ${data.byOp.map(item => `<tr><td>${escapeHtml(item.op_number)}</td><td>${escapeHtml(item.product_name)}</td><td>${escapeHtml(item.op_type)}</td><td>${item.launch_count}</td><td>${item.employees_count}</td><td>${item.produced_quantity}</td><td>${fmtNum(item.extra_minutes, 2)}</td><td>${fmtNum(item.produced_minutes, 2)}</td><td>${fmtNum(item.extra_share_percent, 2)}%</td></tr>`).join('') || '<tr><td colspan="9">Nenhuma OP com tempo extra aplicada nesse filtro.</td></tr>'}
         </tbody>
       </table>
     </section>
@@ -6206,7 +6222,7 @@ function renderOpExtraTimeExportPage(query = {}, role = 'adm') {
       <table>
         <thead><tr><th>Data</th><th>Registro</th><th>Colaboradora</th><th>OP</th><th>Produto</th><th>Qtd</th><th>Normal</th><th>Extra</th><th>Total</th><th>Extra/pç</th><th>Motivo aplicado</th><th>Descrição</th></tr></thead>
         <tbody>
-          ${data.rows.map(row => `<tr><td>${formatDatePtBr(row.production_date)}</td><td>${escapeHtml(row.registration_code)}</td><td>${escapeHtml(row.full_name)}</td><td>${escapeHtml(row.op_number)}</td><td>${escapeHtml(row.product_name)}</td><td>${row.produced_quantity}</td><td>${Number(row.normal_minutes || 0).toFixed(2)}</td><td>${Number(row.extra_minutes || 0).toFixed(2)}</td><td>${Number(row.produced_minutes || 0).toFixed(2)}</td><td>${Number(row.extra_minutes_per_piece || 0).toFixed(3)}</td><td>${escapeHtml(row.extra_reason || '-')}</td><td>${escapeHtml(row.extra_description || '-')}</td></tr>`).join('') || '<tr><td colspan="12">Nenhum lançamento com tempo extra encontrado.</td></tr>'}
+          ${data.rows.map(row => `<tr><td>${formatDatePtBr(row.production_date)}</td><td>${escapeHtml(row.registration_code)}</td><td>${escapeHtml(row.full_name)}</td><td>${escapeHtml(row.op_number)}</td><td>${escapeHtml(row.product_name)}</td><td>${row.produced_quantity}</td><td>${fmtNum(Number(row.normal_minutes || 0), 2)}</td><td>${fmtNum(Number(row.extra_minutes || 0), 2)}</td><td>${fmtNum(Number(row.produced_minutes || 0), 2)}</td><td>${fmtNum(Number(row.extra_minutes_per_piece || 0), 3)}</td><td>${escapeHtml(row.extra_reason || '-')}</td><td>${escapeHtml(row.extra_description || '-')}</td></tr>`).join('') || '<tr><td colspan="12">Nenhum lançamento com tempo extra encontrado.</td></tr>'}
         </tbody>
       </table>
     </section>
@@ -6291,7 +6307,7 @@ function renderOpExtraTimesPage(query = {}, values = {}, error = '', role = 'adm
   } : values;
   const content = `
     <section class="page-header">
-      <div><h2>Tempo extra de OP</h2><p>Primeira versão para cadastrar minutos extras por peça e separar o cálculo do lançamento diário.</p></div>
+      <div><h2>Tempo extra de OP</h2><p>Cadastre minutos extras por peça para a OP. O extra entra no lançamento diário, sem alterar o embarque.</p></div>
       <a class="btn secondary" href="/op-extra-times/report">Abrir relatórios</a>
     </section>
 
@@ -6316,7 +6332,7 @@ function renderOpExtraTimesPage(query = {}, values = {}, error = '', role = 'adm
             ${editingRow ? '<a class="btn secondary" href="/op-extra-times">Cancelar edição</a>' : ''}
           </div>
         </form>
-        <p class="hint">Regra desta etapa: se houver cadastro ativo para a data do lançamento, o sistema soma esse extra ao cálculo separado, sem mexer no embarque.</p>
+        <p class="hint">Regra: se houver cadastro ativo para a data do lançamento, o sistema soma esse extra ao cálculo separado, sem mexer no embarque.</p>
         ${editingRow ? `<p class="hint">Se esse cadastro já foi usado em lançamentos, o histórico do motivo permanece congelado no lançamento e não será alterado retroativamente.</p>` : ''}
       </section>
 
@@ -6331,7 +6347,7 @@ function renderOpExtraTimesPage(query = {}, values = {}, error = '', role = 'adm
           <tbody>
             ${rows.map(item => {
               const usageCount = getProductionRowsUsingExtraTimeId(item.id).length;
-              return `<tr><td><a href="/ops/${item.op_id}">${escapeHtml(item.op_number)}</a></td><td>${escapeHtml(item.product_name)}</td><td>${escapeHtml(item.effective_date)}</td><td>${Number(item.extra_minutes_per_piece || 0).toFixed(3)}</td><td>${escapeHtml(item.reason)}</td><td>${item.is_active ? 'Ativo' : 'Inativo'}${usageCount ? ` · ${usageCount} lançamento(s)` : ''}</td><td><div class="table-actions"><a class="btn secondary" href="/op-extra-times?edit=${item.id}">Editar</a><form method="post" action="/op-extra-times/${item.id}/toggle"><button class="btn secondary" type="submit">${item.is_active ? 'Inativar' : 'Ativar'}</button></form><form method="post" action="/op-extra-times/${item.id}/delete" onsubmit="return confirm('Confirma a exclusão/inativação controlada deste cadastro?');"><button class="btn secondary" type="submit">${usageCount ? 'Inativar seguro' : 'Excluir'}</button></form></div></td></tr>`;
+              return `<tr><td><a href="/ops/${item.op_id}">${escapeHtml(item.op_number)}</a></td><td>${escapeHtml(item.product_name)}</td><td>${escapeHtml(nowPt(item.effective_date))}</td><td>${fmtNum(Number(item.extra_minutes_per_piece || 0), 3)}</td><td>${escapeHtml(item.reason)}</td><td>${item.is_active ? 'Ativo' : 'Inativo'}${usageCount ? ` · ${usageCount} lançamento(s)` : ''}</td><td><div class="table-actions"><a class="btn secondary" href="/op-extra-times?edit=${item.id}">Editar</a><form method="post" action="/op-extra-times/${item.id}/toggle"><button class="btn secondary" type="submit">${item.is_active ? 'Inativar' : 'Ativar'}</button></form><form method="post" action="/op-extra-times/${item.id}/delete" onsubmit="return confirm('Confirma a exclusão/inativação controlada deste cadastro?');"><button class="btn secondary" type="submit">${usageCount ? 'Inativar seguro' : 'Excluir'}</button></form></div></td></tr>`;
             }).join('') || '<tr><td colspan="7">Nenhum tempo extra cadastrado.</td></tr>'}
           </tbody>
         </table>
@@ -6357,7 +6373,7 @@ function renderCadastrosPage(query = {}, values = {}, error = '', role = 'adm') 
         <button class="btn" type="submit">Salvar nome</button>
       </form>
       <p class="hint">Esse nome aparece no cabeçalho das etiquetas de entrada e embarque.</p>
-      <p class="hint">Novo módulo: <a href="/op-extra-times">Tempo extra de OP</a>.</p>
+      <p class="hint">Veja também: <a href="/op-extra-times">Tempo extra de OP</a>.</p>
     </section>
 
     <div class="two-columns cadastros-grid">
@@ -6838,8 +6854,8 @@ function renderCellReportPage(query = {}, role = 'adm') {
 
     <div class="cards">
       <article class="card status-card bg-pink"><span>Movimentos no período</span><strong>${data.summary.sentCount}</strong><small>${data.summary.sentPieces} peças enviadas no filtro</small></article>
-      <article class="card status-card bg-yellow"><span>Em célula agora</span><strong>${data.summary.inCellCount}</strong><small>${data.summary.inCellPieces} peças ainda abertas · ${data.summary.inCellMinutes.toFixed(2)} min F21</small></article>
-      <article class="card status-card bg-blue"><span>Devolvidas pelas células</span><strong>${data.summary.returnedCount}</strong><small>${data.summary.returnedPieces} peças · ${data.summary.returnedMinutes.toFixed(2)} min F21</small></article>
+      <article class="card status-card bg-yellow"><span>Em célula agora</span><strong>${data.summary.inCellCount}</strong><small>${data.summary.inCellPieces} peças ainda abertas · ${fmtNum(data.summary.inCellMinutes, 2)} min F21</small></article>
+      <article class="card status-card bg-blue"><span>Devolvidas pelas células</span><strong>${data.summary.returnedCount}</strong><small>${data.summary.returnedPieces} peças · ${fmtNum(data.summary.returnedMinutes, 2)} min F21</small></article>
       <article class="card"><span>Células no filtro</span><strong>${data.byCell.length}</strong><small>${data.summary.uniqueOpsInPeriod} OPs distintas movimentadas no período</small></article>
     </div>
 
@@ -6847,7 +6863,7 @@ function renderCellReportPage(query = {}, role = 'adm') {
       <section class="panel">
         <h3>Resumo por célula</h3>
         <table><thead><tr><th>Célula</th><th>Mov.</th><th>Recebeu</th><th>Devolveu</th><th>Saldo aberto</th><th>Envios abertos</th><th>Min. devolvidos</th><th>Produção</th><th>Mostruário</th></tr></thead><tbody>
-          ${data.byCell.map(item => `<tr><td>${escapeHtml(item.cell_name)}</td><td>${item.sent_moves}</td><td>${item.sent_pieces}</td><td>${item.returned_pieces}</td><td>${item.open_pieces}</td><td>${item.open_moves}</td><td>${item.returned_minutes.toFixed(2)}</td><td>${item.production_ops}</td><td>${item.sample_ops}</td></tr>`).join('') || '<tr><td colspan="9">Sem movimentos de célula no período.</td></tr>'}
+          ${data.byCell.map(item => `<tr><td>${escapeHtml(item.cell_name)}</td><td>${item.sent_moves}</td><td>${item.sent_pieces}</td><td>${item.returned_pieces}</td><td>${item.open_pieces}</td><td>${item.open_moves}</td><td>${fmtNum(item.returned_minutes, 2)}</td><td>${item.production_ops}</td><td>${item.sample_ops}</td></tr>`).join('') || '<tr><td colspan="9">Sem movimentos de célula no período.</td></tr>'}
         </tbody></table>
       </section>
 
@@ -6865,7 +6881,7 @@ function renderCellReportPage(query = {}, role = 'adm') {
     <section class="panel">
       <h3>Movimentos detalhados</h3>
       <table><thead><tr><th>OP</th><th>Produto</th><th>Célula</th><th>Tipo</th><th>Envio</th><th>Retorno final</th><th>Dias</th><th>Status</th><th>Recebeu</th><th>Devolveu</th><th>Aberto</th><th>Min. F21 aberto</th></tr></thead><tbody>
-        ${data.rows.map(row => `<tr><td><a href="/ops/${row.op_id}">${escapeHtml(row.op_number)}</a></td><td>${escapeHtml(row.product_name)}</td><td>${escapeHtml(row.cell_name)}</td><td>${escapeHtml(row.op_type)}</td><td>${escapeHtml(row.sent_at)}</td><td>${escapeHtml(row.returned_at || '-')}</td><td>${Number(row.days_in_cell || 0)}</td><td>${row.shipped_at ? '<span class="badge vermelho">embarcada</span>' : (Number(row.quantity_open || 0) > 0 ? '<span class="badge rosa">pendente</span>' : '<span class="badge azul">retornado</span>')}</td><td>${Number(row.quantity_sent || 0)}</td><td>${Number(row.quantity_returned || 0)}</td><td>${Number(row.quantity_open || 0)}</td><td>${Number(row.open_sewing_minutes || 0).toFixed(2)}</td></tr>`).join('') || '<tr><td colspan="12">Nenhum movimento encontrado.</td></tr>'}
+        ${data.rows.map(row => `<tr><td><a href="/ops/${row.op_id}">${escapeHtml(row.op_number)}</a></td><td>${escapeHtml(row.product_name)}</td><td>${escapeHtml(row.cell_name)}</td><td>${escapeHtml(row.op_type)}</td><td>${escapeHtml(nowPt(row.sent_at))}</td><td>${escapeHtml(nowPt(row.returned_at))}</td><td>${Number(row.days_in_cell || 0)}</td><td>${row.shipped_at ? '<span class="badge vermelho">embarcada</span>' : (Number(row.quantity_open || 0) > 0 ? '<span class="badge rosa">pendente</span>' : '<span class="badge azul">retornado</span>')}</td><td>${Number(row.quantity_sent || 0)}</td><td>${Number(row.quantity_returned || 0)}</td><td>${Number(row.quantity_open || 0)}</td><td>${fmtNum(Number(row.open_sewing_minutes || 0), 2)}</td></tr>`).join('') || '<tr><td colspan="12">Nenhum movimento encontrado.</td></tr>'}
       </tbody></table>
     </section>
   `;
@@ -7027,7 +7043,7 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
                 </td>
               </tr>`;
             }
-            return `<tr><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td>${escapeHtml(emp.birth_date || '-')}</td><td>${escapeHtml(emp.start_date || '-')}</td><td>${escapeHtml(emp.termination_date || '-')}</td><td>${escapeHtml(describeEmployeeStatus(emp))}</td><td>${escapeHtml(emp.job_role || '-')}</td><td>${escapeHtml(scheduleNames.get(emp.work_schedule_id) || 'Sem jornada')}</td><td>${escapeHtml(emp.notes || '-')}</td><td><a href="/employees?edit=${emp.id}">Editar</a></td></tr>`;
+            return `<tr><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td>${escapeHtml(nowPt(emp.birth_date))}</td><td>${escapeHtml(nowPt(emp.start_date))}</td><td>${escapeHtml(nowPt(emp.termination_date))}</td><td>${escapeHtml(describeEmployeeStatus(emp))}</td><td>${escapeHtml(emp.job_role || '-')}</td><td>${escapeHtml(scheduleNames.get(emp.work_schedule_id) || 'Sem jornada')}</td><td>${escapeHtml(emp.notes || '-')}</td><td><a href="/employees?edit=${emp.id}">Editar</a></td></tr>`;
           }).join('') || '<tr><td colspan="10">Nenhum colaborador cadastrado.</td></tr>'}
         </tbody>
       </table>
@@ -7457,13 +7473,13 @@ function renderHourlyProductionPage(values = {}, error = '', notice = '', role =
         <div class="quick-op-preview ${quickPreview.is_in_cell ? 'is-blocked' : (quickPreview.remaining_quantity <= 0 ? 'is-finished' : '')}">
           <strong>${escapeHtml(quickPreview.op_number)} · ${escapeHtml(quickPreview.product_name)}</strong>
           <span>Saldo atual: ${quickPreview.remaining_quantity} peça(s) · Produzido: ${quickPreview.produced_quantity}/${quickPreview.total_pieces}</span>
-          <span>Min. base hora: ${quickPreview.effective_launch_minutes.toFixed(3)} · Normal/pç: ${quickPreview.launch_normal_minutes_per_piece.toFixed(3)} · Extra/pç: ${quickPreview.extra_minutes_per_piece.toFixed(3)} · Total/pç: ${quickPreview.total_launch_minutes_per_piece.toFixed(3)} · Status: ${escapeHtml(quickPreview.status_color)}</span>
+          <span>Min. base hora: ${fmtNum(quickPreview.effective_launch_minutes, 3)} · Normal/pç: ${fmtNum(quickPreview.launch_normal_minutes_per_piece, 3)} · Extra/pç: ${fmtNum(quickPreview.extra_minutes_per_piece, 3)} · Total/pç: ${fmtNum(quickPreview.total_launch_minutes_per_piece, 3)} · Status: ${escapeHtml(quickPreview.status_color)}</span>
           ${quickPreview.extra_reason ? `<span>Tempo extra ativo: ${quickPreview.extra_reason}</span>` : ''}
           ${quickPreview.is_in_cell ? `<span><strong>Bloqueada para lançamento.</strong> Está na célula ${escapeHtml(quickPreview.active_cell_name || '-')}.</span>` : ''}
         </div>
       ` : values.op_number ? '<div class="quick-op-preview is-missing"><strong>OP não encontrada.</strong><span>Confira o número digitado antes de salvar.</span></div>' : ''}
-      ${selectedEmployee ? `<p class="hint">Costureira selecionada: <strong>${escapeHtml(selectedEmployee.full_name)}</strong>. Total do dia nessa seleção: <strong>${totalSelectedQty} peça(s)</strong> · <strong>${totalSelectedMinutes.toFixed(3)} min</strong>.${lastHourlyOp ? ` Última OP sugerida: <strong>${escapeHtml(lastHourlyOp.op_number)}</strong>.` : ''}</p>` : '<p class="hint">Selecione a costureira para acompanhar os lançamentos dela no dia.</p>'}
-      ${selectedEmployeeDaySummary ? `<div class="shipment-summary-grid section-gap"><article class="mini-card"><span>Peças do dia</span><strong>${selectedEmployeeDaySummary.totalQuantity}</strong></article><article class="mini-card"><span>Minutos do dia</span><strong>${selectedEmployeeDaySummary.totalMinutes.toFixed(3)}</strong></article><article class="mini-card"><span>Horas lançadas</span><strong>${selectedEmployeeDaySummary.launchedHours}</strong></article><article class="mini-card"><span>% do dia até ${escapeHtml(hourSlot)}</span><strong>${selectedEmployeeDaySummary.dayEfficiencyPercent.toFixed(2)}%</strong></article></div>` : ''}
+      ${selectedEmployee ? `<p class="hint">Costureira selecionada: <strong>${escapeHtml(selectedEmployee.full_name)}</strong>. Total do dia nessa seleção: <strong>${totalSelectedQty} peça(s)</strong> · <strong>${fmtNum(totalSelectedMinutes, 3)} min</strong>.${lastHourlyOp ? ` Última OP sugerida: <strong>${escapeHtml(lastHourlyOp.op_number)}</strong>.` : ''}</p>` : '<p class="hint">Selecione a costureira para acompanhar os lançamentos dela no dia.</p>'}
+      ${selectedEmployeeDaySummary ? `<div class="shipment-summary-grid section-gap"><article class="mini-card"><span>Peças do dia</span><strong>${selectedEmployeeDaySummary.totalQuantity}</strong></article><article class="mini-card"><span>Minutos do dia</span><strong>${fmtNum(selectedEmployeeDaySummary.totalMinutes, 3)}</strong></article><article class="mini-card"><span>Horas lançadas</span><strong>${selectedEmployeeDaySummary.launchedHours}</strong></article><article class="mini-card"><span>% do dia até ${escapeHtml(hourSlot)}</span><strong>${fmtNum(selectedEmployeeDaySummary.dayEfficiencyPercent, 2)}%</strong></article></div>` : ''}
     </section>
 
     <section class="panel section-gap">
@@ -7471,7 +7487,7 @@ function renderHourlyProductionPage(values = {}, error = '', notice = '', role =
       <table>
         <thead><tr><th>Hora</th><th>OP</th><th>Produto</th><th>Costureira</th><th>Qtd</th><th>Normal</th><th>Extra</th><th>Total</th><th>% hora</th><th>Status</th></tr></thead>
         <tbody>
-          ${recent.map(item => `<tr><td>${escapeHtml(item.hour_slot)}</td><td>${escapeHtml(item.op_number)}</td><td>${escapeHtml(item.product_name)}</td><td>${escapeHtml(item.registration_code)} - ${escapeHtml(item.full_name)}</td><td>${item.produced_quantity}</td><td>${round3(item.normal_minutes || 0).toFixed(3)}</td><td>${round3(item.extra_minutes || 0).toFixed(3)}</td><td>${round3(item.produced_minutes || 0).toFixed(3)}</td><td>${Number(item.hour_efficiency_percent || 0).toFixed(2)}%</td><td>${item.is_validated ? `<span class="status-pill ok">Validado</span>` : `<span class="status-pill pending">Pendente</span>`}</td></tr>`).join('') || '<tr><td colspan="10">Nenhum lançamento por hora gravado para esse filtro.</td></tr>'}
+          ${recent.map(item => `<tr><td>${escapeHtml(item.hour_slot)}</td><td>${escapeHtml(item.op_number)}</td><td>${escapeHtml(item.product_name)}</td><td>${escapeHtml(item.registration_code)} - ${escapeHtml(item.full_name)}</td><td>${item.produced_quantity}</td><td>${fmtNum(round3(item.normal_minutes || 0), 3)}</td><td>${fmtNum(round3(item.extra_minutes || 0), 3)}</td><td>${fmtNum(round3(item.produced_minutes || 0), 3)}</td><td>${fmtNum(Number(item.hour_efficiency_percent || 0), 2)}%</td><td>${item.is_validated ? `<span class="status-pill ok">Validado</span>` : `<span class="status-pill pending">Pendente</span>`}</td></tr>`).join('') || '<tr><td colspan="10">Nenhum lançamento por hora gravado para esse filtro.</td></tr>'}
         </tbody>
       </table>
     </section>
@@ -7485,7 +7501,7 @@ function renderHourlyProductionPage(values = {}, error = '', notice = '', role =
       <table>
         <thead><tr><th>Registro</th><th>Costureira</th><th>Horas lançadas</th><th>Qtd total</th><th>Min. total</th><th>% do dia</th><th>Pendentes</th><th>Validados</th></tr></thead>
         <tbody>
-          ${summary.map(item => `<tr><td>${escapeHtml(item.registration_code)}</td><td>${escapeHtml(item.full_name)}</td><td>${item.launched_hours}</td><td>${item.total_quantity}</td><td>${round3(item.total_minutes || 0).toFixed(3)}</td><td>${Number(item.day_efficiency_percent || 0).toFixed(2)}%</td><td>${item.pending_rows}</td><td>${item.validated_rows}</td></tr>`).join('') || '<tr><td colspan="8">Nenhum lançamento por hora neste dia.</td></tr>'}
+          ${summary.map(item => `<tr><td>${escapeHtml(item.registration_code)}</td><td>${escapeHtml(item.full_name)}</td><td>${item.launched_hours}</td><td>${item.total_quantity}</td><td>${fmtNum(round3(item.total_minutes || 0), 3)}</td><td>${fmtNum(Number(item.day_efficiency_percent || 0), 2)}%</td><td>${item.pending_rows}</td><td>${item.validated_rows}</td></tr>`).join('') || '<tr><td colspan="8">Nenhum lançamento por hora neste dia.</td></tr>'}
         </tbody>
       </table>
       <p class="hint">Após validar, os registros por hora são consolidados no lançamento diário oficial, preservando compatibilidade com resultado, prêmio e fechamento.</p>
@@ -7625,7 +7641,7 @@ function renderProductionForm(values = {}, error = '', notice = '', role = 'adm'
         <div class="quick-op-preview ${quickPreview.is_in_cell ? 'is-blocked' : (quickPreview.remaining_quantity <= 0 ? 'is-finished' : '')}">
           <strong>${escapeHtml(quickPreview.op_number)} · ${escapeHtml(quickPreview.product_name)}</strong>
           <span>Saldo atual: ${quickPreview.remaining_quantity} peça(s) · Produzido: ${quickPreview.produced_quantity}/${quickPreview.total_pieces}</span>
-          <span>Min. base lançamento: ${quickPreview.effective_launch_minutes.toFixed(3)} · Normal/pç: ${quickPreview.launch_normal_minutes_per_piece.toFixed(3)} · Extra/pç: ${quickPreview.extra_minutes_per_piece.toFixed(3)} · Total/pç: ${quickPreview.total_launch_minutes_per_piece.toFixed(3)} · Status: ${escapeHtml(quickPreview.status_color)}</span>
+          <span>Min. base lançamento: ${fmtNum(quickPreview.effective_launch_minutes, 3)} · Normal/pç: ${fmtNum(quickPreview.launch_normal_minutes_per_piece, 3)} · Extra/pç: ${fmtNum(quickPreview.extra_minutes_per_piece, 3)} · Total/pç: ${fmtNum(quickPreview.total_launch_minutes_per_piece, 3)} · Status: ${escapeHtml(quickPreview.status_color)}</span>
           ${quickPreview.extra_reason ? `<span>Tempo extra ativo: ${quickPreview.extra_reason}</span>` : ''}
           ${quickPreview.is_in_cell ? `<span><strong>Bloqueada para lançamento normal.</strong> Está na célula ${escapeHtml(quickPreview.active_cell_name || '-')} e precisa de retorno antes.</span>` : ''}
         </div>
@@ -7636,7 +7652,7 @@ function renderProductionForm(values = {}, error = '', notice = '', role = 'adm'
       <table>
         <thead><tr><th>Data</th><th>OP</th><th>Colaborador</th><th>Qtd</th><th>Normal</th><th>Extra</th><th>Total</th></tr></thead>
         <tbody>
-          ${recent.map(item => `<tr><td>${escapeHtml(item.production_date)}</td><td>${escapeHtml(item.op_number)}</td><td>${escapeHtml(item.registration_code)} - ${escapeHtml(item.full_name)}</td><td>${item.produced_quantity}</td><td>${round3(item.normal_minutes || 0).toFixed(3)}</td><td>${round3(item.extra_minutes || 0).toFixed(3)}</td><td>${round3(item.produced_minutes).toFixed(3)}</td></tr>`).join('') || '<tr><td colspan="7">Nenhum lançamento ainda.</td></tr>'}
+          ${recent.map(item => `<tr><td>${escapeHtml(nowPt(item.production_date))}</td><td>${escapeHtml(item.op_number)}</td><td>${escapeHtml(item.registration_code)} - ${escapeHtml(item.full_name)}</td><td>${item.produced_quantity}</td><td>${fmtNum(round3(item.normal_minutes || 0), 3)}</td><td>${fmtNum(round3(item.extra_minutes || 0), 3)}</td><td>${fmtNum(round3(item.produced_minutes), 3)}</td></tr>`).join('') || '<tr><td colspan="7">Nenhum lançamento ainda.</td></tr>'}
         </tbody>
       </table>
     </section>
@@ -7709,7 +7725,7 @@ function renderProductionForm(values = {}, error = '', notice = '', role = 'adm'
       <label>Data<input type="date" name="production_date" value="${escapeHtml(selectedDate)}" /></label>
       <div class="full">${renderPrizeFlagField(values)}</div>
       <div class="full actions"><button class="btn" type="submit">Salvar lançamento</button><a class="btn secondary" href="/ops">Consultar OPs</a></div>
-      <p class="hint full">${blockedCellOps.length ? `${blockedCellOps.length} OP(s) em célula foram retiradas da lista normal até o retorno. Confira as rosas em /ops?status=rosa.` : 'Nenhuma OP bloqueada por célula no momento.'}</p>
+      <p class="hint full">${blockedCellOps.length ? `${blockedCellOps.length} OP(s) em célula foram retiradas da lista normal até o retorno. <a href="/ops?status=rosa">Ver OPs em célula</a>.` : 'Nenhuma OP bloqueada por célula no momento.'}</p>
     </form>
     ${renderPrizeFlagScript({ formSelector: '[data-full-launch]', employeeFieldSelector: '[name=employee_id]', dateFieldSelector: '[name=production_date]' })}
 
@@ -7718,7 +7734,7 @@ function renderProductionForm(values = {}, error = '', notice = '', role = 'adm'
       <table>
         <thead><tr><th>Data</th><th>OP</th><th>Colaborador</th><th>Qtd</th><th>Normal</th><th>Extra</th><th>Total</th></tr></thead>
         <tbody>
-          ${recent.map(item => `<tr><td>${escapeHtml(item.production_date)}</td><td>${escapeHtml(item.op_number)}</td><td>${escapeHtml(item.registration_code)} - ${escapeHtml(item.full_name)}</td><td>${item.produced_quantity}</td><td>${round3(item.normal_minutes || 0).toFixed(3)}</td><td>${round3(item.extra_minutes || 0).toFixed(3)}</td><td>${round3(item.produced_minutes).toFixed(3)}</td></tr>`).join('') || '<tr><td colspan="7">Nenhum lançamento ainda.</td></tr>'}
+          ${recent.map(item => `<tr><td>${escapeHtml(nowPt(item.production_date))}</td><td>${escapeHtml(item.op_number)}</td><td>${escapeHtml(item.registration_code)} - ${escapeHtml(item.full_name)}</td><td>${item.produced_quantity}</td><td>${fmtNum(round3(item.normal_minutes || 0), 3)}</td><td>${fmtNum(round3(item.extra_minutes || 0), 3)}</td><td>${fmtNum(round3(item.produced_minutes), 3)}</td></tr>`).join('') || '<tr><td colspan="7">Nenhum lançamento ainda.</td></tr>'}
         </tbody>
       </table>
     </section>
@@ -7795,7 +7811,7 @@ function renderOpListPage(query = {}, role = 'adm') {
       <table>
         <thead><tr><th>OP</th><th>Produto</th><th>Tipo</th><th>Marca</th><th>Coleção</th><th>Total</th><th>Produzido</th><th>Saldo</th><th>Embarque</th><th>Status</th><th>Cobrança</th><th>Ações</th></tr></thead>
         <tbody>
-          ${rows.map(op => `<tr><td>${escapeHtml(op.op_number)}</td><td>${escapeHtml(op.product_name)}</td><td>${escapeHtml(op.op_type)}</td><td>${escapeHtml(op.brand || '-')}</td><td>${escapeHtml(op.collection_name || '-')}</td><td>${op.total_pieces}</td><td>${op.produced_quantity}</td><td>${op.remaining_quantity}</td><td>${escapeHtml(op.shipped_at || '-')}</td><td>${statusBadge(op.status_color)} ${lifecycleBadge(op.lifecycle_type)}</td><td>${billingStatusLabel(op)}</td><td><a href="/ops/${op.id}">Detalhar</a></td></tr>`).join('') || '<tr><td colspan="12">Nenhuma OP encontrada.</td></tr>'}
+          ${rows.map(op => `<tr><td>${escapeHtml(op.op_number)}</td><td>${escapeHtml(op.product_name)}</td><td>${escapeHtml(op.op_type)}</td><td>${escapeHtml(op.brand || '-')}</td><td>${escapeHtml(op.collection_name || '-')}</td><td>${op.total_pieces}</td><td>${op.produced_quantity}</td><td>${op.remaining_quantity}</td><td>${escapeHtml(nowPt(op.shipped_at))}</td><td>${statusBadge(op.status_color)} ${lifecycleBadge(op.lifecycle_type)}</td><td>${billingStatusLabel(op)}</td><td><a href="/ops/${op.id}">Detalhar</a></td></tr>`).join('') || '<tr><td colspan="12">Nenhuma OP encontrada.</td></tr>'}
         </tbody>
       </table>
     </section>
@@ -7825,7 +7841,7 @@ function renderOpDetailPage(id, query = {}, role = 'adm') {
     <div class="two-columns">
       <section class="panel">
         <h3>Dados da OP</h3>
-        ${activeCellTransfer ? `<div class="alert cell-alert">OP com saldo em célula. Último envio pendente: <strong>${escapeHtml(activeCellTransfer.cell_name)}</strong> desde ${escapeHtml(activeCellTransfer.sent_at)}.</div>` : ''}
+        ${activeCellTransfer ? `<div class="alert cell-alert">OP com saldo em célula. Último envio pendente: <strong>${escapeHtml(activeCellTransfer.cell_name)}</strong> desde ${escapeHtml(nowPt(activeCellTransfer.sent_at))}.</div>` : ''}
         <dl class="details-grid">
           <dt>Barcode</dt><dd>${escapeHtml(op.barcode || '-')}</dd>
           <dt>Quantidade total</dt><dd>${op.total_pieces}</dd>
@@ -7835,24 +7851,24 @@ function renderOpDetailPage(id, query = {}, role = 'adm') {
           <dt>Aberto em célula</dt><dd>${op.open_in_cells_quantity || 0}</dd>
           <dt>Total considerado</dt><dd>${op.counted_quantity}</dd>
           <dt>Saldo</dt><dd>${op.remaining_quantity}</dd>
-          <dt>Minutos F21</dt><dd>${Number(op.minutes_f21).toFixed(3)}</dd>
-          <dt>Minutos F22</dt><dd>${Number(op.minutes_f22).toFixed(3)}</dd>
-          <dt>F23</dt><dd>${escapeHtml(op.f23_mode)} ${op.minutes_f23 != null ? `(${Number(op.minutes_f23).toFixed(3)} min)` : ''}</dd>
+          <dt>Minutos F21</dt><dd>${fmtNum(Number(op.minutes_f21), 3)}</dd>
+          <dt>Minutos F22</dt><dd>${fmtNum(Number(op.minutes_f22), 3)}</dd>
+          <dt>F23</dt><dd>${escapeHtml(op.f23_mode)} ${op.minutes_f23 != null ? `(${fmtNum(Number(op.minutes_f23), 3)} min)` : ''}</dd>
           <dt>Coleção</dt><dd>${escapeHtml(op.collection_name || '-')}</dd>
           <dt>Piloto</dt><dd>${escapeHtml(op.pilot_mode || '-')}</dd>
           <dt>Aparelho</dt><dd>${escapeHtml(op.appliance || '-')}</dd>
-          <dt>Data de entrada</dt><dd>${escapeHtml(op.entry_date)}</dd>
-          <dt>Data de saída</dt><dd>${escapeHtml(op.shipped_at || '-')}</dd>
+          <dt>Data de entrada</dt><dd>${escapeHtml(nowPt(op.entry_date))}</dd>
+          <dt>Data de saída</dt><dd>${escapeHtml(nowPt(op.shipped_at))}</dd>
           <dt>Cobrança</dt><dd>${billingStatusText(op)}</dd>
           <dt>Obs. cobrança</dt><dd>${escapeHtml(op.billing_notes || '-')}</dd>
           <dt>Fluxo da OP</dt><dd>${lifecycleFlowLabel(op.lifecycle_type)}</dd>
-          ${isReturnedWithoutProductionLifecycle(op.lifecycle_type) ? `<dt>Motivo da devolução</dt><dd>${escapeHtml(op.return_reason || '-')}</dd><dt>Devolvida em</dt><dd>${escapeHtml(op.returned_without_production_at || '-')}</dd>` : ''}
+          ${isReturnedWithoutProductionLifecycle(op.lifecycle_type) ? `<dt>Motivo da devolução</dt><dd>${escapeHtml(op.return_reason || '-')}</dd><dt>Devolvida em</dt><dd>${escapeHtml(nowPt(op.returned_without_production_at))}</dd>` : ''}
           <dt>Origem</dt><dd>${escapeHtml(getSourceLabel(op.notes))}</dd>
-          <dt>Minutos normais produzidos</dt><dd>${Number(op.produced_normal_minutes || 0).toFixed(2)}</dd>
-          <dt>Minutos extras produzidos</dt><dd>${Number(op.produced_extra_minutes || 0).toFixed(2)}</dd>
-          <dt>Total minutos produzidos</dt><dd>${Number(op.produced_minutes || 0).toFixed(2)}</dd>
-          <dt>Min. embarque costura</dt><dd>${Number(op.sewing_minutes || 0).toFixed(2)}</dd>
-          <dt>Min. embarque pós-costura</dt><dd>${Number(op.post_sewing_minutes || 0).toFixed(2)}</dd>
+          <dt>Minutos normais produzidos</dt><dd>${fmtNum(Number(op.produced_normal_minutes || 0), 2)}</dd>
+          <dt>Minutos extras produzidos</dt><dd>${fmtNum(Number(op.produced_extra_minutes || 0), 2)}</dd>
+          <dt>Total minutos produzidos</dt><dd>${fmtNum(Number(op.produced_minutes || 0), 2)}</dd>
+          <dt>Min. embarque costura</dt><dd>${fmtNum(Number(op.sewing_minutes || 0), 2)}</dd>
+          <dt>Min. embarque pós-costura</dt><dd>${fmtNum(Number(op.post_sewing_minutes || 0), 2)}</dd>
           <dt>Observações</dt><dd>${escapeHtml(op.notes || '-')}</dd>
         </dl>
       </section>
@@ -7878,13 +7894,13 @@ function renderOpDetailPage(id, query = {}, role = 'adm') {
             <label class="full">Observações do envio<textarea name="sent_notes" rows="3" placeholder="Opcional"></textarea></label>
             <button class="btn" type="submit">Enviar quantidade para célula</button>
           </form>
-          ${openCellTransfers.length ? `<div class="panel" style="margin-top:12px;"><h4 style="margin-top:0;">Pendências abertas por célula</h4>${openCellTransfers.map(item => `<form method="post" action="/ops/${op.id}/cell/return" class="stack-form" style="margin-bottom:12px; padding-bottom:12px; border-bottom:1px solid rgba(148,163,184,.2);"><input type="hidden" name="transfer_id" value="${item.id}" /><div><strong>${escapeHtml(item.cell_name)}</strong> · envio em ${escapeHtml(item.sent_at)} · aberto ${getOpenQuantityFromCellTransfer(item)} peça(s)</div><label>Quantidade retornada<input type="number" name="quantity_returned" min="1" max="${getOpenQuantityFromCellTransfer(item)}" value="${getOpenQuantityFromCellTransfer(item)}" required /></label><label>Data do retorno<input type="date" name="returned_at" value="${escapeHtml(today())}" required /></label><label class="full">Observações do retorno<textarea name="return_notes" rows="2" placeholder="Opcional"></textarea></label><button class="btn secondary" type="submit">Registrar retorno desta célula</button></form>`).join('')}</div>` : '<p class="hint">Nenhum envio pendente em célula no momento.</p>'}
+          ${openCellTransfers.length ? `<div class="panel" style="margin-top:12px;"><h4 style="margin-top:0;">Pendências abertas por célula</h4>${openCellTransfers.map(item => `<form method="post" action="/ops/${op.id}/cell/return" class="stack-form" style="margin-bottom:12px; padding-bottom:12px; border-bottom:1px solid rgba(148,163,184,.2);"><input type="hidden" name="transfer_id" value="${item.id}" /><div><strong>${escapeHtml(item.cell_name)}</strong> · envio em ${escapeHtml(nowPt(item.sent_at))} · aberto ${getOpenQuantityFromCellTransfer(item)} peça(s)</div><label>Quantidade retornada<input type="number" name="quantity_returned" min="1" max="${getOpenQuantityFromCellTransfer(item)}" value="${getOpenQuantityFromCellTransfer(item)}" required /></label><label>Data do retorno<input type="date" name="returned_at" value="${escapeHtml(today())}" required /></label><label class="full">Observações do retorno<textarea name="return_notes" rows="2" placeholder="Opcional"></textarea></label><button class="btn secondary" type="submit">Registrar retorno desta célula</button></form>`).join('')}</div>` : '<p class="hint">Nenhum envio pendente em célula no momento.</p>'}
         ` : '<p class="hint">Somente Administrador e Operacional podem registrar envio/retorno de célula.</p>'}
         <div class="filters"></div>
         <table>
           <thead><tr><th>Célula</th><th>Envio</th><th>Retorno final</th><th>Recebeu</th><th>Devolveu</th><th>Aberto</th><th>Status</th><th>Obs.</th></tr></thead>
           <tbody>
-            ${cellTransfers.map(item => `<tr><td>${escapeHtml(item.cell_name)}</td><td>${escapeHtml(item.sent_at)}</td><td>${escapeHtml(item.returned_at || '-')}</td><td>${Number(item.quantity_sent || 0)}</td><td>${Number(item.quantity_returned || 0)}</td><td>${getOpenQuantityFromCellTransfer(item)}</td><td>${getOpenQuantityFromCellTransfer(item) > 0 ? '<span class="badge rosa">pendente em célula</span>' : '<span class="badge azul">retorno concluído</span>'}</td><td>${escapeHtml([item.sent_notes, item.return_notes].filter(Boolean).join(' | ') || '-')}</td></tr>`).join('') || '<tr><td colspan="8">Nenhum envio para célula registrado.</td></tr>'}
+            ${cellTransfers.map(item => `<tr><td>${escapeHtml(item.cell_name)}</td><td>${escapeHtml(nowPt(item.sent_at))}</td><td>${escapeHtml(nowPt(item.returned_at))}</td><td>${Number(item.quantity_sent || 0)}</td><td>${Number(item.quantity_returned || 0)}</td><td>${getOpenQuantityFromCellTransfer(item)}</td><td>${getOpenQuantityFromCellTransfer(item) > 0 ? '<span class="badge rosa">pendente em célula</span>' : '<span class="badge azul">retorno concluído</span>'}</td><td>${escapeHtml([item.sent_notes, item.return_notes].filter(Boolean).join(' | ') || '-')}</td></tr>`).join('') || '<tr><td colspan="8">Nenhum envio para célula registrado.</td></tr>'}
           </tbody>
         </table>
       </section>
@@ -7907,7 +7923,7 @@ function renderOpDetailPage(id, query = {}, role = 'adm') {
                   <button class="btn secondary" type="submit">Concluir ocorrência</button>
                 </form>`}
             </article>
-          `).join('') || '<p class="hint">Nenhuma ocorrência registrada. Estrutura pronta para expansão futura.</p>'}
+          `).join('') || '<p class="hint">Nenhuma ocorrência registrada.</p>'}
         </div>
       </section>
     </div>
@@ -7917,7 +7933,7 @@ function renderOpDetailPage(id, query = {}, role = 'adm') {
       <table>
         <thead><tr><th>Embarque</th><th>Data</th><th>Costura</th><th>Pós-costura</th><th>Total</th></tr></thead>
         <tbody>
-          ${shipmentHistory.map(item => `<tr><td><a href="/shipments/${item.shipment_id}">${escapeHtml(item.shipment_number)}</a></td><td>${escapeHtml(item.shipment_date)}</td><td>${Number(item.sewing_minutes || 0).toFixed(2)}</td><td>${Number(item.post_sewing_minutes || 0).toFixed(2)}</td><td>${Number(item.total_minutes || 0).toFixed(2)}</td></tr>`).join('') || '<tr><td colspan="5">Nenhum embarque registrado para esta OP.</td></tr>'}
+          ${shipmentHistory.map(item => `<tr><td><a href="/shipments/${item.shipment_id}">${escapeHtml(item.shipment_number)}</a></td><td>${escapeHtml(nowPt(item.shipment_date))}</td><td>${fmtNum(Number(item.sewing_minutes || 0), 2)}</td><td>${fmtNum(Number(item.post_sewing_minutes || 0), 2)}</td><td>${fmtNum(Number(item.total_minutes || 0), 2)}</td></tr>`).join('') || '<tr><td colspan="5">Nenhum embarque registrado para esta OP.</td></tr>'}
         </tbody>
       </table>
     </section>
@@ -7927,7 +7943,7 @@ function renderOpDetailPage(id, query = {}, role = 'adm') {
       <table>
         <thead><tr><th>Data</th><th>Observação</th><th>Registrado por</th><th>Lote</th></tr></thead>
         <tbody>
-          ${billingHistory.map(item => `<tr><td>${escapeHtml(item.billed_at)}</td><td>${escapeHtml(item.notes || '-')}</td><td>${escapeHtml(item.billed_by_name || '-')}</td><td>${escapeHtml(item.batch_reference || '-')}</td></tr>`).join('') || '<tr><td colspan="4">Nenhuma cobrança registrada para esta OP.</td></tr>'}
+          ${billingHistory.map(item => `<tr><td>${escapeHtml(nowPt(item.billed_at))}</td><td>${escapeHtml(item.notes || '-')}</td><td>${escapeHtml(item.billed_by_name || '-')}</td><td>${escapeHtml(item.batch_reference || '-')}</td></tr>`).join('') || '<tr><td colspan="4">Nenhuma cobrança registrada para esta OP.</td></tr>'}
         </tbody>
       </table>
     </section>
@@ -7937,7 +7953,7 @@ function renderOpDetailPage(id, query = {}, role = 'adm') {
       <table>
         <thead><tr><th>Início</th><th>Extra/pç</th><th>Motivo</th><th>Descrição</th><th>Status</th><th>Obs.</th></tr></thead>
         <tbody>
-          ${extraTimes.map(item => `<tr><td>${escapeHtml(item.effective_date)}</td><td>${Number(item.extra_minutes_per_piece || 0).toFixed(3)}</td><td>${escapeHtml(item.reason)}</td><td>${escapeHtml(item.description || '-')}</td><td>${item.is_active ? 'Ativo' : 'Inativo'}</td><td>${escapeHtml(item.notes || '-')}</td></tr>`).join('') || '<tr><td colspan="6">Nenhum tempo extra cadastrado para esta OP.</td></tr>'}
+          ${extraTimes.map(item => `<tr><td>${escapeHtml(nowPt(item.effective_date))}</td><td>${fmtNum(Number(item.extra_minutes_per_piece || 0), 3)}</td><td>${escapeHtml(item.reason)}</td><td>${escapeHtml(item.description || '-')}</td><td>${item.is_active ? 'Ativo' : 'Inativo'}</td><td>${escapeHtml(item.notes || '-')}</td></tr>`).join('') || '<tr><td colspan="6">Nenhum tempo extra cadastrado para esta OP.</td></tr>'}
         </tbody>
       </table>
     </section>
@@ -7947,7 +7963,7 @@ function renderOpDetailPage(id, query = {}, role = 'adm') {
       <table>
         <thead><tr><th>Data</th><th>Registro</th><th>Colaborador</th><th>Quantidade</th><th>F21 usado</th><th>Normal</th><th>Extra</th><th>Total</th></tr></thead>
         <tbody>
-          ${history.map(item => `<tr><td>${escapeHtml(item.production_date)}</td><td>${escapeHtml(item.registration_code)}</td><td>${escapeHtml(item.full_name)}</td><td>${item.produced_quantity}</td><td>${Number(item.used_minutes_f21).toFixed(3)}</td><td>${Number(item.normal_minutes || 0).toFixed(3)}</td><td>${Number(item.extra_minutes || 0).toFixed(3)}</td><td>${Number(item.produced_minutes).toFixed(3)}</td></tr>`).join('') || '<tr><td colspan="8">Nenhum lançamento para esta OP.</td></tr>'}
+          ${history.map(item => `<tr><td>${escapeHtml(nowPt(item.production_date))}</td><td>${escapeHtml(item.registration_code)}</td><td>${escapeHtml(item.full_name)}</td><td>${item.produced_quantity}</td><td>${fmtNum(Number(item.used_minutes_f21), 3)}</td><td>${fmtNum(Number(item.normal_minutes || 0), 3)}</td><td>${fmtNum(Number(item.extra_minutes || 0), 3)}</td><td>${fmtNum(Number(item.produced_minutes), 3)}</td></tr>`).join('') || '<tr><td colspan="8">Nenhum lançamento para esta OP.</td></tr>'}
         </tbody>
       </table>
     </section>
@@ -7980,7 +7996,7 @@ function renderOpDetailPage(id, query = {}, role = 'adm') {
       <table>
         <thead><tr><th>Data</th><th>Qtd</th><th>Motivo</th><th>Observação</th><th>Registrado em</th></tr></thead>
         <tbody>
-          ${problemHistory.map(item => `<tr><td>${escapeHtml(item.problem_date)}</td><td>${item.quantity}</td><td>${escapeHtml(item.reason)}</td><td>${escapeHtml(item.notes || '-')}</td><td>${escapeHtml(nowPt(item.created_at))}</td></tr>`).join('') || '<tr><td colspan="5">Nenhuma peça com problema registrada para esta OP.</td></tr>'}
+          ${problemHistory.map(item => `<tr><td>${escapeHtml(nowPt(item.problem_date))}</td><td>${item.quantity}</td><td>${escapeHtml(item.reason)}</td><td>${escapeHtml(item.notes || '-')}</td><td>${escapeHtml(nowPt(item.created_at))}</td></tr>`).join('') || '<tr><td colspan="5">Nenhuma peça com problema registrada para esta OP.</td></tr>'}
         </tbody>
       </table>
       <p class="hint">Essas peças entram no saldo da OP, ajudam a concluir a quantidade total e não geram minutos de costura.</p>
@@ -8005,7 +8021,7 @@ function renderShipmentCreatePage(values = {}, error = '', notice = '', role = '
     <section class="page-header">
       <div>
         <h2>Gerar embarque</h2>
-        <p>Somente OPs azuis e ainda não embarcadas ficam aptas no MVP.</p>
+        <p>Somente OPs azuis (finalizadas) e ainda não embarcadas podem entrar no embarque.</p>
       </div>
       <a class="btn secondary" href="/shipments">Ver embarques gerados</a>
     </section>
@@ -8035,21 +8051,21 @@ function renderShipmentCreatePage(values = {}, error = '', notice = '', role = '
             <td>${escapeHtml(op.product_name)}</td>
             <td>${escapeHtml(op.op_type)}</td>
             <td>${statusBadge(op.status_color)}</td>
-            <td>${escapeHtml(op.entry_date || '-')}</td>
+            <td>${escapeHtml(nowPt(op.entry_date))}</td>
             <td>${op.total_pieces}</td>
-            <td>${Number(op.sewing_minutes).toFixed(2)}</td>
-            <td>${Number(op.post_sewing_minutes).toFixed(2)}</td>
-            <td>${Number(op.total_shipment_minutes).toFixed(2)}</td>
+            <td>${fmtNum(Number(op.sewing_minutes), 2)}</td>
+            <td>${fmtNum(Number(op.post_sewing_minutes), 2)}</td>
+            <td>${fmtNum(Number(op.total_shipment_minutes), 2)}</td>
           </tr>`).join('') || '<tr><td colspan="10">Nenhuma OP apta encontrada.</td></tr>'}
         </tbody>
       </table>
       <div class="shipment-summary-grid">
         <article class="mini-card"><span>OPs selecionadas</span><strong>${previewTotals.opCount}</strong></article>
-        <article class="mini-card"><span>Produção</span><strong>${previewTotals.productionMinutes.toFixed(2)}</strong></article>
-        <article class="mini-card"><span>Mostruário</span><strong>${previewTotals.sampleMinutes.toFixed(2)}</strong></article>
-        <article class="mini-card"><span>Costura</span><strong>${previewTotals.sewingMinutes.toFixed(2)}</strong></article>
-        <article class="mini-card"><span>Pós-costura</span><strong>${previewTotals.postSewingMinutes.toFixed(2)}</strong></article>
-        <article class="mini-card"><span>Total</span><strong>${previewTotals.totalMinutes.toFixed(2)}</strong></article>
+        <article class="mini-card"><span>Produção</span><strong>${fmtNum(previewTotals.productionMinutes, 2)}</strong></article>
+        <article class="mini-card"><span>Mostruário</span><strong>${fmtNum(previewTotals.sampleMinutes, 2)}</strong></article>
+        <article class="mini-card"><span>Costura</span><strong>${fmtNum(previewTotals.sewingMinutes, 2)}</strong></article>
+        <article class="mini-card"><span>Pós-costura</span><strong>${fmtNum(previewTotals.postSewingMinutes, 2)}</strong></article>
+        <article class="mini-card"><span>Total</span><strong>${fmtNum(previewTotals.totalMinutes, 2)}</strong></article>
       </div>
       <div class="actions"><button class="btn" type="submit">Gerar embarque</button><button class="btn secondary" type="submit" formaction="/labels/shipment" formmethod="get" formtarget="_blank">Visualizar etiquetas de embarque</button></div>
     </form>
@@ -8079,18 +8095,18 @@ function renderShipmentListPage(query = {}, role = 'adm') {
     <div class="shipment-summary-grid section-gap">
       <article class="mini-card"><span>Embarques</span><strong>${totals.shipments}</strong></article>
       <article class="mini-card"><span>OPs</span><strong>${totals.ops}</strong></article>
-      <article class="mini-card"><span>Produção</span><strong>${totals.productionMinutes.toFixed(2)}</strong></article>
-      <article class="mini-card"><span>Mostruário</span><strong>${totals.sampleMinutes.toFixed(2)}</strong></article>
-      <article class="mini-card"><span>Costura</span><strong>${totals.sewingMinutes.toFixed(2)}</strong></article>
-      <article class="mini-card"><span>Pós-costura</span><strong>${totals.postSewingMinutes.toFixed(2)}</strong></article>
-      <article class="mini-card"><span>Total</span><strong>${totals.totalMinutes.toFixed(2)}</strong></article>
+      <article class="mini-card"><span>Produção</span><strong>${fmtNum(totals.productionMinutes, 2)}</strong></article>
+      <article class="mini-card"><span>Mostruário</span><strong>${fmtNum(totals.sampleMinutes, 2)}</strong></article>
+      <article class="mini-card"><span>Costura</span><strong>${fmtNum(totals.sewingMinutes, 2)}</strong></article>
+      <article class="mini-card"><span>Pós-costura</span><strong>${fmtNum(totals.postSewingMinutes, 2)}</strong></article>
+      <article class="mini-card"><span>Total</span><strong>${fmtNum(totals.totalMinutes, 2)}</strong></article>
     </div>
 
     <section class="panel">
       <table>
         <thead><tr><th>Embarque</th><th>Data</th><th>OPs</th><th>Produção</th><th>Mostruário</th><th>Costura</th><th>Pós-costura</th><th>Total</th><th></th></tr></thead>
         <tbody>
-          ${rows.map(row => `<tr><td>${escapeHtml(row.shipment_number)}</td><td>${escapeHtml(row.shipment_date)}</td><td>${row.total_ops}</td><td>${Number(row.production_minutes || 0).toFixed(2)}</td><td>${Number(row.sample_minutes || 0).toFixed(2)}</td><td>${Number(row.sewing_minutes || 0).toFixed(2)}</td><td>${Number(row.post_sewing_minutes || 0).toFixed(2)}</td><td>${Number(row.total_minutes || 0).toFixed(2)}</td><td><a href="/shipments/${row.id}">Detalhar</a></td></tr>`).join('') || '<tr><td colspan="9">Nenhum embarque encontrado.</td></tr>'}
+          ${rows.map(row => `<tr><td>${escapeHtml(row.shipment_number)}</td><td>${escapeHtml(nowPt(row.shipment_date))}</td><td>${row.total_ops}</td><td>${fmtNum(Number(row.production_minutes || 0), 2)}</td><td>${fmtNum(Number(row.sample_minutes || 0), 2)}</td><td>${fmtNum(Number(row.sewing_minutes || 0), 2)}</td><td>${fmtNum(Number(row.post_sewing_minutes || 0), 2)}</td><td>${fmtNum(Number(row.total_minutes || 0), 2)}</td><td><a href="/shipments/${row.id}">Detalhar</a></td></tr>`).join('') || '<tr><td colspan="9">Nenhum embarque encontrado.</td></tr>'}
         </tbody>
       </table>
     </section>
@@ -8108,7 +8124,7 @@ function renderShipmentDetailPage(id, query = {}, role = 'adm') {
     <section class="page-header">
       <div>
         <h2>Embarque ${escapeHtml(shipment.shipment_number)}</h2>
-        <p>Data ${escapeHtml(shipment.shipment_date)} · ${shipment.total_ops} OP(s)</p>
+        <p>Data ${escapeHtml(nowPt(shipment.shipment_date))} · ${shipment.total_ops} OP(s)</p>
       </div>
       <div class="header-actions">
         <a class="btn secondary" href="/shipments">Voltar à consulta</a>
@@ -8117,11 +8133,11 @@ function renderShipmentDetailPage(id, query = {}, role = 'adm') {
     </section>
 
     <div class="shipment-summary-grid section-gap">
-      <article class="mini-card"><span>Produção</span><strong>${Number(shipment.production_minutes || 0).toFixed(2)}</strong></article>
-      <article class="mini-card"><span>Mostruário</span><strong>${Number(shipment.sample_minutes || 0).toFixed(2)}</strong></article>
-      <article class="mini-card"><span>Costura</span><strong>${Number(shipment.sewing_minutes || 0).toFixed(2)}</strong></article>
-      <article class="mini-card"><span>Pós-costura</span><strong>${Number(shipment.post_sewing_minutes || 0).toFixed(2)}</strong></article>
-      <article class="mini-card"><span>Total</span><strong>${Number(shipment.total_minutes || 0).toFixed(2)}</strong></article>
+      <article class="mini-card"><span>Produção</span><strong>${fmtNum(Number(shipment.production_minutes || 0), 2)}</strong></article>
+      <article class="mini-card"><span>Mostruário</span><strong>${fmtNum(Number(shipment.sample_minutes || 0), 2)}</strong></article>
+      <article class="mini-card"><span>Costura</span><strong>${fmtNum(Number(shipment.sewing_minutes || 0), 2)}</strong></article>
+      <article class="mini-card"><span>Pós-costura</span><strong>${fmtNum(Number(shipment.post_sewing_minutes || 0), 2)}</strong></article>
+      <article class="mini-card"><span>Total</span><strong>${fmtNum(Number(shipment.total_minutes || 0), 2)}</strong></article>
     </div>
 
     <section class="panel">
@@ -8131,7 +8147,7 @@ function renderShipmentDetailPage(id, query = {}, role = 'adm') {
         <tbody>
           ${items.map(item => {
             const noIndustrialization = isReturnedWithoutProductionLifecycle(item.lifecycle_type);
-            return `<tr><td><a href="/ops/${item.op_id}">${escapeHtml(item.op_number)}</a>${noIndustrialization ? '<br /><span class="hint">Baixada sem industrialização</span>' : ''}</td><td>${escapeHtml(item.product_name || '-')}</td><td>${escapeHtml(item.brand || '-')}</td><td>${escapeHtml(item.op_type)}</td><td>${item.total_pieces}</td><td>${noIndustrialization ? '-' : Number(item.sewing_minutes || 0).toFixed(2)}</td><td>${noIndustrialization ? '-' : Number(item.post_sewing_minutes || 0).toFixed(2)}</td><td>${noIndustrialization ? '-' : Number(item.total_minutes || 0).toFixed(2)}</td><td>${escapeHtml(item.shipped_at || shipment.shipment_date)}</td></tr>`;
+            return `<tr><td><a href="/ops/${item.op_id}">${escapeHtml(item.op_number)}</a>${noIndustrialization ? '<br /><span class="hint">Baixada sem industrialização</span>' : ''}</td><td>${escapeHtml(item.product_name || '-')}</td><td>${escapeHtml(item.brand || '-')}</td><td>${escapeHtml(item.op_type)}</td><td>${item.total_pieces}</td><td>${noIndustrialization ? '-' : fmtNum(Number(item.sewing_minutes || 0), 2)}</td><td>${noIndustrialization ? '-' : fmtNum(Number(item.post_sewing_minutes || 0), 2)}</td><td>${noIndustrialization ? '-' : fmtNum(Number(item.total_minutes || 0), 2)}</td><td>${escapeHtml(item.shipped_at || shipment.shipment_date)}</td></tr>`;
           }).join('') || '<tr><td colspan="9">Nenhum item encontrado.</td></tr>'}
         </tbody>
       </table>
@@ -8272,7 +8288,7 @@ function formatLabelTime(unitMinutes, totalPieces, enabled = true) {
   if (!enabled) return 'Externo';
   const unit = Number(unitMinutes || 0);
   const total = round2(unit * Number(totalPieces || 0));
-  return `${unit.toFixed(3)} · Total ${total.toFixed(2)}`;
+  return `${fmtNum(unit, 3)} · Total ${fmtNum(total, 2)}`;
 }
 
 function formatPilotLabel(mode) {
@@ -8302,7 +8318,7 @@ function renderLabelsShell({ title, subtitle, labels, role = 'adm', emptyMessage
           <div class="entry-label-grid-row entry-label-grid-line-2">
             <div class="entry-cell entry-cell-model"><span>Modelo</span><strong>${escapeHtml(item.product_name || '-')}</strong></div>
             <div class="entry-cell"><span>Piloto</span><strong>${escapeHtml(formatPilotLabel(item.pilot_mode))}</strong></div>
-            <div class="entry-cell"><span>Chegada</span><strong>${escapeHtml(item.entry_date || '-')}</strong></div>
+            <div class="entry-cell"><span>Chegada</span><strong>${escapeHtml(nowPt(item.entry_date))}</strong></div>
           </div>
 
           <div class="entry-label-grid-row entry-label-grid-line-3">
@@ -8355,9 +8371,9 @@ function renderLabelsShell({ title, subtitle, labels, role = 'adm', emptyMessage
           <div class="label-field-emphasis"><dt>Marca</dt><dd>${escapeHtml(item.brand || '-')}</dd></div>
           <div class="label-field-emphasis"><dt>Aparelho</dt><dd>${escapeHtml(item.appliance || '-')}</dd></div>
           <div><dt>Piloto</dt><dd>${escapeHtml(formatPilotLabel(item.pilot_mode))}</dd></div>
-          <div><dt>Chegada</dt><dd>${escapeHtml(item.entry_date || '-')}</dd></div>
+          <div><dt>Chegada</dt><dd>${escapeHtml(nowPt(item.entry_date))}</dd></div>
           <div><dt>Coleção</dt><dd>${escapeHtml(item.collection_name || '-')}</dd></div>
-          ${item.shipment_date ? `<div><dt>Embarque</dt><dd>${escapeHtml(item.shipment_date)}</dd></div>` : ''}
+          ${item.shipment_date ? `<div><dt>Embarque</dt><dd>${escapeHtml(nowPt(item.shipment_date))}</dd></div>` : ''}
         </dl>
         ${item.singleLabelHref ? `<div class="label-card-actions no-print"><a class="btn secondary" href="${item.singleLabelHref}" target="_blank">Gerar individual</a></div>` : ''}
       </article>
@@ -8528,7 +8544,7 @@ function renderEstornosPage(query = {}, role = 'adm') {
     ? search.rows.map(row => `
       <article class="audit-record ${row.is_reversed ? 'is-reversed' : ''}">
         <div class="audit-record-head"><div><strong>Lançamento #${row.id}</strong><span>${escapeHtml(row.op_number)} · ${escapeHtml(row.registration_code)} - ${escapeHtml(row.full_name)} · ${formatDatePtBr(row.production_date)}</span></div><span class="status-pill ${row.is_reversed ? 'pending' : 'ok'}">${row.is_reversed ? 'Estornado' : 'Ativo'}</span></div>
-        <p class="hint">Qtd ${row.produced_quantity} · Normal ${Number(row.normal_minutes || 0).toFixed(2)} · Extra ${Number(row.extra_minutes || 0).toFixed(2)} · Total ${Number(row.produced_minutes || 0).toFixed(2)}${row.reversed_at ? ` · estornado em ${escapeHtml(nowPt(row.reversed_at))}` : ''}</p>
+        <p class="hint">Qtd ${row.produced_quantity} · Normal ${fmtNum(Number(row.normal_minutes || 0), 2)} · Extra ${fmtNum(Number(row.extra_minutes || 0), 2)} · Total ${fmtNum(Number(row.produced_minutes || 0), 2)}${row.reversed_at ? ` · estornado em ${escapeHtml(nowPt(row.reversed_at))}` : ''}</p>
         ${row.is_reversed ? '' : `
         <div class="closure-actions-grid audit-actions-grid">
           <form class="panel inset-panel stack-form compact" method="post" action="/estornos/production/correct">
@@ -8557,7 +8573,7 @@ function renderEstornosPage(query = {}, role = 'adm') {
       ? search.rows.map(row => `
         <article class="audit-record ${row.is_reversed ? 'is-reversed' : ''}">
           <div class="audit-record-head"><div><strong>${escapeHtml(row.shipment_number)}</strong><span>${formatDatePtBr(row.shipment_date)} · ${row.total_ops} OP(s)</span></div><span class="status-pill ${row.is_reversed ? 'pending' : 'ok'}">${row.is_reversed ? 'Estornado' : 'Ativo'}</span></div>
-          <p class="hint">OPs: ${escapeHtml(row.op_numbers || '-')} · Total ${Number(row.total_minutes || 0).toFixed(2)} min${row.reversed_at ? ` · estornado em ${escapeHtml(nowPt(row.reversed_at))}` : ''}</p>
+          <p class="hint">OPs: ${escapeHtml(row.op_numbers || '-')} · Total ${fmtNum(Number(row.total_minutes || 0), 2)} min${row.reversed_at ? ` · estornado em ${escapeHtml(nowPt(row.reversed_at))}` : ''}</p>
           ${row.is_reversed ? '' : `
           <div class="closure-actions-grid audit-actions-grid">
             <form class="panel inset-panel stack-form compact" method="post" action="/estornos/shipment/correct">
