@@ -6661,7 +6661,7 @@ function renderPrizeFlagField(values = {}) {
 
 function renderWorkScheduleSelect(selectedId) {
   const options = getWorkSchedules().filter(item => item.is_active || item.id === Number(selectedId));
-  return `<label>Jornada de trabalho<select name="work_schedule_id"><option value="">Sem jornada (só sáb/dom/feriado pedem a flag)</option>${options.map(item => `<option value="${item.id}" ${Number(selectedId) === item.id ? 'selected' : ''}>${escapeHtml(formatWorkSchedule(item))}</option>`).join('')}</select></label>`;
+  return `<label>Jornada de trabalho<select name="work_schedule_id"><option value="">Sem jornada (só sáb/dom/feriado pedem a flag)</option>${options.map(item => `<option value="${item.id}" ${Number(selectedId) === item.id ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></label>`;
 }
 
 function renderWorkSchedulesSection(values = {}, query = {}) {
@@ -7182,7 +7182,7 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
     const ib = describeEmployeeStatus(b) === 'Ativo' ? 0 : 1;
     return ia - ib || String(a.full_name).localeCompare(String(b.full_name), 'pt-BR', { sensitivity: 'base' });
   });
-  const scheduleNames = new Map(getWorkSchedules().map(item => [item.id, formatWorkSchedule(item)]));
+  const scheduleNames = new Map(getWorkSchedules().map(item => [item.id, item.name]));
   const activeCount = employees.filter(emp => describeEmployeeStatus(emp) === 'Ativo').length;
   const editingId = Number(query.edit || 0);
   const showForm = query.new === '1' || Boolean(error);
