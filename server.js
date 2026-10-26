@@ -7176,7 +7176,12 @@ function renderEmployeeForm(values = {}, error = '') {
 }
 
 function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
-  const employees = db.prepare('SELECT * FROM employees ORDER BY full_name').all();
+  // Ativas primeiro; desligadas/inativas no fim. Cada grupo em ordem alfabética.
+  const employees = db.prepare('SELECT * FROM employees').all().sort((a, b) => {
+    const ia = describeEmployeeStatus(a) === 'Ativo' ? 0 : 1;
+    const ib = describeEmployeeStatus(b) === 'Ativo' ? 0 : 1;
+    return ia - ib || String(a.full_name).localeCompare(String(b.full_name), 'pt-BR', { sensitivity: 'base' });
+  });
   const scheduleNames = new Map(getWorkSchedules().map(item => [item.id, formatWorkSchedule(item)]));
   const editingId = Number(query.edit || 0);
   const showForm = query.new === '1' || Boolean(error);
