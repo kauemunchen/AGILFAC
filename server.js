@@ -4377,9 +4377,43 @@ function formatPhone(digits) {
   return d;
 }
 
-function renderWhatsAppLink(digits) {
+function renderWhatsAppLink(digits, message = '') {
   if (!digits) return '-';
-  return `<a class="whatsapp-link" href="https://wa.me/55${escapeHtml(digits)}" target="_blank" rel="noopener">${escapeHtml(formatPhone(digits))}</a>`;
+  const text = message ? `?text=${encodeURIComponent(message)}` : '';
+  const title = message ? ' title="Abre o WhatsApp com o resultado do período já escrito"' : '';
+  return `<a class="whatsapp-link" href="https://wa.me/55${escapeHtml(digits)}${text}" target="_blank" rel="noopener"${title}>${escapeHtml(formatPhone(digits))}</a>`;
+}
+
+// Resultado do período vigente (até o corte) para a mensagem de WhatsApp.
+// Se o período acabou de começar (nenhum dia útil decorrido), usa o período anterior fechado.
+function getEmployeeResultContext(employees) {
+  const lastBusinessDay = getPreviousBusinessDay(today());
+  let range = getPeriodRange('month', today());
+  if (lastBusinessDay < range.start) range = getPeriodRange('month', lastBusinessDay);
+  const cutoff = lastBusinessDay < range.end ? lastBusinessDay : range.end;
+  const counted = getCountedProductionByEmployee(range.start, cutoff, employees);
+  return { range, cutoff, counted };
+}
+
+function buildEmployeeResultMessage(employee, context) {
+  const { range, cutoff, counted } = context;
+  const minutes = round2(counted.get(employee.id)?.minutes || 0);
+  const eff = calculateEmployeeEfficiency(employee, minutes, range.start, range.end, cutoff);
+  if (!eff.business_days) return '';
+  const firstName = String(employee.full_name || '').trim().split(/\s+/)[0] || '';
+  const name = firstName ? firstName.charAt(0).toUpperCase() + firstName.slice(1).toLowerCase() : '';
+  const target = round2(eff.available_minutes * 0.6);
+  const gap = round2(target - minutes);
+  const lines = [
+    `Olá, ${name}! Segue seu resultado no período de ${formatDatePtBr(range.start)} a ${formatDatePtBr(range.end)}, até ${formatDatePtBr(cutoff)}:`,
+    '',
+    `• Minutos produzidos: ${fmtNum(minutes, 2)} min`,
+    `• Eficiência: ${fmtNum(eff.efficiency_percent, 2)}%`,
+    gap > 0
+      ? `• Faltam ${fmtNum(gap, 2)} min para chegar na meta de 60%.`
+      : `• Meta de 60% atingida! Parabéns!`
+  ];
+  return lines.join('\n');
 }
 
 function describeEmployeeStatus(employee) {
@@ -7236,6 +7270,7 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
   });
   const scheduleNames = new Map(getWorkSchedules().map(item => [item.id, item.name]));
   const activeCount = employees.filter(emp => describeEmployeeStatus(emp) === 'Ativo').length;
+  const resultContext = getEmployeeResultContext(employees);
   const editingId = Number(query.edit || 0);
   const showForm = query.new === '1' || Boolean(error);
   const content = `
@@ -7283,7 +7318,7 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
               </tr>`;
             }
             const status = describeEmployeeStatus(emp);
-            return `<tr class="${status === 'Ativo' ? 'is-active' : 'is-inactive'}"><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td>${renderWhatsAppLink(emp.phone)}</td><td>${escapeHtml(nowPt(emp.birth_date))}</td><td>${escapeHtml(nowPt(emp.start_date))}</td><td>${escapeHtml(nowPt(emp.termination_date))}</td><td><span class="status-tag ${status === 'Ativo' ? 'ok' : 'off'}">${escapeHtml(status)}</span></td><td>${escapeHtml(emp.job_role || '-')}</td><td>${escapeHtml(scheduleNames.get(emp.work_schedule_id) || 'Sem jornada')}</td><td>${escapeHtml(emp.notes || '-')}</td><td><a href="/employees?edit=${emp.id}">Editar</a></td></tr>`;
+            return `<tr class="${status === 'Ativo' ? 'is-active' : 'is-inactive'}"><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td>${renderWhatsAppLink(emp.phone, status === 'Ativo' ? buildEmployeeResultMessage(emp, resultContext) : '')}</td><td>${escapeHtml(nowPt(emp.birth_date))}</td><td>${escapeHtml(nowPt(emp.start_date))}</td><td>${escapeHtml(nowPt(emp.termination_date))}</td><td><span class="status-tag ${status === 'Ativo' ? 'ok' : 'off'}">${escapeHtml(status)}</span></td><td>${escapeHtml(emp.job_role || '-')}</td><td>${escapeHtml(scheduleNames.get(emp.work_schedule_id) || 'Sem jornada')}</td><td>${escapeHtml(emp.notes || '-')}</td><td><a href="/employees?edit=${emp.id}">Editar</a></td></tr>`;
           }).join('') || '<tr><td colspan="11">Nenhum colaborador cadastrado.</td></tr>'}
           ${PHONE_MASK_SCRIPT}
         </tbody>
