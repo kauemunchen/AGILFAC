@@ -1025,6 +1025,16 @@ function migrateWorkSchedulesAndPrizeFlag(tenantDb) {
     WHERE start_time IS NULL OR end_time IS NULL
   `);
   ensureColumn(tenantDb, 'employees', 'work_schedule_id', 'INTEGER REFERENCES work_schedules(id)');
+  // Jornadas padrão (cadastradas uma única vez por empresa; podem ser editadas em Cadastros)
+  if (!tenantDb.prepare("SELECT 1 FROM app_settings WHERE key = 'seed_work_schedules_v1'").get()) {
+    const insertSchedule = tenantDb.prepare(`
+      INSERT OR IGNORE INTO work_schedules (name, start_hour, end_hour, start_time, end_time, break_start, break_end, weekdays)
+      VALUES (?, ?, ?, ?, ?, ?, ?, '1,2,3,4,5')
+    `);
+    insertSchedule.run('Primeiro turno', 5, 15, '05:00', '14:48', '09:00', '10:00');
+    insertSchedule.run('Horário normal', 7, 17, '07:00', '16:48', '12:00', '13:00');
+    tenantDb.prepare("INSERT INTO app_settings (key, value, updated_at) VALUES ('seed_work_schedules_v1', '1', CURRENT_TIMESTAMP)").run();
+  }
   ensureColumn(tenantDb, 'op_daily_productions', 'counts_for_prize', 'INTEGER NOT NULL DEFAULT 1');
   ensureColumn(tenantDb, 'hourly_productions', 'counts_for_prize', 'INTEGER NOT NULL DEFAULT 1');
   tenantDb.exec(`
