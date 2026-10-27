@@ -8423,8 +8423,9 @@ function shortHash(value) {
 }
 
 function parseCsvText(text) {
-  const firstLine = text.split(/\r?\n/).find(line => line.trim()) || '';
-  const delimiter = [';', '\t', ','].map(d => [d, firstLine.split(d).length]).sort((a, b) => b[1] - a[1])[0][0];
+  // Separador: o que mais aparece nas primeiras linhas (relatórios do Pontomais começam com linhas de título)
+  const sample = text.split(/\r?\n/).slice(0, 30).join('\n').replace(/"[^"]*"/g, '');
+  const delimiter = [';', '\t', ','].map(d => [d, sample.split(d).length]).sort((a, b) => b[1] - a[1])[0][0];
   const rows = [];
   let row = [];
   let cell = '';
@@ -8509,7 +8510,8 @@ function guessColumns(headers) {
     emp: find(/colaborador|funcionari|nome|empregado/),
     start: find(/inicio|data inicial|^de$|periodo|^data$|data da|dia/),
     end: find(/fim|final|termino|^ate$|data final|retorno/),
-    reason: find(/motivo|tipo|justific|ocorrencia|excec|descri|afastamento|evento/)
+    reason: find(/motivo|tipo|justific|ocorrencia|excec|descri|nota|observ|evento/),
+    flag: find(/atestado\?|e atestado|eh atestado/)
   };
 }
 
@@ -8543,8 +8545,10 @@ function buildAbsenceImportPreview(session, form) {
     emp: form.col_emp ?? session.guess.emp,
     start: form.col_start ?? session.guess.start,
     end: form.col_end ?? session.guess.end,
-    reason: form.col_reason ?? session.guess.reason
+    reason: form.col_reason ?? session.guess.reason,
+    flag: form.col_flag ?? session.guess.flag
   };
+  const isYes = v => /^(sim|s|yes|true|1|x)$/i.test(normalizeText(v));
   const defaultType = form.default_type || 'atestado';
   const employees = db.prepare('SELECT id, full_name, registration_code, start_date, termination_date FROM employees ORDER BY full_name').all();
   const existing = db.prepare('SELECT 1 FROM employee_absences WHERE employee_id = ? AND absence_date = ?');
@@ -8559,13 +8563,24 @@ function buildAbsenceImportPreview(session, form) {
     const startDates = cols.start !== '' ? extractDates(raw[Number(cols.start)]) : [];
     if (!name || !startDates.length) continue;
     const endDates = cols.end !== '' ? extractDates(raw[Number(cols.end)]) : [];
-    const start = startDates[0];
-    let end = endDates[0] || startDates[1] || start;
+    let start = startDates[0];
+    let end = endDates[0] || startDates[1] || '';
+    if (!end) {
+      // Sem término (ex.: afastamento INSS em aberto): vale até o fim do período do relatório
+      const endCellEmpty = cols.end !== '' && !cellToText(raw[Number(cols.end)]);
+      end = endCellEmpty ? (session.period?.end || today()) : start;
+      if (endCellEmpty && session.period?.start && start < session.period.start) start = session.period.start;
+    }
     if (end < start) end = start;
     if (enumerateDates(start, end).length > 200) end = addDaysIso(start, 199);
-    const reason = cols.reason !== '' ? cellToText(raw[Number(cols.reason)]) : '';
-    const reasonKey = shortHash(normalizeText(reason) || '(sem motivo)');
-    if (!reasons.has(reasonKey)) reasons.set(reasonKey, { key: reasonKey, text: reason || '(sem motivo)', count: 0, type: form[`type_${reasonKey}`] || (reason ? guessAbsenceType(reason) : defaultType) });
+    const note = cols.reason !== '' ? cellToText(raw[Number(cols.reason)]) : '';
+    const flagged = cols.flag !== '' ? isYes(raw[Number(cols.flag)]) : false;
+    const reason = cols.flag !== '' && flagged ? `Atestado${note ? ` (${note})` : ''}` : note;
+    // Agrupa motivos parecidos ("2 DIAS", "3 DIAS" com atestado = Sim viram um grupo só)
+    const groupText = flagged ? 'Atestado (É atestado? = Sim)' : (note || '(sem motivo)');
+    const reasonKey = shortHash(normalizeText(groupText));
+    const guessed = flagged ? 'atestado' : (note ? guessAbsenceType(note) : (cols.flag !== '' ? 'outro' : defaultType));
+    if (!reasons.has(reasonKey)) reasons.set(reasonKey, { key: reasonKey, text: groupText, count: 0, type: form[`type_${reasonKey}`] || guessed });
     reasons.get(reasonKey).count += 1;
     const nameKey = shortHash(normalizeText(name));
     if (!names.has(nameKey)) {
@@ -8668,12 +8683,14 @@ function renderAbsenceImportPreview(sessionId, session, preview, role, error = '
           <label>Colaboradora${colSelect('col_emp', preview.cols.emp, false)}</label>
           <label>Data ou início${colSelect('col_start', preview.cols.start, false)}</label>
           <label>Data final${colSelect('col_end', preview.cols.end, true)}</label>
-          <label>Motivo / tipo${colSelect('col_reason', preview.cols.reason, true)}</label>
-          ${preview.cols.reason === '' ? `<label>Tipo para todas as linhas${typeSelect('default_type', preview.defaultType)}</label>` : ''}
+          <label>Motivo / notas${colSelect('col_reason', preview.cols.reason, true)}</label>
+          <label>"É atestado?" (Sim/Não)${colSelect('col_flag', preview.cols.flag, true)}</label>
+          ${preview.cols.reason === '' && preview.cols.flag === '' ? `<label>Tipo para todas as linhas${typeSelect('default_type', preview.defaultType)}</label>` : ''}
         </div>
+        ${session.period ? `<p class="hint">Período do relatório: ${formatDatePtBr(session.period.start)} a ${formatDatePtBr(session.period.end)}. Afastamento sem data de término vale até ${formatDatePtBr(session.period.end)}.</p>` : ''}
         <p class="hint">Quando o relatório traz o nome numa linha e as datas embaixo, as linhas sem nome usam o último nome acima. Só entram dias úteis.</p>
       </section>
-      ${preview.cols.reason !== '' ? `
+      ${preview.cols.reason !== '' || preview.cols.flag !== '' ? `
       <section class="panel">
         <h3>2. Como lançar cada motivo</h3>
         <div class="table-wrap"><table>
@@ -8683,7 +8700,7 @@ function renderAbsenceImportPreview(sessionId, session, preview, role, error = '
       </section>` : ''}
       ${unmatched.length ? `
       <section class="panel">
-        <h3>${preview.cols.reason !== '' ? '3' : '2'}. Nomes não encontrados (${unmatched.length})</h3>
+        <h3>${preview.cols.reason !== '' || preview.cols.flag !== '' ? '3' : '2'}. Nomes não encontrados (${unmatched.length})</h3>
         <p class="hint">Escolha a colaboradora certa ou deixe "Não importar".</p>
         <div class="table-wrap"><table>
           <thead><tr><th>Nome no arquivo</th><th>Linhas</th><th>Colaboradora no AgilFac</th></tr></thead>
@@ -8733,6 +8750,13 @@ async function handleAbsenceImport(req, res, role) {
     const width = Math.max(...rows.map(r => r.length));
     const headers = Array.from({ length: width }, (_, i) => cellToText(rows[headerIndex][i]) || `Coluna ${i + 1}`);
     const session = { slug, fileName: String(form.file_name || 'arquivo'), headers, rows: rows.slice(headerIndex + 1), createdAt: Date.now() };
+    const titleText = rows.slice(0, headerIndex).map(r => r.map(cellToText).join(' ')).join(' ');
+    const periodMatch = titleText.match(/\bde\s+(\d{1,2}\/\d{1,2}\/\d{2,4})\s+(?:at[eé]|a)\s+(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
+    if (periodMatch) {
+      const [ps] = extractDates(periodMatch[1]);
+      const [pe] = extractDates(periodMatch[2]);
+      if (ps && pe) session.period = { start: ps, end: pe };
+    }
     session.guess = guessColumns(headers);
     const id = crypto.randomBytes(12).toString('hex');
     absenceImportSessions.set(id, session);
