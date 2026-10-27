@@ -7425,9 +7425,9 @@ function getActiveEmployees() {
   return db.prepare('SELECT * FROM employees').all().filter(emp => describeEmployeeStatus(emp) === 'Ativo');
 }
 
-function getTargetSnapshot() {
+function getTargetSnapshot(lastDayArg = '') {
   // Período que contém o último dia útil fechado (no 1º dia de um período novo, mostra o anterior)
-  const lastDay = getPreviousBusinessDay(today());
+  const lastDay = lastDayArg || getPreviousBusinessDay(today());
   const range = getPeriodRange('month', lastDay);
   const cutoff = [range.end, lastDay].sort()[0];
   const employees = getActiveEmployees();
@@ -8132,6 +8132,279 @@ async function handleSaveAlerts(form, res, role) {
 }
 // ===============================================================
 
+// ===================== API DE LEITURA (Fiel) =====================
+// Somente leitura, chave por empresa gerada em Parâmetros. Formato: agf_<empresa>_<segredo>.
+// Guardamos só o hash da chave. Resultado por colaboradora só sai se a empresa permitir.
+const apiRateLimit = new Map();
+
+function generateApiKey(slug) {
+  const key = `agf_${slug}_${crypto.randomBytes(24).toString('hex')}`;
+  setAlertSetting('api_key_hash', crypto.createHash('sha256').update(key).digest('hex'));
+  setAlertSetting('api_key_hint', key.slice(-4));
+  setAlertSetting('api_key_created_at', nowPt(new Date().toISOString()));
+  setAlertSetting('api_key_last_used', '');
+  return key;
+}
+
+function stripTags(html) {
+  return String(html || '').replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+}
+
+function apiOp(op) {
+  const remaining = Math.max(Number(op.remaining_quantity || 0), 0);
+  const daysToDelivery = op.delivery_date ? Math.round((new Date(`${op.delivery_date}T00:00:00Z`) - new Date(`${today()}T00:00:00Z`)) / 86400000) : null;
+  return {
+    numero: op.op_number,
+    link: `${APP_BASE_URL}/ops/${op.id}`,
+    produto: op.product_name || null,
+    marca: op.brand || null,
+    colecao: op.collection_name || null,
+    tipo: op.op_type === 'mostruario' ? 'mostruario' : 'producao',
+    situacao: stripTags(STATUS_TXT[op.status_color] || op.status_color).replace(/^\S+\s/, ''),
+    cor_status: op.status_color,
+    pecas_total: Number(op.total_pieces || 0),
+    pecas_contadas: Number(op.counted_quantity || 0),
+    pecas_faltam: remaining,
+    pecas_com_problema: Number(op.problem_quantity || 0),
+    celula: op.active_cell_name || null,
+    pecas_em_celula: Math.max(Number(op.open_in_cells_quantity || 0), 0),
+    minutos_por_peca: Number(op.minutes_f21 || 0),
+    minutos_faltam: round2(remaining * Number(op.minutes_f21 || 0)),
+    minutos_produzidos: round2(Number(op.produced_minutes || 0)),
+    entrada: op.entry_date || null,
+    entrega: op.delivery_date || null,
+    dias_para_entrega: daysToDelivery,
+    atrasada: Boolean(op.delivery_date && op.delivery_date < today() && !op.shipped_at),
+    embarcada_em: op.shipped_at ? String(op.shipped_at).slice(0, 10) : null,
+    cobrada: Boolean(op.is_billed)
+  };
+}
+
+function apiDateRange(query, defaultDays = 30) {
+  const valid = d => /^\d{4}-\d{2}-\d{2}$/.test(String(d || ''));
+  const end = valid(query.fim) ? query.fim : today();
+  const start = valid(query.inicio) ? query.inicio : addDaysIso(end, -(defaultDays - 1));
+  return start <= end ? { start, end } : { start: end, end: start };
+}
+
+const API_ROUTES = {
+  resumo() {
+    const snap = getTargetSnapshot();
+    const open = openOpsWithRemaining();
+    const f = getQueueForecast();
+    const todayMin = db.prepare(`SELECT COALESCE(SUM(p.produced_minutes), 0) AS m, COALESCE(SUM(p.produced_quantity), 0) AS q FROM op_daily_productions p JOIN ops o ON o.id = p.op_id WHERE ${COUNTED_PRODUCTION_WHERE} AND p.production_date = ?`).get(today());
+    const lastDay = getPreviousBusinessDay(today());
+    const lastMin = db.prepare(`SELECT COALESCE(SUM(p.produced_minutes), 0) AS m FROM op_daily_productions p JOIN ops o ON o.id = p.op_id WHERE ${COUNTED_PRODUCTION_WHERE} AND p.production_date = ?`).get(lastDay).m;
+    return {
+      empresa: getCompanyName(),
+      data: today(),
+      meta_percentual: targetPercent(),
+      periodo: { inicio: snap.range.start, fim: snap.range.end, corte: snap.cutoff },
+      eficiencia_ate_corte: snap.total.pct,
+      minutos_ate_corte: snap.total.minutes,
+      minutos_base_ate_corte: snap.total.base,
+      colaboradoras_ativas: getActiveEmployees().length,
+      colaboradoras_abaixo_da_meta: snap.rows.filter(r => r.pct < targetPercent()).length,
+      producao_hoje: { minutos: round2(todayMin.m), pecas: Number(todayMin.q) },
+      producao_ultimo_dia_util: { data: lastDay, minutos: round2(lastMin) },
+      ops_em_aberto: open.length,
+      ops_atrasadas: open.filter(op => op.delivery_date && op.delivery_date < today()).length,
+      ops_vencem_3_dias: open.filter(op => op.delivery_date && op.delivery_date >= today() && op.delivery_date <= addDaysIso(today(), 3)).length,
+      ops_sem_data_entrega: open.filter(op => !op.delivery_date).length,
+      ops_em_celula: open.filter(op => op.status_color === 'rosa').length,
+      ops_com_ocorrencia: open.filter(op => op.status_color === 'amarelo').length,
+      ops_prontas_aguardando_embarque: db.prepare("SELECT COUNT(*) AS n FROM ops WHERE is_reversed = 0 AND status_color = 'azul' AND shipped_at IS NULL").get().n,
+      ops_embarcadas_sem_cobranca: db.prepare("SELECT COUNT(*) AS n FROM ops WHERE is_reversed = 0 AND shipped_at IS NOT NULL AND COALESCE(is_billed, 0) = 0 AND COALESCE(lifecycle_type, 'normal') = 'normal'").get().n,
+      fila: { dias_uteis: f.queueDays, termino_estimado: f.finishDate || null, minutos: f.queueMinutes, pecas: f.queuePieces, capacidade_minutos_dia: f.dailyCapacity }
+    };
+  },
+  ops(query) {
+    const situacao = String(query.situacao || 'aberta');
+    let list = getOpList({}).filter(op => !op.is_reversed);
+    const isOpen = op => ['verde', 'amarelo', 'rosa'].includes(op.status_color) && !op.shipped_at && !isReturnedWithoutProductionLifecycle(op.lifecycle_type);
+    const filters = {
+      aberta: isOpen,
+      atrasada: op => isOpen(op) && op.delivery_date && op.delivery_date < today(),
+      celula: op => op.status_color === 'rosa',
+      ocorrencia: op => op.status_color === 'amarelo',
+      pronta: op => op.status_color === 'azul' && !op.shipped_at,
+      embarcada: op => Boolean(op.shipped_at),
+      sem_cobranca: op => Boolean(op.shipped_at) && !op.is_billed,
+      todas: () => true
+    };
+    if (!filters[situacao]) return { erro: `situacao inválida. Use: ${Object.keys(filters).join(', ')}`, status: 400 };
+    list = list.filter(filters[situacao]);
+    if (query.marca) list = list.filter(op => String(op.brand || '').toLowerCase().includes(String(query.marca).toLowerCase()));
+    if (query.busca) { const q = String(query.busca).toLowerCase(); list = list.filter(op => `${op.op_number} ${op.product_name} ${op.brand} ${op.collection_name}`.toLowerCase().includes(q)); }
+    list.sort((a, b) => String(a.delivery_date || '9999').localeCompare(String(b.delivery_date || '9999')) || String(a.op_number).localeCompare(String(b.op_number)));
+    const limit = Math.min(Math.max(Number(query.limite) || 200, 1), 1000);
+    return { situacao, total: list.length, ops: list.slice(0, limit).map(apiOp) };
+  },
+  op(query, numero) {
+    const found = getOpByNumber(numero);
+    const detail = found ? getOpDetail(found.id) : null;
+    if (!detail) return { erro: 'OP não encontrada', status: 404 };
+    const op = { ...detail.op, active_cell_name: found.active_cell_name };
+    return {
+      ...apiOp(op),
+      ocorrencias_abertas: detail.occurrences.filter(o => !o.is_concluded).map(o => ({ aberta_em: o.opened_at, descricao: o.description })),
+      pecas_com_problema_detalhe: detail.problemHistory.map(p => ({ data: p.problem_date, quantidade: p.quantity, motivo: p.reason })),
+      embarques: detail.shipmentHistory.map(s => ({ numero: s.shipment_number, data: s.shipment_date, minutos_costura: s.sewing_minutes })),
+      producao_por_dia: Object.values(detail.history.reduce((acc, h) => {
+        acc[h.production_date] = acc[h.production_date] || { data: h.production_date, pecas: 0, minutos: 0 };
+        acc[h.production_date].pecas += Number(h.produced_quantity || 0);
+        acc[h.production_date].minutos = round2(acc[h.production_date].minutos + Number(h.produced_minutes || 0));
+        return acc;
+      }, {})).sort((a, b) => a.data.localeCompare(b.data))
+    };
+  },
+  producao(query) {
+    const { start, end } = apiDateRange(query, 30);
+    const days = db.prepare(`SELECT p.production_date AS data, ROUND(SUM(p.produced_minutes), 2) AS minutos, SUM(p.produced_quantity) AS pecas FROM op_daily_productions p JOIN ops o ON o.id = p.op_id WHERE ${COUNTED_PRODUCTION_WHERE} AND p.production_date BETWEEN ? AND ? GROUP BY p.production_date ORDER BY p.production_date`).all(start, end);
+    const brands = db.prepare(`SELECT COALESCE(NULLIF(o.brand, ''), 'Sem marca') AS marca, ROUND(SUM(p.produced_minutes), 2) AS minutos, SUM(p.produced_quantity) AS pecas FROM op_daily_productions p JOIN ops o ON o.id = p.op_id WHERE ${COUNTED_PRODUCTION_WHERE} AND p.production_date BETWEEN ? AND ? GROUP BY 1 ORDER BY minutos DESC`).all(start, end);
+    const total = days.reduce((s, d) => s + Number(d.minutos || 0), 0);
+    return { inicio: start, fim: end, minutos_total: round2(total), pecas_total: days.reduce((s, d) => s + Number(d.pecas || 0), 0), por_dia: days, por_marca: brands, observacao: 'Considera só lançamentos que contam para eficiência e prêmio.' };
+  },
+  eficiencia(query) {
+    // ?periodo=anterior traz o período fechado anterior inteiro
+    let snap = getTargetSnapshot();
+    if (query.periodo === 'anterior') snap = getTargetSnapshot(addDaysIso(snap.range.start, -1));
+    const result = {
+      periodo: { inicio: snap.range.start, fim: snap.range.end, corte: snap.cutoff },
+      meta_percentual: targetPercent(),
+      base_minutos_dia: baseMinutesDay(),
+      empresa: { percentual: snap.total.pct, minutos: snap.total.minutes, minutos_base: snap.total.base },
+      colaboradoras_total: snap.rows.length,
+      colaboradoras_abaixo_da_meta: snap.rows.filter(r => r.pct < targetPercent()).length
+    };
+    if (getAlertSetting('api_allow_individual') === '1') {
+      result.colaboradoras = [...snap.rows].sort((a, b) => b.pct - a.pct).map(r => ({ nome: r.emp.full_name, percentual: r.pct, minutos: r.minutes, minutos_base: r.base, atingiu_meta: r.pct >= targetPercent() }));
+    } else {
+      result.colaboradoras = null;
+      result.observacao = 'Resultado por colaboradora desativado em Parâmetros → API de leitura.';
+    }
+    return result;
+  },
+  embarques(query) {
+    const { start, end } = apiDateRange(query, 30);
+    const rows = db.prepare('SELECT id, shipment_number, shipment_date, total_ops, sewing_minutes, post_sewing_minutes, total_minutes FROM shipments WHERE COALESCE(is_reversed, 0) = 0 AND shipment_date BETWEEN ? AND ? ORDER BY shipment_date, id').all(start, end);
+    const items = db.prepare('SELECT si.op_number FROM shipment_items si WHERE si.shipment_id = ?');
+    return {
+      inicio: start, fim: end,
+      total_embarques: rows.length,
+      total_ops: rows.reduce((s, r) => s + Number(r.total_ops || 0), 0),
+      minutos_costura: round2(rows.reduce((s, r) => s + Number(r.sewing_minutes || 0), 0)),
+      embarques: rows.map(r => ({ numero: r.shipment_number, data: r.shipment_date, ops: items.all(r.id).map(i => i.op_number), minutos_costura: r.sewing_minutes, minutos_pos_costura: r.post_sewing_minutes, minutos_total: r.total_minutes }))
+    };
+  },
+  fila() {
+    const f = getQueueForecast();
+    return { ops_em_aberto: f.openOps, pecas: f.queuePieces, minutos: f.queueMinutes, capacidade_minutos_dia: f.dailyCapacity, dias_uteis: f.queueDays, termino_estimado: f.finishDate || null, dias_amostra: f.sampleDays };
+  },
+  alertas() {
+    const keys = ['cell_stuck', 'delivery_late', 'delivery_soon', 'no_delivery_date', 'op_idle', 'ready_not_shipped', 'occurrence_open', 'reject_rate', 'company_below_target', 'unbilled'];
+    if (getAlertSetting('api_allow_individual') === '1') keys.push('no_launch', 'below_target');
+    const out = [];
+    for (const key of keys) {
+      const rule = ALERT_CATALOG.find(r => r.key === key);
+      try {
+        const items = ALERT_RULES[key]() || [];
+        if (items.length) out.push({ alerta: key, titulo: rule.label, itens: items.map(i => stripTags(i.text)) });
+      } catch (_) { /* regra com problema não derruba a resposta */ }
+    }
+    return { data: today(), alertas: out };
+  }
+};
+
+async function handleReadApi(req, res, pathname, query) {
+  const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Authorization', 'Cache-Control': 'no-store' };
+  const send = (payload, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', ...cors }); res.end(JSON.stringify(payload)); };
+  if (req.method === 'OPTIONS') { res.writeHead(204, { ...cors, 'Access-Control-Allow-Methods': 'GET' }); return res.end(); }
+  if (req.method !== 'GET') return send({ erro: 'Somente leitura (GET).' }, 405);
+  const header = String(req.headers.authorization || '');
+  const key = header.replace(/^Bearer\s+/i, '').trim();
+  const m = key.match(/^agf_([a-z0-9-]+)_([a-f0-9]{48})$/);
+  if (!m) return send({ erro: 'Chave ausente ou inválida. Envie Authorization: Bearer <chave>.' }, 401);
+  const now = Date.now();
+  const rl = apiRateLimit.get(key) || { start: now, count: 0 };
+  if (now - rl.start > 60000) { rl.start = now; rl.count = 0; }
+  rl.count += 1;
+  apiRateLimit.set(key, rl);
+  if (rl.count > 120) return send({ erro: 'Limite de 120 consultas por minuto.' }, 429);
+  const company = masterDb.prepare('SELECT * FROM companies WHERE LOWER(slug) = ? AND is_active = 1').get(m[1]);
+  if (!company) return send({ erro: 'Chave inválida.' }, 401);
+  let tenantDb;
+  try { tenantDb = getTenantDbForCompany(company); } catch (_) { return send({ erro: 'Empresa indisponível.' }, 503); }
+  return requestContext.run({ tenantDb, auth: { company, user: null, role: 'api' } }, async () => {
+    const stored = getAlertSetting('api_key_hash');
+    const hash = crypto.createHash('sha256').update(key).digest('hex');
+    if (!stored || stored.length !== hash.length || !crypto.timingSafeEqual(Buffer.from(stored), Buffer.from(hash))) return send({ erro: 'Chave inválida.' }, 401);
+    if (getAlertSetting('api_last_used_minute') !== String(Math.floor(now / 60000))) {
+      setAlertSetting('api_last_used_minute', String(Math.floor(now / 60000)));
+      setAlertSetting('api_key_last_used', nowPt(new Date().toISOString()));
+    }
+    const parts = pathname.replace(/^\/api\/v1\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
+    const route = parts[0] || '';
+    if (!route) return send({ api: 'AgilFac leitura v1', empresa: getCompanyName(), rotas: ['/api/v1/resumo', '/api/v1/ops?situacao=aberta|atrasada|celula|ocorrencia|pronta|embarcada|sem_cobranca|todas&marca=&busca=&limite=', '/api/v1/ops/<numero>', '/api/v1/producao?inicio=AAAA-MM-DD&fim=AAAA-MM-DD', '/api/v1/eficiencia?periodo=atual|anterior', '/api/v1/embarques?inicio=&fim=', '/api/v1/fila', '/api/v1/alertas'] });
+    try {
+      let result;
+      if (route === 'ops' && parts[1]) result = API_ROUTES.op(query, parts[1]);
+      else if (API_ROUTES[route] && route !== 'op') result = API_ROUTES[route](query);
+      else return send({ erro: 'Rota não encontrada. Veja /api/v1' }, 404);
+      if (result && result.erro) return send({ erro: result.erro }, result.status || 400);
+      return send(result);
+    } catch (error) {
+      console.error(`API ${pathname} (${company.slug}):`, error.message);
+      return send({ erro: 'Falha ao consultar.' }, 500);
+    }
+  });
+}
+
+function renderApiSection(slug) {
+  const hint = getAlertSetting('api_key_hint');
+  return `
+    <section class="panel" id="api">
+      <h3>API de leitura (Fiel e integrações)</h3>
+      <p class="hint">Permite que o Fiel (e outros sistemas autorizados) consultem OPs, entregas, produção, eficiência, fila e embarques. Só leitura: nada é alterado no AgilFac.</p>
+      <form method="post" action="/parametros/api" class="alerts-form">
+        <p>${hint ? `Chave ativa terminando em <strong>…${escapeHtml(hint)}</strong> · criada em ${escapeHtml(getAlertSetting('api_key_created_at'))}${getAlertSetting('api_key_last_used') ? ` · último uso ${escapeHtml(getAlertSetting('api_key_last_used'))}` : ' · ainda não usada'}` : 'Nenhuma chave gerada.'}</p>
+        <p class="hint">Endereço: <code>${escapeHtml(APP_BASE_URL)}/api/v1</code> · cabeçalho <code>Authorization: Bearer &lt;chave&gt;</code></p>
+        <label class="checkbox-line"><input type="checkbox" name="api_allow_individual" value="1" ${getAlertSetting('api_allow_individual') === '1' ? 'checked' : ''} /> Permitir resultado por colaboradora (nome e eficiência)</label>
+        <div class="actions">
+          <button class="btn secondary" type="submit" name="action" value="save">Salvar</button>
+          <button class="btn" type="submit" name="action" value="generate" ${hint ? 'onclick="return confirm(\'Gerar nova chave? A atual para de funcionar.\')"' : ''}>${hint ? 'Gerar nova chave' : 'Gerar chave'}</button>
+          ${hint ? '<button class="btn secondary" type="submit" name="action" value="revoke" onclick="return confirm(\'Revogar a chave? As integrações param de funcionar.\')">Revogar</button>' : ''}
+        </div>
+      </form>
+    </section>`;
+}
+
+function handleSaveApi(form, res, role) {
+  if (!isAdminRole(role)) return requireAdmin(null, res, role);
+  setAlertSetting('api_allow_individual', form.api_allow_individual === '1' ? '1' : '0');
+  if (form.action === 'revoke') {
+    ['api_key_hash', 'api_key_hint', 'api_key_created_at', 'api_key_last_used'].forEach(k => setAlertSetting(k, ''));
+    return redirect(res, `/parametros?notice=${encodeURIComponent('Chave revogada.')}#api`);
+  }
+  if (form.action === 'generate') {
+    const slug = String(getRequestAuth()?.company?.slug || '').toLowerCase();
+    const key = generateApiKey(slug);
+    return sendHtml(res, pageLayout({
+      title: 'Chave da API gerada',
+      role,
+      content: `
+        <section class="panel">
+          <h3>Copie a chave agora</h3>
+          <p>Ela aparece <strong>só esta vez</strong>. Cole no Fiel (módulo Gestor de produção). Não envie por mensagem nem e-mail.</p>
+          <p><input type="text" readonly value="${escapeHtml(key)}" style="width:100%;font-family:monospace" onclick="this.select()" /></p>
+          <div class="actions"><button class="btn secondary" type="button" onclick="navigator.clipboard.writeText('${escapeHtml(key)}');this.textContent='Copiada'">Copiar</button><a class="btn" href="/parametros#api">Voltar para Parâmetros</a></div>
+        </section>`
+    }));
+  }
+  return redirect(res, `/parametros?notice=${encodeURIComponent('API de leitura atualizada.')}#api`);
+}
+// ===============================================================
+
 // ===================== TELA PARÂMETROS =====================
 const ABSENCE_TYPE_LABELS = { falta: 'Falta', atestado: 'Atestado', ferias: 'Férias', folga: 'Folga', afastamento: 'Afastamento', outro: 'Outro' };
 
@@ -8199,7 +8472,8 @@ function renderParametersPage(query = {}, values = null, error = '', role = 'adm
         <div class="actions"><button class="btn" type="submit">Salvar parâmetros</button><a class="btn secondary" href="/parametros">Descartar alterações</a></div>
       </section>
     </form>
-    ${renderAlertsSection()}`;
+    ${renderAlertsSection()}
+    ${renderApiSection()}`;
   return pageLayout({ title: 'Parâmetros', content, notice: query.notice || '', error: error || query.error || '', role });
 }
 
@@ -10775,6 +11049,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname.startsWith('/public/')) return serveStatic(pathname, res);
+    if (pathname === '/api/v1' || pathname.startsWith('/api/v1/')) return handleReadApi(req, res, pathname, query);
     // T1.6 — app instalável (PWA): manifest e service worker na raiz para valer em todo o site
     if (req.method === 'GET' && pathname === '/manifest.webmanifest') return serveStatic('/public/manifest.webmanifest', res);
     if (req.method === 'GET' && pathname === '/sw.js') {
@@ -10891,6 +11166,7 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === 'POST' && pathname === '/parametros') return handleSaveParameters(await parseBody(req), res, role);
       if (req.method === 'POST' && pathname === '/parametros/alertas') return handleSaveAlerts(await parseBody(req), res, role);
+      if (req.method === 'POST' && pathname === '/parametros/api') return handleSaveApi(await parseBody(req), res, role);
       const workScheduleToggleMatch = pathname.match(/^\/work-schedules\/(\d+)\/toggle$/);
       if (req.method === 'POST' && workScheduleToggleMatch) return handleToggleWorkSchedule(Number(workScheduleToggleMatch[1]), res, role);
       const workScheduleUpdateMatch = pathname.match(/^\/work-schedules\/(\d+)$/);
