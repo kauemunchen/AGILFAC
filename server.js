@@ -1503,12 +1503,12 @@ function calculateProductionLaunchMetrics(op, producedQuantity, usedMinutesF21, 
   };
 }
 
-function parseBody(req) {
+function parseBody(req, maxBytes = 1_000_000) {
   return new Promise((resolve, reject) => {
     let raw = '';
     req.on('data', chunk => {
       raw += chunk;
-      if (raw.length > 1_000_000) {
+      if (raw.length > maxBytes) {
         reject(new Error('Payload muito grande'));
         req.destroy();
       }
@@ -2200,7 +2200,7 @@ function renderRoleSwitcher(role) {
 const NAV_GROUPS = [
   { key: 'producao', label: 'Produção', hrefs: ['/', '/acompanhamento/diario', '/productions/hourly', '/productions/new', '/ops/new', '/ops', '/labels/entry', '/op-extra-times'] },
   { key: 'expedicao', label: 'Expedição', hrefs: ['/shipments/new', '/shipments', '/labels/shipment'] },
-  { key: 'financeiro', label: 'Financeiro', hrefs: ['/billing-reconciliation', '/closures', '/premios/producao', '/cells/report', '/cells/closures'] },
+  { key: 'financeiro', label: 'Financeiro', hrefs: ['/billing-reconciliation', '/closures', '/ausencias/importar', '/premios/producao', '/cells/report', '/cells/closures'] },
   { key: 'pessoas', label: 'Pessoas', hrefs: ['/employees'] },
   { key: 'config', label: 'Configurações', hrefs: ['/cadastros', '/parametros', '/admin/access', '/estornos'] }
 ];
@@ -2262,7 +2262,7 @@ function pageLayout({ title, content, notice = '', error = '', role = 'adm' }) {
         { href: '/shipments', label: 'Consulta emb.', icon: '📋', active: title.startsWith('Embarques') },
         { href: '/labels/shipment', label: 'Etiq. emb.', icon: '🧾', active: title.startsWith('Etiquetas de embarque') },
         { href: '/employees', label: 'Colaboradores', icon: '👥', active: title === 'Novo colaborador' || title.startsWith('Colaboradores') },
-        { href: '/closures', label: 'Fechamento', icon: '📊', active: title.startsWith('Fechamento') },
+        { href: '/closures', label: 'Fechamento', icon: '📊', active: title.startsWith('Fechamento') || title === 'Importar ausências' },
         { href: '/premios/producao', label: 'Prêmio prod.', icon: '💰', active: title.startsWith('Prêmio de produção') },
         { href: '/cells/report', label: 'Célula', icon: '🩷', active: title.startsWith('Célula') },
         { href: '/cells/closures', label: 'Fech. células', icon: '🧮', active: title.startsWith('Fechamento de células') }
@@ -4356,6 +4356,7 @@ function renderMonthlyClosurePage(query = {}, role = 'adm') {
         <h2>Fechamento + relatórios</h2>
         <p>Visão operacional do fechamento com pendências, ausências, dias sem lançamento e relatórios básicos por período.</p>
       </div>
+      ${isAdminRole(role) ? '<div class="actions"><a class="btn secondary" href="/ausencias/importar">Importar ausências (Pontomais)</a></div>' : ''}
     </section>
 
     ${renderClosureFilters(data)}
@@ -8405,6 +8406,363 @@ function handleSaveApi(form, res, role) {
 }
 // ===============================================================
 
+// ===================== IMPORTAÇÃO DE AUSÊNCIAS (Pontomais por arquivo) =====================
+// O administrador exporta um relatório do Pontomais (Excel ou CSV), envia aqui, confere a prévia e confirma.
+// Ausência já lançada à mão não é sobrescrita (mesma colaboradora + mesmo dia é ignorado).
+const ABSENCE_IMPORT_TYPES = [
+  ['atestado', 'Atestado'], ['ferias', 'Férias'], ['folga', 'Folga'], ['afastamento', 'Afastamento'], ['falta', 'Falta'], ['outro', 'Outro'], ['ignorar', 'Não importar']
+];
+const absenceImportSessions = new Map();
+
+function normalizeText(value) {
+  return String(value ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function shortHash(value) {
+  return crypto.createHash('sha1').update(String(value)).digest('hex').slice(0, 10);
+}
+
+function parseCsvText(text) {
+  const firstLine = text.split(/\r?\n/).find(line => line.trim()) || '';
+  const delimiter = [';', '\t', ','].map(d => [d, firstLine.split(d).length]).sort((a, b) => b[1] - a[1])[0][0];
+  const rows = [];
+  let row = [];
+  let cell = '';
+  let quoted = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch === '"' && text[i + 1] === '"') { cell += '"'; i += 1; }
+      else if (ch === '"') quoted = false;
+      else cell += ch;
+    } else if (ch === '"') quoted = true;
+    else if (ch === delimiter) { row.push(cell); cell = ''; }
+    else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && text[i + 1] === '\n') i += 1;
+      row.push(cell); rows.push(row); row = []; cell = '';
+    } else cell += ch;
+  }
+  if (cell || row.length) { row.push(cell); rows.push(row); }
+  return rows;
+}
+
+function readSpreadsheetRows(buffer, fileName) {
+  const isZip = buffer.length > 4 && buffer[0] === 0x50 && buffer[1] === 0x4b;
+  const isOldXls = buffer.length > 4 && buffer[0] === 0xd0 && buffer[1] === 0xcf;
+  if (!isZip && !isOldXls) {
+    let text = buffer.toString('utf8');
+    if (text.includes('�')) text = buffer.toString('latin1');
+    return parseCsvText(text.replace(/^﻿/, ''));
+  }
+  const XLSX = require('xlsx');
+  const book = XLSX.read(buffer, { type: 'buffer', cellDates: false });
+  let best = [];
+  for (const name of book.SheetNames) {
+    const rows = XLSX.utils.sheet_to_json(book.Sheets[name], { header: 1, raw: true, defval: '' });
+    if (rows.length > best.length) best = rows;
+  }
+  return best;
+}
+
+function cellToText(value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'number') return String(value);
+  return String(value).trim();
+}
+
+// Datas: dd/mm/aaaa, dd/mm/aa, aaaa-mm-dd ou número de data do Excel. Pode haver duas datas (período) na mesma célula.
+function extractDates(value) {
+  if (typeof value === 'number' && value > 20000 && value < 80000) {
+    // Datas gravadas como "23:59:59 do dia anterior" (arredondamento de planilha) contam como o dia seguinte
+    const serial = value % 1 > 0.99 ? Math.ceil(value) : Math.floor(value);
+    const p = require('xlsx').SSF.parse_date_code(serial);
+    return p ? [`${p.y}-${String(p.m).padStart(2, '0')}-${String(p.d).padStart(2, '0')}`] : [];
+  }
+  const text = String(value || '');
+  const found = [];
+  const re = /(\d{4})-(\d{2})-(\d{2})|(\d{1,2})\/(\d{1,2})\/(\d{2,4})/g;
+  let m;
+  while ((m = re.exec(text))) {
+    let iso;
+    if (m[1]) iso = `${m[1]}-${m[2]}-${m[3]}`;
+    else iso = `${m[6].length === 2 ? `20${m[6]}` : m[6]}-${m[5].padStart(2, '0')}-${m[4].padStart(2, '0')}`;
+    const d = new Date(`${iso}T00:00:00Z`);
+    if (!Number.isNaN(d.getTime()) && iso === d.toISOString().slice(0, 10)) found.push(iso);
+  }
+  return found;
+}
+
+function guessAbsenceType(reason) {
+  const r = normalizeText(reason);
+  if (!r) return '';
+  if (/atest|medic|doenc|cid\b|saude|consulta|hospital/.test(r)) return 'atestado';
+  if (/ferias/.test(r)) return 'ferias';
+  if (/afast|licen|inss|matern|patern|acidente|auxilio/.test(r)) return 'afastamento';
+  if (/folga|compens|banco de horas|abono|dispensa|day ?off/.test(r)) return 'folga';
+  if (/falta|ausencia|nao compareceu/.test(r)) return 'falta';
+  return 'outro';
+}
+
+function guessColumns(headers) {
+  const find = re => { const i = headers.findIndex(h => re.test(normalizeText(h))); return i >= 0 ? String(i) : ''; };
+  return {
+    emp: find(/colaborador|funcionari|nome|empregado/),
+    start: find(/inicio|data inicial|^de$|periodo|^data$|data da|dia/),
+    end: find(/fim|final|termino|^ate$|data final|retorno/),
+    reason: find(/motivo|tipo|justific|ocorrencia|excec|descri|afastamento|evento/)
+  };
+}
+
+function detectHeaderRow(rows) {
+  const keywords = /colaborador|funcionari|nome|data|inicio|motivo|tipo|periodo/;
+  for (let i = 0; i < Math.min(rows.length, 20); i += 1) {
+    const cells = rows[i].map(cellToText).filter(Boolean);
+    if (cells.length >= 2 && cells.some(c => keywords.test(normalizeText(c)))) return i;
+  }
+  return 0;
+}
+
+function matchEmployee(name, employees) {
+  const n = normalizeText(name).replace(/^\d+\s*[-–]\s*/, '');
+  if (!n) return null;
+  const exact = employees.find(e => normalizeText(e.full_name) === n);
+  if (exact) return exact;
+  const byCode = employees.find(e => e.registration_code && normalizeText(e.registration_code) === n);
+  if (byCode) return byCode;
+  const parts = n.split(' ');
+  if (parts.length >= 2) {
+    const firstLast = employees.filter(e => { const p = normalizeText(e.full_name).split(' '); return p[0] === parts[0] && p[p.length - 1] === parts[parts.length - 1]; });
+    if (firstLast.length === 1) return firstLast[0];
+  }
+  const contains = employees.filter(e => normalizeText(e.full_name).includes(n) || n.includes(normalizeText(e.full_name)));
+  return contains.length === 1 ? contains[0] : null;
+}
+
+function buildAbsenceImportPreview(session, form) {
+  const cols = {
+    emp: form.col_emp ?? session.guess.emp,
+    start: form.col_start ?? session.guess.start,
+    end: form.col_end ?? session.guess.end,
+    reason: form.col_reason ?? session.guess.reason
+  };
+  const defaultType = form.default_type || 'atestado';
+  const employees = db.prepare('SELECT id, full_name, registration_code, start_date, termination_date FROM employees ORDER BY full_name').all();
+  const existing = db.prepare('SELECT 1 FROM employee_absences WHERE employee_id = ? AND absence_date = ?');
+  const reasons = new Map();
+  const names = new Map();
+  const lines = [];
+  let lastName = '';
+  for (const raw of session.rows) {
+    const nameCell = cols.emp !== '' ? cellToText(raw[Number(cols.emp)]) : '';
+    if (nameCell) lastName = nameCell;
+    const name = nameCell || lastName;
+    const startDates = cols.start !== '' ? extractDates(raw[Number(cols.start)]) : [];
+    if (!name || !startDates.length) continue;
+    const endDates = cols.end !== '' ? extractDates(raw[Number(cols.end)]) : [];
+    const start = startDates[0];
+    let end = endDates[0] || startDates[1] || start;
+    if (end < start) end = start;
+    if (enumerateDates(start, end).length > 200) end = addDaysIso(start, 199);
+    const reason = cols.reason !== '' ? cellToText(raw[Number(cols.reason)]) : '';
+    const reasonKey = shortHash(normalizeText(reason) || '(sem motivo)');
+    if (!reasons.has(reasonKey)) reasons.set(reasonKey, { key: reasonKey, text: reason || '(sem motivo)', count: 0, type: form[`type_${reasonKey}`] || (reason ? guessAbsenceType(reason) : defaultType) });
+    reasons.get(reasonKey).count += 1;
+    const nameKey = shortHash(normalizeText(name));
+    if (!names.has(nameKey)) {
+      const override = form[`emp_${nameKey}`];
+      const auto = matchEmployee(name, employees);
+      const chosen = override === 'ignorar' ? null : (override ? employees.find(e => String(e.id) === String(override)) : auto);
+      names.set(nameKey, { key: nameKey, text: name, auto, employee: chosen || null, ignored: override === 'ignorar', count: 0 });
+    }
+    names.get(nameKey).count += 1;
+    lines.push({ name, nameKey, reason, reasonKey, start, end });
+  }
+  let toInsert = [];
+  let skippedExisting = 0;
+  let skippedIgnored = 0;
+  let skippedNoEmployee = 0;
+  for (const line of lines) {
+    const person = names.get(line.nameKey);
+    const type = reasons.get(line.reasonKey).type;
+    const days = enumerateDates(line.start, line.end).filter(isBusinessDay);
+    line.days = days.length;
+    line.type = type;
+    line.employee = person.employee;
+    if (!person.employee) { skippedNoEmployee += days.length; line.status = person.ignored ? 'ignorada' : 'sem colaboradora'; continue; }
+    if (type === 'ignorar') { skippedIgnored += days.length; line.status = 'não importar'; continue; }
+    let added = 0;
+    for (const day of days) {
+      if (existing.get(person.employee.id, day) || toInsert.some(t => t.employee_id === person.employee.id && t.day === day)) { skippedExisting += 1; continue; }
+      toInsert.push({ employee_id: person.employee.id, day, type, reason: line.reason });
+      added += 1;
+    }
+    line.status = added ? `${added} dia(s) novo(s)` : 'já lançado';
+  }
+  return { cols, defaultType, employees, reasons: [...reasons.values()], names: [...names.values()], lines, toInsert, skippedExisting, skippedIgnored, skippedNoEmployee };
+}
+
+function renderAbsenceImportUpload(role, error = '') {
+  const content = `
+    <section class="page-header">
+      <div>
+        <h2>Importar ausências do Pontomais</h2>
+        <p>Envie o relatório exportado do Pontomais (Excel ou CSV). Você confere a prévia antes de gravar. Ausências já lançadas à mão não são alteradas.</p>
+      </div>
+    </section>
+    <section class="panel">
+      <form method="post" action="/ausencias/importar" id="absence-upload">
+        <input type="hidden" name="action" value="upload" />
+        <input type="hidden" name="file_b64" id="file_b64" />
+        <input type="hidden" name="file_name" id="file_name" />
+        <label>Arquivo (.xlsx, .xls ou .csv)
+          <input type="file" id="file_input" accept=".xlsx,.xls,.csv,text/csv" required />
+        </label>
+        <div class="actions"><button class="btn" type="submit" id="upload_btn">Enviar e ver prévia</button></div>
+        <p class="hint">No Pontomais: relatório de afastamentos/ausências ou "Exceções de jornada e atestados" de um período fechado, exportado em Excel ou CSV. O relatório precisa ter o nome da colaboradora, a data (ou início e fim) e, de preferência, o motivo.</p>
+      </form>
+    </section>
+    <script>
+      (function () {
+        const form = document.getElementById('absence-upload');
+        form.addEventListener('submit', function (event) {
+          event.preventDefault();
+          const file = document.getElementById('file_input').files[0];
+          if (!file) return;
+          if (file.size > 8 * 1024 * 1024) { alert('Arquivo maior que 8 MB. Exporte um período menor.'); return; }
+          const reader = new FileReader();
+          reader.onload = function () {
+            document.getElementById('file_b64').value = String(reader.result).split(',')[1] || '';
+            document.getElementById('file_name').value = file.name;
+            document.getElementById('upload_btn').disabled = true;
+            document.getElementById('upload_btn').textContent = 'Lendo arquivo…';
+            form.submit();
+          };
+          reader.readAsDataURL(file);
+        });
+      })();
+    </script>`;
+  return pageLayout({ title: 'Importar ausências', content, error, role });
+}
+
+function renderAbsenceImportPreview(sessionId, session, preview, role, error = '') {
+  const colSelect = (name, value, optional) => `
+    <select name="${name}">
+      ${optional ? `<option value="" ${value === '' ? 'selected' : ''}>— não usar —</option>` : ''}
+      ${session.headers.map((h, i) => `<option value="${i}" ${String(value) === String(i) ? 'selected' : ''}>${escapeHtml(h || `Coluna ${i + 1}`)}</option>`).join('')}
+    </select>`;
+  const typeSelect = (name, value) => `<select name="${name}">${ABSENCE_IMPORT_TYPES.map(([k, l]) => `<option value="${k}" ${value === k ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
+  const unmatched = preview.names.filter(n => !n.auto);
+  const typeLabel = Object.fromEntries(ABSENCE_IMPORT_TYPES);
+  const content = `
+    <section class="page-header">
+      <div>
+        <h2>Importar ausências · prévia</h2>
+        <p>Arquivo <strong>${escapeHtml(session.fileName)}</strong> · ${session.rows.length} linha(s) lida(s). Nada foi gravado ainda.</p>
+      </div>
+    </section>
+    <form method="post" action="/ausencias/importar">
+      <input type="hidden" name="session" value="${escapeHtml(sessionId)}" />
+      <section class="panel">
+        <h3>1. Colunas do arquivo</h3>
+        <div class="form-grid">
+          <label>Colaboradora${colSelect('col_emp', preview.cols.emp, false)}</label>
+          <label>Data ou início${colSelect('col_start', preview.cols.start, false)}</label>
+          <label>Data final${colSelect('col_end', preview.cols.end, true)}</label>
+          <label>Motivo / tipo${colSelect('col_reason', preview.cols.reason, true)}</label>
+          ${preview.cols.reason === '' ? `<label>Tipo para todas as linhas${typeSelect('default_type', preview.defaultType)}</label>` : ''}
+        </div>
+        <p class="hint">Quando o relatório traz o nome numa linha e as datas embaixo, as linhas sem nome usam o último nome acima. Só entram dias úteis.</p>
+      </section>
+      ${preview.cols.reason !== '' ? `
+      <section class="panel">
+        <h3>2. Como lançar cada motivo</h3>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Motivo no Pontomais</th><th>Linhas</th><th>Lançar como</th></tr></thead>
+          <tbody>${preview.reasons.map(r => `<tr><td>${escapeHtml(r.text)}</td><td>${r.count}</td><td>${typeSelect(`type_${r.key}`, r.type)}</td></tr>`).join('')}</tbody>
+        </table></div>
+      </section>` : ''}
+      ${unmatched.length ? `
+      <section class="panel">
+        <h3>${preview.cols.reason !== '' ? '3' : '2'}. Nomes não encontrados (${unmatched.length})</h3>
+        <p class="hint">Escolha a colaboradora certa ou deixe "Não importar".</p>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Nome no arquivo</th><th>Linhas</th><th>Colaboradora no AgilFac</th></tr></thead>
+          <tbody>${unmatched.map(n => `<tr><td>${escapeHtml(n.text)}</td><td>${n.count}</td><td><select name="emp_${n.key}"><option value="ignorar">Não importar</option>${preview.employees.map(e => `<option value="${e.id}" ${n.employee && n.employee.id === e.id ? 'selected' : ''}>${escapeHtml(e.full_name)}${e.termination_date ? ' (desligada)' : ''}</option>`).join('')}</select></td></tr>`).join('')}</tbody>
+        </table></div>
+      </section>` : ''}
+      <section class="panel">
+        <h3>Resultado</h3>
+        <div class="cards">
+          <div class="mini-card"><span>Dias a gravar</span><strong>${preview.toInsert.length}</strong></div>
+          <div class="mini-card"><span>Já lançados (mantidos)</span><strong>${preview.skippedExisting}</strong></div>
+          <div class="mini-card"><span>Sem colaboradora</span><strong>${preview.skippedNoEmployee}</strong></div>
+          <div class="mini-card"><span>Não importar</span><strong>${preview.skippedIgnored}</strong></div>
+        </div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Nome no arquivo</th><th>Colaboradora</th><th>Período</th><th>Dias úteis</th><th>Motivo</th><th>Lançar como</th><th>Situação</th></tr></thead>
+          <tbody>${preview.lines.slice(0, 400).map(l => `<tr><td>${escapeHtml(l.name)}</td><td>${l.employee ? escapeHtml(l.employee.full_name) : '<span class="hint">—</span>'}</td><td>${formatDatePtBr(l.start)}${l.end !== l.start ? ` a ${formatDatePtBr(l.end)}` : ''}</td><td>${l.days}</td><td>${escapeHtml(l.reason || '-')}</td><td>${escapeHtml(typeLabel[l.type] || l.type)}</td><td>${escapeHtml(l.status)}</td></tr>`).join('') || '<tr><td colspan="7">Nenhuma linha com nome e data. Confira as colunas acima.</td></tr>'}</tbody>
+        </table></div>
+        ${preview.lines.length > 400 ? `<p class="hint">Mostrando 400 de ${preview.lines.length} linhas.</p>` : ''}
+        <div class="actions">
+          <button class="btn secondary" type="submit" name="action" value="preview">Atualizar prévia</button>
+          <button class="btn" type="submit" name="action" value="apply" ${preview.toInsert.length ? '' : 'disabled'} onclick="return confirm('Gravar ${preview.toInsert.length} dia(s) de ausência?')">Gravar ${preview.toInsert.length} dia(s)</button>
+          <a class="btn secondary" href="/ausencias/importar">Outro arquivo</a>
+        </div>
+      </section>
+    </form>`;
+  return pageLayout({ title: 'Importar ausências', content, error, role });
+}
+
+async function handleAbsenceImport(req, res, role) {
+  if (!isAdminRole(role)) return requireAdmin(req, res, role);
+  const form = await parseBody(req, 12 * 1024 * 1024);
+  const slug = String(getRequestAuth()?.company?.slug || '');
+  for (const [key, value] of absenceImportSessions) if (Date.now() - value.createdAt > 3600000) absenceImportSessions.delete(key);
+  if (form.action === 'upload') {
+    let rows;
+    try {
+      const buffer = Buffer.from(String(form.file_b64 || ''), 'base64');
+      if (!buffer.length) return sendHtml(res, renderAbsenceImportUpload(role, 'Selecione um arquivo.'));
+      rows = readSpreadsheetRows(buffer, String(form.file_name || ''));
+    } catch (error) {
+      return sendHtml(res, renderAbsenceImportUpload(role, `Não consegui ler o arquivo: ${error.message}`));
+    }
+    rows = rows.filter(r => Array.isArray(r) && r.some(c => cellToText(c)));
+    if (rows.length < 2) return sendHtml(res, renderAbsenceImportUpload(role, 'O arquivo não tem linhas suficientes.'));
+    const headerIndex = detectHeaderRow(rows);
+    const width = Math.max(...rows.map(r => r.length));
+    const headers = Array.from({ length: width }, (_, i) => cellToText(rows[headerIndex][i]) || `Coluna ${i + 1}`);
+    const session = { slug, fileName: String(form.file_name || 'arquivo'), headers, rows: rows.slice(headerIndex + 1), createdAt: Date.now() };
+    session.guess = guessColumns(headers);
+    const id = crypto.randomBytes(12).toString('hex');
+    absenceImportSessions.set(id, session);
+    return sendHtml(res, renderAbsenceImportPreview(id, session, buildAbsenceImportPreview(session, {}), role));
+  }
+  const id = String(form.session || '');
+  const session = absenceImportSessions.get(id);
+  if (!session || session.slug !== slug) return sendHtml(res, renderAbsenceImportUpload(role, 'A prévia expirou. Envie o arquivo de novo.'));
+  const preview = buildAbsenceImportPreview(session, form);
+  if (form.action !== 'apply') return sendHtml(res, renderAbsenceImportPreview(id, session, preview, role));
+  const insert = db.prepare(`INSERT OR IGNORE INTO employee_absences (employee_id, absence_date, absence_type, justification, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`);
+  const note = `Importado do Pontomais (${session.fileName}) em ${formatDatePtBr(today())}`;
+  let inserted = 0;
+  db.exec('BEGIN');
+  try {
+    for (const item of preview.toInsert) {
+      const r = insert.run(item.employee_id, item.day, item.type, item.reason ? `Pontomais: ${item.reason}`.slice(0, 200) : 'Pontomais', note);
+      inserted += Number(r.changes || 0);
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    return sendHtml(res, renderAbsenceImportPreview(id, session, preview, role, `Nada foi gravado: ${error.message}`));
+  }
+  absenceImportSessions.delete(id);
+  setAlertSetting(`absence_import_log_${Date.now()}`, JSON.stringify({ file: session.fileName, inserted, user: getRequestAuth()?.user?.username || '', at: new Date().toISOString() }));
+  return redirect(res, `/closures?notice=${encodeURIComponent(`${inserted} dia(s) de ausência importado(s) do Pontomais.`)}`);
+}
+// ===============================================================
+
 // ===================== TELA PARÂMETROS =====================
 const ABSENCE_TYPE_LABELS = { falta: 'Falta', atestado: 'Atestado', ferias: 'Férias', folga: 'Folga', afastamento: 'Afastamento', outro: 'Outro' };
 
@@ -11233,6 +11591,8 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && pathname === '/shipments') return handleCreateShipment(await parseBody(req), res);
 
       if (req.method === 'GET' && pathname === '/closures') return sendHtml(res, renderMonthlyClosurePage(query, role));
+      if (req.method === 'GET' && pathname === '/ausencias/importar') return isAdminRole(role) ? sendHtml(res, renderAbsenceImportUpload(role)) : requireAdmin(req, res, role);
+      if (req.method === 'POST' && pathname === '/ausencias/importar') return handleAbsenceImport(req, res, role);
       if (req.method === 'GET' && pathname === '/closures/export') return sendHtml(res, renderClosureExportPage(query, role));
       if (req.method === 'POST' && pathname === '/closures/resolve') return handleUpsertClosureJustification(await parseBody(req), res);
       if (req.method === 'POST' && pathname === '/closures/absence') return handleUpsertClosureAbsence(await parseBody(req), res);
