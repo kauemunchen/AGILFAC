@@ -7769,7 +7769,180 @@ async function runTenantAlerts({ force = false, only = null } = {}) {
   return { sent, messages };
 }
 
-// Lê mensagens recebidas por cada bot: "/vincular CÓDIGO" cadastra o grupo/conversa no bot certo.
+// ----- T2.5 Comandos de consulta (somente leitura, sem IA) -----
+// Só respondem em grupos/conversas vinculados. No bot operacional não sai resultado individual.
+const BOT_COMMANDS = [
+  { command: 'op', description: 'Situação de uma OP: /op 1801138-001' },
+  { command: 'pendentes', description: 'OPs em aberto por data de entrega' },
+  { command: 'atrasadas', description: 'OPs com entrega vencida' },
+  { command: 'rosas', description: 'OPs em célula, por célula' },
+  { command: 'prontas', description: 'OPs finalizadas aguardando embarque' },
+  { command: 'embarques', description: 'Embarques de hoje (ou /embarques 25/10, /embarques semana)' },
+  { command: 'meta', description: 'Eficiência até o corte e produção de hoje' },
+  { command: 'fila', description: 'Fila em dias úteis e término estimado' },
+  { command: 'ajuda', description: 'Lista de comandos' }
+];
+
+const STATUS_TXT = { verde: '🟢 Em produção', amarelo: '🟡 Com ocorrência', rosa: '🩷 Em célula', azul: '🔵 Finalizada', vermelho: '🔴 Embarcada' };
+
+function daysSince(dateText) {
+  const d = String(dateText || '').slice(0, 10);
+  if (!d) return 0;
+  return Math.max(0, Math.round((new Date(`${today()}T00:00:00Z`) - new Date(`${d}T00:00:00Z`)) / 86400000));
+}
+
+function deliveryText(op) {
+  if (!op.delivery_date) return 'sem data';
+  const diff = Math.round((new Date(`${op.delivery_date}T00:00:00Z`) - new Date(`${today()}T00:00:00Z`)) / 86400000);
+  if (op.delivery_date < today()) return `${formatDatePtBr(op.delivery_date)} (atrasada ${daysSince(op.delivery_date)}d)`;
+  if (op.delivery_date === today()) return `${formatDatePtBr(op.delivery_date)} (hoje)`;
+  return `${formatDatePtBr(op.delivery_date)} (em ${diff}d)`;
+}
+
+function openOpsWithRemaining() {
+  return getOpList({}).filter(op => ['verde', 'amarelo', 'rosa'].includes(op.status_color) && !op.shipped_at && !isReturnedWithoutProductionLifecycle(op.lifecycle_type));
+}
+
+function parseBrDate(text) {
+  const m = String(text || '').match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
+  if (!m) return '';
+  const year = m[3] ? (m[3].length === 2 ? `20${m[3]}` : m[3]) : today().slice(0, 4);
+  const iso = `${year}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+  return Number.isNaN(new Date(`${iso}T00:00:00Z`).getTime()) ? '' : iso;
+}
+
+const BOT_HANDLERS = {
+  ajuda() {
+    return `🤖 <b>AgilFac · ${tgEscape(getCompanyName())}</b>\n${BOT_COMMANDS.map(c => `/${c.command} — ${tgEscape(c.description)}`).join('\n')}`;
+  },
+  op(args) {
+    if (!args) return 'Informe o número: <code>/op 1801138-001</code>';
+    const found = getOpByNumber(args);
+    if (!found) return `OP <b>${tgEscape(args)}</b> não encontrada.`;
+    const op = getOpDetail(found.id)?.op;
+    if (!op) return `OP <b>${tgEscape(args)}</b> não encontrada.`;
+    const occ = db.prepare('SELECT description FROM op_occurrences WHERE op_id = ? AND is_concluded = 0 ORDER BY opened_at DESC').all(op.id);
+    const ship = db.prepare('SELECT s.shipment_number, s.shipment_date FROM shipment_items si JOIN shipments s ON s.id = si.shipment_id WHERE si.op_id = ? AND s.is_reversed = 0 ORDER BY s.shipment_date DESC LIMIT 1').get(op.id);
+    const cell = found.active_cell_name;
+    return [
+      `📦 <b>OP ${opLink(op)}</b> · ${STATUS_TXT[op.status_color] || tgEscape(op.status_color)}`,
+      `${tgEscape(op.product_name || '-')} · ${tgEscape(op.brand || '-')}${op.op_type === 'mostruario' ? ' · mostruário' : ''}`,
+      `Peças: ${fmtNum(op.total_pieces, 0)} · contadas ${fmtNum(op.counted_quantity, 0)} · faltam ${fmtNum(Math.max(op.remaining_quantity, 0), 0)}`,
+      Number(op.problem_quantity) ? `Com problema: ${fmtNum(op.problem_quantity, 0)} pç` : '',
+      cell ? `Em célula: <b>${tgEscape(cell)}</b> (${fmtNum(op.open_in_cells_quantity, 0)} pç)` : '',
+      `Entrada: ${formatDatePtBr(op.entry_date)} · Entrega: ${deliveryText(op)}`,
+      `Produzido: ${fmtNum(op.produced_minutes, 0)} min`,
+      occ.length ? `⚠️ Ocorrência: ${occ.map(o => tgEscape(String(o.description).slice(0, 80))).join(' | ')}` : '',
+      ship ? `🚚 Embarque ${tgEscape(ship.shipment_number)} em ${formatDatePtBr(ship.shipment_date)}` : ''
+    ].filter(Boolean).join('\n');
+  },
+  pendentes() {
+    const ops = openOpsWithRemaining().sort((a, b) => String(a.delivery_date || '9999').localeCompare(String(b.delivery_date || '9999')));
+    if (!ops.length) return '✅ Nenhuma OP em aberto.';
+    const pieces = ops.reduce((s, op) => s + Math.max(Number(op.remaining_quantity || 0), 0), 0);
+    return `📋 <b>${ops.length} OP(s) em aberto</b> · ${fmtNum(pieces, 0)} pç a fazer\n${listLines(ops.map(op => `• ${opLink(op)} · ${tgEscape(op.brand || '-')} · faltam ${fmtNum(Math.max(op.remaining_quantity, 0), 0)} · ${deliveryText(op)}`), 20)}`;
+  },
+  atrasadas() {
+    const ops = openOpsWithRemaining().filter(op => op.delivery_date && op.delivery_date < today()).sort((a, b) => a.delivery_date.localeCompare(b.delivery_date));
+    if (!ops.length) return '✅ Nenhuma OP com entrega atrasada.';
+    return `⛔ <b>${ops.length} OP(s) atrasada(s)</b>\n${listLines(ops.map(op => `• ${opLink(op)} · ${tgEscape(op.brand || '-')} · ${deliveryText(op)}`), 20)}`;
+  },
+  rosas() {
+    const rows = db.prepare(`
+      SELECT o.id, o.op_number, c.name AS cell_name, MIN(t.sent_at) AS sent_at, SUM(t.quantity_sent - t.quantity_returned) AS open_qty
+      FROM op_cell_transfers t JOIN ops o ON o.id = t.op_id JOIN sewing_cells c ON c.id = t.cell_id
+      WHERE t.quantity_sent > t.quantity_returned AND o.is_reversed = 0
+      GROUP BY o.id, c.name ORDER BY c.name, sent_at`).all();
+    if (!rows.length) return '✅ Nenhuma OP em célula.';
+    const limit = paramOf('cell_stuck');
+    const byCell = new Map();
+    rows.forEach(r => { if (!byCell.has(r.cell_name)) byCell.set(r.cell_name, []); byCell.get(r.cell_name).push(r); });
+    return `🩷 <b>${rows.length} OP(s) em célula</b>\n${[...byCell].map(([cell, list]) => `\n<b>${tgEscape(cell)}</b>\n${list.map(r => { const d = daysSince(r.sent_at); return `• ${opLink(r)} · ${r.open_qty} pç · ${d}d${d >= limit ? ' ⚠️' : ''}`; }).join('\n')}`).join('\n')}`;
+  },
+  prontas() {
+    const rows = db.prepare("SELECT id, op_number, brand, total_pieces, delivery_date FROM ops WHERE is_reversed = 0 AND status_color = 'azul' AND shipped_at IS NULL ORDER BY COALESCE(delivery_date, '9999'), op_number").all();
+    if (!rows.length) return 'Nenhuma OP finalizada aguardando embarque.';
+    return `🔵 <b>${rows.length} OP(s) prontas para embarcar</b>\n${listLines(rows.map(r => `• ${opLink(r)} · ${tgEscape(r.brand || '-')} · ${fmtNum(r.total_pieces, 0)} pç · ${deliveryText(r)}`), 25)}`;
+  },
+  embarques(args) {
+    let start = today();
+    let end = today();
+    let label = 'hoje';
+    const arg = String(args || '').trim().toLowerCase();
+    if (arg === 'ontem') { start = end = addDaysIso(today(), -1); label = 'ontem'; }
+    else if (arg === 'semana') { start = addDaysIso(today(), -6); label = 'nos últimos 7 dias'; }
+    else if (arg === 'mes' || arg === 'mês') { const r = getPeriodRange('month', today()); start = r.start; end = r.end; label = 'no período'; }
+    else if (arg) { const d = parseBrDate(arg); if (!d) return 'Use: /embarques, /embarques ontem, /embarques semana, /embarques mes ou /embarques 25/10'; start = end = d; label = `em ${formatDatePtBr(d)}`; }
+    const rows = db.prepare('SELECT shipment_number, shipment_date, total_ops, sewing_minutes, total_minutes FROM shipments WHERE COALESCE(is_reversed, 0) = 0 AND shipment_date BETWEEN ? AND ? ORDER BY shipment_date, id').all(start, end);
+    if (!rows.length) return `🚚 Nenhum embarque ${label}.`;
+    const ops = rows.reduce((s, r) => s + Number(r.total_ops || 0), 0);
+    const minutes = rows.reduce((s, r) => s + Number(r.sewing_minutes || 0), 0);
+    return `🚚 <b>${rows.length} embarque(s) ${label}</b> · ${ops} OP(s) · ${fmtNum(minutes, 0)} min de costura\n${listLines(rows.map(r => `• ${tgEscape(r.shipment_number)} · ${formatDatePtBr(r.shipment_date)} · ${r.total_ops} OP(s) · ${fmtNum(r.sewing_minutes, 0)} min`), 20)}`;
+  },
+  meta(args, aud) {
+    const snap = getTargetSnapshot();
+    const todayMin = db.prepare(`SELECT COALESCE(SUM(p.produced_minutes), 0) AS m FROM op_daily_productions p JOIN ops o ON o.id = p.op_id WHERE ${COUNTED_PRODUCTION_WHERE} AND p.production_date = ?`).get(today()).m;
+    const active = getActiveEmployees().length;
+    const goalToday = active * baseMinutesDay() * targetRatio();
+    const below = snap.rows.filter(r => r.pct < targetPercent()).sort((a, b) => a.pct - b.pct);
+    const lines = [
+      `🎯 <b>Meta ${tp()}%</b> · ${tgEscape(getCompanyName())}`,
+      `Eficiência até ${formatDatePtBr(snap.cutoff)}: <b>${fmtNum(snap.total.pct, 2)}%</b>`,
+      `Hoje até agora: ${fmtNum(todayMin, 0)} min${goalToday > 0 ? ` de ~${fmtNum(goalToday, 0)} para a meta da equipe` : ''}`,
+      `Abaixo da meta: ${below.length} de ${snap.rows.length}`
+    ];
+    if (aud === 'gestor' && snap.rows.length) {
+      const sorted = [...snap.rows].sort((a, b) => b.pct - a.pct);
+      lines.push('', sorted.map(r => `${r.pct >= targetPercent() ? '✅' : '🔻'} ${tgEscape(r.emp.full_name)}: ${fmtNum(r.pct, 1)}%`).join('\n'));
+    }
+    return lines.join('\n');
+  },
+  fila() {
+    const f = getQueueForecast();
+    if (f.queueDays === null) return `Fila: ${f.openOps} OP(s), ${fmtNum(f.queuePieces, 0)} pç. Sem produção recente para estimar os dias.`;
+    return `⏳ <b>Fila: ${fmtNum(f.queueDays, 1)} dias úteis</b>\n${f.openOps} OP(s) · ${fmtNum(f.queuePieces, 0)} pç · ${fmtNum(f.queueMinutes, 0)} min\nCapacidade: ${fmtNum(f.dailyCapacity, 0)} min/dia (últimos ${f.sampleDays} dias úteis)\nTérmino estimado: ${formatDatePtBr(f.finishDate)}`;
+  }
+};
+const BOT_ALIASES = { start: 'ajuda', help: 'ajuda', comandos: 'ajuda', embarque: 'embarques', rosa: 'rosas', celulas: 'rosas', pendente: 'pendentes', atrasada: 'atrasadas', pronta: 'prontas' };
+
+function findChatAudience(audiences, chatId) {
+  const linked = audiences.filter(a => getTelegramChats(a.key).some(c => String(c.id) === String(chatId)));
+  return linked.find(a => a.key === 'gestor') || linked[0] || null;
+}
+
+async function handleBotCommand(token, audiences, msg) {
+  const text = String(msg.text || '').trim();
+  const m = text.match(/^\/([a-zà-ú]+)(?:@\w+)?(?:\s+([\s\S]*))?$/i);
+  if (!m) return;
+  const cmd = BOT_ALIASES[m[1].toLowerCase()] || m[1].toLowerCase();
+  const args = String(m[2] || '').trim();
+  const chat = msg.chat;
+  const reply = body => telegramCall(token, 'sendMessage', { chat_id: chat.id, text: body.slice(0, 4000), parse_mode: 'HTML', disable_web_page_preview: true, reply_to_message_id: msg.message_id, allow_sending_without_reply: true }).catch(error => console.error('Telegram resposta:', error.message));
+  if (cmd === 'vincular' || (m[1].toLowerCase() === 'start' && args)) {
+    const typed = args.split(/\s+/)[0].toUpperCase();
+    const target = audiences.find(a => ensureTelegramLinkCode(a.key) === typed);
+    if (!target) return reply('Código inválido. Envie <code>/vincular CÓDIGO</code> com o código que aparece em Parâmetros → Alertas Telegram.');
+    const chats = getTelegramChats(target.key).filter(c => String(c.id) !== String(chat.id));
+    chats.push({ id: chat.id, title: chat.title || [chat.first_name, chat.last_name].filter(Boolean).join(' ') || chat.username || String(chat.id), type: chat.type, linked_at: new Date().toISOString() });
+    setAlertSetting(target.chatsKey, JSON.stringify(chats));
+    return reply(`✅ Conversa vinculada ao ${target.title.toLowerCase()} de ${tgEscape(getCompanyName())}.\nEnvie /ajuda para ver os comandos.`);
+  }
+  const aud = findChatAudience(audiences, chat.id);
+  if (!aud) {
+    if (chat.type === 'private') return reply('Esta conversa não está autorizada. Envie <code>/vincular CÓDIGO</code> (código em Parâmetros → Alertas Telegram).');
+    return; // grupo não vinculado: fica em silêncio
+  }
+  const handler = BOT_HANDLERS[cmd];
+  if (!handler) return reply(`Comando não reconhecido. ${BOT_HANDLERS.ajuda()}`);
+  let body;
+  try { body = handler(args, aud.key); } catch (error) {
+    console.error(`Comando /${cmd} (${getCompanyName()}):`, error.message);
+    body = 'Não consegui consultar agora. Tente de novo em instantes.';
+  }
+  return reply(body);
+}
+
+// Lê as mensagens de cada bot (a cada poucos segundos): /vincular e comandos de consulta.
 async function pollTenantTelegram() {
   const byToken = new Map();
   for (const a of ALERT_AUDIENCES) {
@@ -7785,21 +7958,37 @@ async function pollTenantTelegram() {
     for (const update of updates) {
       setAlertSetting(offsetKey, update.update_id + 1);
       const msg = update.message;
-      if (!msg || !msg.text || !msg.chat) continue;
-      const text = String(msg.text).trim();
-      if (!/^\/(vincular|start)(@\w+)?\b/i.test(text)) continue;
-      const chat = msg.chat;
-      const typed = (text.split(/\s+/)[1] || '').toUpperCase();
-      const target = audiences.find(a => ensureTelegramLinkCode(a.key) === typed);
-      if (target) {
-        const chats = getTelegramChats(target.key).filter(c => String(c.id) !== String(chat.id));
-        chats.push({ id: chat.id, title: chat.title || [chat.first_name, chat.last_name].filter(Boolean).join(' ') || chat.username || String(chat.id), type: chat.type, linked_at: new Date().toISOString() });
-        setAlertSetting(target.chatsKey, JSON.stringify(chats));
-        await telegramCall(token, 'sendMessage', { chat_id: chat.id, text: `✅ Conversa vinculada ao ${target.title.toLowerCase()} de ${getCompanyName()}.` }).catch(() => {});
-      } else {
-        await telegramCall(token, 'sendMessage', { chat_id: chat.id, text: 'Para receber os alertas do AgilFac, envie: /vincular CÓDIGO (o código aparece em Parâmetros → Alertas Telegram).' }).catch(() => {});
-      }
+      if (!msg || !msg.text || !msg.chat || !msg.text.trim().startsWith('/')) continue;
+      await handleBotCommand(token, audiences, msg);
     }
+  }
+}
+
+let telegramPollBusy = false;
+const telegramPollErrors = new Map();
+async function runTelegramPolling() {
+  if (telegramPollBusy) return;
+  telegramPollBusy = true;
+  try {
+    const companies = masterDb.prepare('SELECT * FROM companies WHERE is_active = 1').all();
+    for (const company of companies) {
+      let tenantDb;
+      try { tenantDb = getTenantDbForCompany(company); } catch (_) { continue; }
+      await requestContext.run({ tenantDb, auth: { company, user: null, role: 'adm' } }, async () => {
+        try { await pollTenantTelegram(); } catch (error) {
+          // Loga no máximo uma vez a cada 10 min por empresa (rede instável não enche o log)
+          const last = telegramPollErrors.get(company.slug) || 0;
+          if (!/Conflict|terminated/i.test(error.message) && Date.now() - last > 600000) {
+            telegramPollErrors.set(company.slug, Date.now());
+            console.error(`Telegram polling (${company.slug}):`, error.message);
+          }
+        }
+      });
+    }
+  } catch (error) {
+    console.error('Polling Telegram:', error.message);
+  } finally {
+    telegramPollBusy = false;
   }
 }
 
@@ -7813,7 +8002,6 @@ async function runAlertWorker() {
       let tenantDb;
       try { tenantDb = getTenantDbForCompany(company); } catch (_) { continue; }
       await requestContext.run({ tenantDb, auth: { company, user: null, role: 'adm' } }, async () => {
-        try { await pollTenantTelegram(); } catch (error) { if (!/Conflict|terminated/i.test(error.message)) console.error(`Telegram polling (${company.slug}):`, error.message); }
         try { await runTenantAlerts(); } catch (error) { console.error(`Alertas (${company.slug}):`, error.message); }
       });
     }
@@ -7827,6 +8015,7 @@ async function runAlertWorker() {
 if (process.env.AGILFAC_DISABLE_ALERTS !== '1') {
   setTimeout(() => runAlertWorker().catch(() => {}), Number(process.env.AGILFAC_ALERT_FIRST_MS || 15000)).unref();
   setInterval(() => runAlertWorker().catch(() => {}), Number(process.env.AGILFAC_ALERT_INTERVAL_MS || 60000)).unref();
+  setInterval(() => runTelegramPolling().catch(() => {}), Number(process.env.AGILFAC_TG_POLL_MS || 4000)).unref();
 }
 
 // ----- tela (seção dentro de Parâmetros) -----
@@ -7908,6 +8097,7 @@ async function handleSaveAlerts(form, res, role) {
       const me = await telegramCall(newToken, 'getMe');
       setAlertSetting(a.tokenKey, newToken);
       tokenMsg += ` ${a.title}: @${me.username || 'bot'} validado.`;
+      telegramCall(newToken, 'setMyCommands', { commands: BOT_COMMANDS }).catch(() => {});
     } catch (error) {
       return fail(`${a.title}: o Telegram recusou o token (${error.message}).`);
     }
