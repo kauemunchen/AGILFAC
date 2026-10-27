@@ -6348,6 +6348,37 @@ function renderOpForm(values = {}, error = '', role = 'adm') {
   return pageLayout({ title: 'Nova OP', content, error, role });
 }
 
+// Tempo extra cadastrado/alterado depois do lançamento: refaz os minutos extras dos lançamentos
+// da OP a partir da data informada (minutos normais ficam como foram lançados).
+function recalculateExtraMinutesForOp(opId, fromDate) {
+  const op = db.prepare('SELECT * FROM ops WHERE id = ?').get(Number(opId));
+  if (!op || !fromDate) return { rows: 0, delta: 0 };
+  let rows = 0;
+  let delta = 0;
+  for (const table of ['op_daily_productions', 'hourly_productions']) {
+    const list = db.prepare(`SELECT * FROM ${table} WHERE op_id = ? AND is_reversed = 0 AND production_date >= ?`).all(op.id, fromDate);
+    const update = db.prepare(`
+      UPDATE ${table}
+      SET extra_minutes = ?, produced_minutes = ?, extra_time_id = ?, extra_reason_snapshot = ?,
+          extra_description_snapshot = ?, extra_effective_date_snapshot = ?, extra_minutes_per_piece_snapshot = ?
+      WHERE id = ?`);
+    for (const row of list) {
+      const config = getActiveOpExtraTimeForOp(op.id, row.production_date);
+      const perPiece = Number(config?.extra_minutes_per_piece || 0);
+      const extra = round3(Number(row.produced_quantity || 0) * perPiece);
+      if (Math.abs(extra - Number(row.extra_minutes || 0)) < 0.001 && Number(row.extra_time_id || 0) === Number(config?.id || 0)) continue;
+      const produced = round3(Number(row.normal_minutes || 0) + extra);
+      update.run(extra, produced, config ? config.id : null, config?.reason || null, config?.description || null, config?.effective_date || null, config ? round3(perPiece) : null, row.id);
+      if (table === 'op_daily_productions') { rows += 1; delta += extra - Number(row.extra_minutes || 0); }
+    }
+  }
+  return { rows, delta: round2(delta) };
+}
+
+function extraRecalcNotice(base, result) {
+  return result.rows ? `${base} ${result.rows} lançamento(s) recalculado(s) (${result.delta >= 0 ? '+' : ''}${fmtNum(result.delta, 2)} min).` : base;
+}
+
 function getOpExtraTimeById(id) {
   return db.prepare(`
     SELECT et.*, o.op_number, o.product_name, o.op_type
@@ -6787,7 +6818,8 @@ function handleCreateOpExtraTime(form, res, role) {
       op_id, extra_minutes_per_piece, reason, description, effective_date, notes, is_active, created_by_user_id, created_at, updated_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
   `).run(op.id, extraMinutesPerPiece, reason, description || null, effectiveDate, String(form.notes || '').trim() || null, form.is_active === '0' ? 0 : 1);
-  redirect(res, `/op-extra-times?notice=${encodeURIComponent('Tempo extra cadastrado com sucesso.')}`);
+  const recalc = recalculateExtraMinutesForOp(op.id, effectiveDate);
+  redirect(res, `/op-extra-times?notice=${encodeURIComponent(extraRecalcNotice('Tempo extra cadastrado com sucesso.', recalc))}`);
 }
 
 function handleUpdateOpExtraTime(id, form, res, role) {
@@ -6808,7 +6840,10 @@ function handleUpdateOpExtraTime(id, form, res, role) {
     SET op_id = ?, extra_minutes_per_piece = ?, reason = ?, description = ?, effective_date = ?, notes = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `).run(op.id, extraMinutesPerPiece, reason, description || null, effectiveDate, String(form.notes || '').trim() || null, form.is_active === '0' ? 0 : 1, Number(id));
-  redirect(res, `/op-extra-times?notice=${encodeURIComponent('Tempo extra atualizado com sucesso.')}`);
+  const fromDate = [effectiveDate, row.effective_date].filter(Boolean).sort()[0];
+  const recalc = recalculateExtraMinutesForOp(op.id, fromDate);
+  if (Number(row.op_id) !== Number(op.id)) recalculateExtraMinutesForOp(row.op_id, row.effective_date);
+  redirect(res, `/op-extra-times?notice=${encodeURIComponent(extraRecalcNotice('Tempo extra atualizado com sucesso.', recalc))}`);
 }
 
 function handleDeleteOpExtraTime(id, res, role) {
@@ -6818,7 +6853,8 @@ function handleDeleteOpExtraTime(id, res, role) {
   const usage = getProductionRowsUsingExtraTimeId(id);
   if (usage.length) {
     db.prepare('UPDATE op_extra_times SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(Number(id));
-    return redirect(res, `/op-extra-times?notice=${encodeURIComponent('Cadastro já usado em lançamentos: foi apenas inativado para preservar o histórico.')}`);
+    const recalc = recalculateExtraMinutesForOp(row.op_id, row.effective_date);
+    return redirect(res, `/op-extra-times?notice=${encodeURIComponent(extraRecalcNotice('Cadastro já usado em lançamentos: foi apenas inativado para preservar o histórico.', recalc))}`);
   }
   db.prepare('DELETE FROM op_extra_times WHERE id = ?').run(Number(id));
   redirect(res, `/op-extra-times?notice=${encodeURIComponent('Cadastro de tempo extra excluído com sucesso.')}`);
@@ -6829,7 +6865,8 @@ function handleToggleOpExtraTime(id, res, role) {
   const row = db.prepare('SELECT * FROM op_extra_times WHERE id = ?').get(Number(id));
   if (!row) return redirect(res, `/op-extra-times?error=${encodeURIComponent('Cadastro de tempo extra não encontrado.')}`);
   db.prepare('UPDATE op_extra_times SET is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(row.is_active ? 0 : 1, row.id);
-  redirect(res, `/op-extra-times?notice=${encodeURIComponent(`Tempo extra ${row.is_active ? 'inativado' : 'ativado'} com sucesso.`)}`);
+  const recalc = recalculateExtraMinutesForOp(row.op_id, row.effective_date);
+  redirect(res, `/op-extra-times?notice=${encodeURIComponent(extraRecalcNotice(`Tempo extra ${row.is_active ? 'inativado' : 'ativado'} com sucesso.`, recalc))}`);
 }
 
 function renderOpExtraTimesPage(query = {}, values = {}, error = '', role = 'adm') {
@@ -8012,6 +8049,33 @@ async function runAlertWorker() {
     alertWorkerBusy = false;
   }
 }
+
+// Correção única: lançamentos feitos antes do cadastro do tempo extra (últimos 45 dias)
+function runExtraTimeRecalcOnce() {
+  for (const company of masterDb.prepare('SELECT * FROM companies WHERE is_active = 1').all()) {
+    let tenantDb;
+    try { tenantDb = getTenantDbForCompany(company); } catch (_) { continue; }
+    requestContext.run({ tenantDb, auth: { company, user: null, role: 'adm' } }, () => {
+      try {
+        if (getAlertSetting('extra_time_recalc_v1')) return;
+        const since = addDaysIso(today(), -45);
+        const configs = db.prepare('SELECT op_id, MIN(effective_date) AS first_date FROM op_extra_times WHERE is_active = 1 GROUP BY op_id').all();
+        let rows = 0;
+        let delta = 0;
+        for (const c of configs) {
+          const r = recalculateExtraMinutesForOp(c.op_id, [c.first_date, since].sort().reverse()[0]);
+          rows += r.rows;
+          delta += r.delta;
+        }
+        setAlertSetting('extra_time_recalc_v1', JSON.stringify({ at: new Date().toISOString(), rows, delta: round2(delta) }));
+        if (rows) console.log(`Tempo extra (${company.slug}): ${rows} lançamento(s) recalculado(s), ${round2(delta)} min.`);
+      } catch (error) {
+        console.error(`Recalcular tempo extra (${company.slug}):`, error.message);
+      }
+    });
+  }
+}
+setTimeout(runExtraTimeRecalcOnce, 3000).unref();
 
 if (process.env.AGILFAC_DISABLE_ALERTS !== '1') {
   setTimeout(() => runAlertWorker().catch(() => {}), Number(process.env.AGILFAC_ALERT_FIRST_MS || 15000)).unref();
