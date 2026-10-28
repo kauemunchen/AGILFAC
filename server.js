@@ -1619,6 +1619,7 @@ function isLancadorAllowed(method, pathname) {
   if (method === 'GET' && ['/productions/new', '/productions/hourly', '/ops', '/labels/entry', '/api/op-preview', '/conta/senha'].includes(pathname)) return true;
   if (method === 'POST' && ['/productions', '/productions/hourly', '/productions/hourly/validate', '/conta/senha', '/logout'].includes(pathname)) return true;
   if (method === 'GET' && /^\/ops\/\d+$/.test(pathname)) return true;
+  if (method === 'POST' && /^\/productions\/hourly\/\d+\/fix$/.test(pathname)) return true;
   if (method === 'POST' && /^\/ops\/\d+\/(occurrences|problem-items|cell\/send|cell\/return)$/.test(pathname)) return true;
   if (method === 'POST' && /^\/ops\/\d+\/occurrences\/\d+\/conclude$/.test(pathname)) return true;
   return false;
@@ -10108,6 +10109,64 @@ function handleUnvalidateHourlyProductionDay(form, res, role) {
   back(`Validação de ${formatDatePtBr(productionDate)} estornada: ${rows.length} lançamento(s) por hora voltaram para pendente (${removedDaily} lançamento(s) diário(s) estornado(s)). Corrija o que precisar e valide o dia de novo.`);
 }
 
+// Corrige a quantidade de um lançamento por hora (0 = exclui). Se já validado, ajusta o diário junto (só administrador).
+function handleFixHourlyProduction(id, form, res, role) {
+  const row = db.prepare('SELECT * FROM hourly_productions WHERE id = ? AND is_reversed = 0').get(Number(id));
+  const backUrl = row ? `/productions/hourly?production_date=${encodeURIComponent(row.production_date)}${form.back_employee ? `&employee_id=${encodeURIComponent(form.back_employee)}` : ''}` : '/productions/hourly';
+  const back = (msg, isError) => redirect(res, buildRedirectWithFlash(backUrl, msg, isError));
+  if (!row) return back('Lançamento não encontrado.', true);
+  if (row.is_validated && !isAdminRole(role)) return back('Lançamento já validado: só o administrador pode corrigir.', true);
+  const newQty = Number(form.produced_quantity);
+  if (!Number.isInteger(newQty) || newQty < 0) return back('Informe a quantidade correta (0 para excluir).', true);
+  const oldQty = Number(row.produced_quantity || 0);
+  if (newQty === oldQty) return back('Quantidade igual à lançada; nada mudou.');
+  const op = db.prepare('SELECT * FROM ops WHERE id = ?').get(row.op_id);
+  if (newQty > oldQty) {
+    const used = db.prepare(`
+      SELECT
+        COALESCE((SELECT SUM(produced_quantity) FROM op_daily_productions WHERE op_id = ? AND is_reversed = 0), 0)
+        + COALESCE((SELECT SUM(produced_quantity) FROM hourly_productions WHERE op_id = ? AND is_reversed = 0 AND is_validated = 0), 0)
+        + COALESCE((SELECT SUM(quantity) FROM op_problem_items WHERE op_id = ?), 0) AS n`).get(row.op_id, row.op_id, row.op_id).n;
+    if (Number(used) + (newQty - oldQty) > Number(op.total_pieces || 0)) return back(`Correção bloqueada: a OP ${op.op_number} passaria do total de peças.`, true);
+  }
+  const ratio = oldQty > 0 ? newQty / oldQty : 0;
+  const next = {
+    normal: round3(Number(row.normal_minutes || 0) * ratio),
+    extra: round3(Number(row.extra_minutes || 0) * ratio),
+    total: round3(Number(row.produced_minutes || 0) * ratio)
+  };
+  const delta = { qty: newQty - oldQty, normal: next.normal - Number(row.normal_minutes || 0), extra: next.extra - Number(row.extra_minutes || 0), total: next.total - Number(row.produced_minutes || 0) };
+  const reason = `Correção do lançamento por hora ${row.hour_slot}: ${oldQty} → ${newQty} peça(s)`;
+  try {
+    db.exec('BEGIN');
+    if (newQty === 0) {
+      db.prepare('UPDATE hourly_productions SET is_reversed = 1, reversed_at = CURRENT_TIMESTAMP, reversed_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(reason, row.id);
+    } else {
+      db.prepare('UPDATE hourly_productions SET produced_quantity = ?, normal_minutes = ?, extra_minutes = ?, produced_minutes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(newQty, next.normal, next.extra, next.total, row.id);
+    }
+    if (row.is_validated && row.validated_daily_production_id) {
+      const daily = db.prepare('SELECT * FROM op_daily_productions WHERE id = ?').get(row.validated_daily_production_id);
+      if (daily && !daily.is_reversed) {
+        const dailyQty = Number(daily.produced_quantity || 0) + delta.qty;
+        if (dailyQty <= 0) {
+          db.prepare('UPDATE op_daily_productions SET is_reversed = 1, reversed_at = CURRENT_TIMESTAMP, reversed_reason = ? WHERE id = ?').run(reason, daily.id);
+        } else {
+          db.prepare(`UPDATE op_daily_productions SET produced_quantity = ?, normal_minutes = ROUND(MAX(COALESCE(normal_minutes, 0) + ?, 0), 3),
+            extra_minutes = ROUND(MAX(COALESCE(extra_minutes, 0) + ?, 0), 3), produced_minutes = ROUND(MAX(COALESCE(produced_minutes, 0) + ?, 0), 3) WHERE id = ?`)
+            .run(dailyQty, delta.normal, delta.extra, delta.total, daily.id);
+        }
+        logAuditEntry('production', daily.id, 'correcao', reason, daily, db.prepare('SELECT * FROM op_daily_productions WHERE id = ?').get(daily.id));
+      }
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    return back(`Nada foi alterado: ${error.message}`, true);
+  }
+  recalculateOpStatus(row.op_id);
+  back(newQty === 0 ? `Lançamento das ${row.hour_slot} excluído.` : `Lançamento das ${row.hour_slot} corrigido: ${oldQty} → ${newQty} peça(s) (${fmtNum(next.total, 2)} min)${row.is_validated ? '. O diário validado também foi ajustado.' : '.'}`);
+}
+
 function handleValidateHourlyProductionDay(form, res) {
   const productionDate = String(form.production_date || today()).trim() || today();
   const pendingRows = db.prepare(`
@@ -10324,9 +10383,9 @@ function renderHourlyProductionPage(values = {}, error = '', notice = '', role =
     <section class="panel section-gap">
       <div class="panel-header"><h3>Lançamentos do dia</h3><span class="hint">${formatDatePtBr(productionDate)} · ${selectedEmployee ? escapeHtml(selectedEmployee.full_name) : 'todas as costureiras com filtro selecionado'}</span></div>
       <table>
-        <thead><tr><th>Hora</th><th>OP</th><th>Produto</th><th>Costureira</th><th>Qtd</th><th>Normal</th><th>Extra</th><th>Total</th><th>% hora</th><th>Status</th></tr></thead>
+        <thead><tr><th>Hora</th><th>OP</th><th>Produto</th><th>Costureira</th><th>Qtd</th><th>Normal</th><th>Extra</th><th>Total</th><th>% hora</th><th>Status</th><th>Corrigir</th></tr></thead>
         <tbody>
-          ${recent.map(item => `<tr><td>${escapeHtml(item.hour_slot)}</td><td>${escapeHtml(item.op_number)}</td><td>${escapeHtml(item.product_name)}</td><td>${escapeHtml(item.registration_code)} - ${escapeHtml(item.full_name)}</td><td>${item.produced_quantity}</td><td>${fmtNum(round3(item.normal_minutes || 0), 3)}</td><td>${fmtNum(round3(item.extra_minutes || 0), 3)}</td><td>${fmtNum(round3(item.produced_minutes || 0), 3)}</td><td>${fmtNum(Number(item.hour_efficiency_percent || 0), 2)}%</td><td>${item.is_validated ? `<span class="status-pill ok">Validado</span>` : `<span class="status-pill pending">Pendente</span>`}</td></tr>`).join('') || '<tr><td colspan="10">Nenhum lançamento por hora gravado para esse filtro.</td></tr>'}
+          ${recent.map(item => { const canFix = !item.is_validated || isAdminRole(role); return `<tr><td>${escapeHtml(item.hour_slot)}</td><td>${escapeHtml(item.op_number)}</td><td>${escapeHtml(item.product_name)}</td><td>${escapeHtml(item.registration_code)} - ${escapeHtml(item.full_name)}</td><td>${item.produced_quantity}</td><td>${fmtNum(round3(item.normal_minutes || 0), 3)}</td><td>${fmtNum(round3(item.extra_minutes || 0), 3)}</td><td>${fmtNum(round3(item.produced_minutes || 0), 3)}</td><td>${fmtNum(Number(item.hour_efficiency_percent || 0), 2)}%</td><td>${item.is_validated ? `<span class="status-pill ok">Validado</span>` : `<span class="status-pill pending">Pendente</span>`}</td><td>${canFix ? `<form class="hourly-fix" method="post" action="/productions/hourly/${item.id}/fix" onsubmit="return confirm('Corrigir ${escapeHtml(item.hour_slot)} de ${escapeHtml(String(item.full_name).replace(/'/g, ''))} de ${item.produced_quantity} para ' + this.produced_quantity.value + ' peça(s)?' + (this.produced_quantity.value === '0' ? ' (0 = excluir o lançamento)' : ''))"><input type="hidden" name="back_employee" value="${escapeHtml(selectedEmployeeId || '')}" /><input type="number" name="produced_quantity" min="0" step="1" required value="${item.produced_quantity}" aria-label="Quantidade correta" /><button class="btn secondary" type="submit" title="Salvar correção">✔</button></form>` : '<span class="hint">só adm</span>'}</td></tr>`; }).join('') || '<tr><td colspan="11">Nenhum lançamento por hora gravado para esse filtro.</td></tr>'}
         </tbody>
       </table>
     </section>
@@ -11962,6 +12021,7 @@ const server = http.createServer(async (req, res) => {
           (req.method === 'GET' && pathname === '/productions/hourly') ||
           (req.method === 'POST' && pathname === '/productions/hourly') ||
           (req.method === 'POST' && pathname === '/productions/hourly/validate') ||
+          (req.method === 'POST' && /^\/productions\/hourly\/\d+\/fix$/.test(pathname)) ||
           (req.method === 'GET' && pathname === '/login') ||
           (req.method === 'POST' && pathname === '/logout')
         );
@@ -12063,6 +12123,11 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && pathname === '/productions/hourly/validate') {
         if (requireHourlyLauncherAccess(res, role)) return;
         return handleValidateHourlyProductionDay(await parseBody(req), res);
+      }
+      const hourlyFix = pathname.match(/^\/productions\/hourly\/(\d+)\/fix$/);
+      if (req.method === 'POST' && hourlyFix) {
+        if (requireHourlyLauncherAccess(res, role)) return;
+        return handleFixHourlyProduction(hourlyFix[1], await parseBody(req), res, role);
       }
       if (req.method === 'POST' && pathname === '/productions/hourly/unvalidate') {
         if (requireAdmin(req, res, role)) return;
