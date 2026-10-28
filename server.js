@@ -6018,8 +6018,9 @@ function renderDashboard(query, role = 'adm') {
         <article class="mini-card"><span>Minutos lançados hoje</span><strong id="hourly-total-minutes">${fmtNum(hourlyDashboardData.totalMinutes, 3)}</strong></article>
         <article class="mini-card"><span>% geral até agora</span><strong id="hourly-total-percent">0,00%</strong></article>
       </div>
-      <div class="tracking-alert-list" id="hourly-dashboard-list">
-        ${hourlyDashboardData.rows.map(item => `<div class="tracking-alert-item" data-hourly-card data-first-hour="${item.first_hour_number}" data-minutes="${item.total_minutes}" style="margin-bottom:10px;"><div style="display:flex;justify-content:space-between;gap:12px;align-items:center;"><strong>${escapeHtml(item.full_name)}${item.termination_date && item.termination_date <= currentDay ? ' <span style="color:#ef4444;font-weight:600;">(Inativa)</span>' : ''}</strong><span data-hourly-percent>0,00%</span></div><div style="margin-top:8px;background:rgba(148,163,184,.18);border-radius:999px;height:10px;overflow:hidden;"><div data-hourly-bar style="width:2%;height:10px;background:#22c55e;"></div></div><small>${item.total_quantity} peça(s) · ${fmtNum(item.total_minutes, 3)} min · ${item.launched_hours} hora(s) lançada(s) · início ${escapeHtml(item.first_hour_slot || '-')}</small></div>`).join('') || '<p class="hint">Nenhum lançamento por hora hoje.</p>'}
+      ${hourlyDashboardData.rows.length ? `<div class="hourly-list-head"><span>#</span><span>Colaboradora</span><span>Andamento</span><span>%</span><span>Peças</span><span>Min</span><span>Horas</span><span>Início</span></div>` : ''}
+      <div class="hourly-list" id="hourly-dashboard-list">
+        ${hourlyDashboardData.rows.map(item => `<div class="hourly-row" data-hourly-card data-first-hour="${item.first_hour_number}" data-minutes="${item.total_minutes}"><span class="hourly-rank" data-hourly-rank></span><strong class="hourly-name" title="${escapeHtml(item.full_name)}">${escapeHtml(item.full_name)}${item.termination_date && item.termination_date <= currentDay ? ' <span style="color:#ef4444;font-weight:600;">(Inativa)</span>' : ''}</strong><span class="hourly-bar"><span data-hourly-bar></span></span><strong class="hourly-pct" data-hourly-percent>0,00%</strong><span>${item.total_quantity}</span><span>${fmtNum(item.total_minutes, 0)}</span><span>${item.launched_hours}h</span><span>${escapeHtml(item.first_hour_slot || '-')}</span></div>`).join('') || '<p class="hint">Nenhum lançamento por hora hoje.</p>'}
       </div>
       <script>
         (() => {
@@ -6038,12 +6039,12 @@ function renderDashboard(query, role = 'adm') {
             const pct = expectedBase > 0 ? (minutes / expectedBase) * 100 : 0;
             const pctText = card.querySelector('[data-hourly-percent]');
             const bar = card.querySelector('[data-hourly-bar]');
-            if (pctText) pctText.textContent = pct.toFixed(2).replace('.', ',') + '%';
+            const color = pct < 40 ? '#ef4444' : (pct >= ${targetPercent()} ? '#16a34a' : '#f59e0b');
+            if (pctText) { pctText.textContent = pct.toFixed(1).replace('.', ',') + '%'; pctText.style.color = color; }
             if (bar) {
               bar.style.width = Math.max(2, Math.min(pct, 100)) + '%';
-              bar.style.background = pct < 40 ? '#ef4444' : (pct >= 60 ? '#22c55e' : '#f59e0b');
+              bar.style.background = color;
             }
-            card.classList.add(pct < 40 ? 'tracking-status-risk' : 'tracking-status-good');
             totalMinutes += minutes;
             totalExpectedBase += expectedBase;
           });
@@ -6051,7 +6052,7 @@ function renderDashboard(query, role = 'adm') {
             const ap = Number((a.querySelector('[data-hourly-percent]')?.textContent || '0').replace('%', '').replace(',', '.'));
             const bp = Number((b.querySelector('[data-hourly-percent]')?.textContent || '0').replace('%', '').replace(',', '.'));
             return bp - ap;
-          }).forEach(card => panel.querySelector('#hourly-dashboard-list').appendChild(card));
+          }).forEach((card, i) => { const r = card.querySelector('[data-hourly-rank]'); if (r) r.textContent = i + 1; panel.querySelector('#hourly-dashboard-list').appendChild(card); });
           const totalPct = totalExpectedBase > 0 ? (totalMinutes / totalExpectedBase) * 100 : 0;
           const totalPctEl = document.getElementById('hourly-total-percent');
           if (totalPctEl) totalPctEl.textContent = totalPct.toFixed(2).replace('.', ',') + '%';

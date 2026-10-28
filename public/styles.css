@@ -305,3 +305,25 @@ fieldset { border: 1px solid rgba(148, 163, 184, .35); border-radius: 10px; padd
 .worked-edit input { width: 70px; padding: 4px 6px; }
 .worked-edit .btn { padding: 4px 8px; min-height: 0; }
 .worked-bulk { margin-top: 12px; padding: 10px; border: 1px dashed #93c5fd; border-radius: 12px; background: #f8fbff; }
+/* Dashboard: resultado hora a hora em lista compacta */
+.hourly-list-head, .hourly-row { display: grid; grid-template-columns: 26px minmax(140px, 1.6fr) minmax(80px, 2fr) 60px 50px 56px 44px 50px; gap: 10px; align-items: center; }
+.hourly-list-head { font-size: 11px; color: #607089; text-transform: uppercase; letter-spacing: .03em; padding: 0 10px 6px; border-bottom: 1px solid #e6ebf3; }
+.hourly-list { display: flex; flex-direction: column; }
+.hourly-row { padding: 6px 10px; border-bottom: 1px solid #eef2f7; font-size: 13px; }
+.hourly-row:nth-child(even) { background: #f8fafc; }
+.hourly-rank { color: #94a3b8; font-size: 12px; }
+.hourly-name { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hourly-bar { height: 8px; background: rgba(148,163,184,.2); border-radius: 999px; overflow: hidden; }
+.hourly-bar span { display: block; height: 8px; width: 2%; border-radius: 999px; }
+.hourly-pct { text-align: right; font-size: 14px; }
+.hourly-row > span:nth-child(n+5), .hourly-list-head > span:nth-child(n+4) { text-align: right; }
+@media (max-width: 700px) {
+  .hourly-list-head { display: none; }
+  .hourly-row { grid-template-columns: 22px minmax(0, 1fr) 56px; row-gap: 4px; }
+  .hourly-row .hourly-bar { grid-column: 2 / 4; grid-row: 2; }
+  .hourly-row > span:nth-child(n+5) { display: none; }
+}
+@media (max-width: 700px) {
+  #hourly-dashboard-panel .shipment-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  #hourly-dashboard-panel .mini-card strong { font-size: 18px; }
+}
