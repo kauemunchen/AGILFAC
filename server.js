@@ -663,6 +663,7 @@ function migrateDatabase(tenantDb = db) {
   ensureColumn(tenantDb, 'employees', 'birth_date', 'TEXT');
   ensureColumn(tenantDb, 'employees', 'job_role', 'TEXT');
   ensureColumn(tenantDb, 'employees', 'phone', 'TEXT');
+  ensureColumn(tenantDb, 'employees', 'base_minutes_day', 'REAL');
   ensureColumn(tenantDb, 'ops', 'collection_name', 'TEXT');
   ensureColumn(tenantDb, 'ops', 'delivery_date', 'TEXT');
   ensureColumn(tenantDb, 'ops', 'pilot_mode', 'TEXT');
@@ -2104,6 +2105,26 @@ function numParam(key) {
 }
 
 function baseMinutesDay() { return numParam('base_minutes_day'); }
+// Base de minutos/dia da colaboradora: própria (cadastro) ou a padrão da empresa (Parâmetros)
+const employeeBaseCache = new WeakMap();
+function employeeBaseMinutes(employee) {
+  if (!employee) return baseMinutesDay();
+  let value = employee.base_minutes_day;
+  if (value === undefined && employee.id) {
+    const store = getActiveDb();
+    let map = employeeBaseCache.get(store);
+    if (!map || Date.now() - map.at > 30000) {
+      map = { at: Date.now(), byId: new Map(db.prepare('SELECT id, base_minutes_day FROM employees').all().map(r => [r.id, r.base_minutes_day])) };
+      employeeBaseCache.set(store, map);
+    }
+    value = map.byId.get(Number(employee.id ?? employee.employee_id));
+  }
+  return Number(value) > 0 ? Number(value) : baseMinutesDay();
+}
+function parseEmployeeBase(value) {
+  const n = Number(String(value ?? '').replace(',', '.'));
+  return Number.isFinite(n) && n > 0 && n <= 1440 ? round2(n) : null;
+}
 function targetPercent() { return numParam('target_percent'); }
 function targetRatio() { return targetPercent() / 100; }
 function tp() { return fmtNum(targetPercent(), Number.isInteger(targetPercent()) ? 0 : 2); }
@@ -2636,8 +2657,8 @@ function getEmployeeDailyResultRows(rangeStart, rangeEnd, employeeId = '') {
         production_date: day,
         produced_quantity: Number(item?.produced_quantity || 0),
         produced_minutes: producedMinutes,
-        available_minutes: baseMinutesDay(),
-        result_percent: round2((producedMinutes / baseMinutesDay()) * 100)
+        available_minutes: employeeBaseMinutes(employee),
+        result_percent: round2((producedMinutes / employeeBaseMinutes(employee)) * 100)
       });
     }
   }
@@ -3360,7 +3381,7 @@ function getEmployeeBaseDays(employee, rangeStart, rangeEnd) {
 function calculateEmployeeEfficiency(employee, producedMinutes, rangeStart, rangeEnd, cutoff = '') {
   const end = cutoff && cutoff < rangeEnd ? cutoff : rangeEnd;
   const businessDays = end >= rangeStart ? getEmployeeBaseDays(employee, rangeStart, end) : [];
-  const availableMinutes = round2(businessDays.length * baseMinutesDay());
+  const availableMinutes = round2(businessDays.length * employeeBaseMinutes(employee));
   return {
     business_days: businessDays.length,
     available_minutes: availableMinutes,
@@ -3499,6 +3520,7 @@ function getMonthlyClosureData(baseDate = today(), period = 'month', employeeId 
       const daily = dailyMap.get(day);
       daily.employees_active += 1;
       if (item.absence_type && baseExcludedTypes.has(item.absence_type)) daily.base_excluded += 1;
+      else daily.available_base = round2((daily.available_base || 0) + employeeBaseMinutes(employee));
       daily.produced_quantity += item.produced_quantity;
       daily.normal_minutes = round2(daily.normal_minutes + item.normal_minutes);
       daily.extra_minutes = round2(daily.extra_minutes + item.extra_minutes);
@@ -3574,7 +3596,7 @@ function getMonthlyClosureData(baseDate = today(), period = 'month', employeeId 
   pendingItems.sort((a, b) => `${a.work_date}-${a.full_name}`.localeCompare(`${b.work_date}-${b.full_name}`));
 
   const dailyRows = Array.from(dailyMap.values()).sort((a, b) => a.work_date.localeCompare(b.work_date)).map(item => {
-    const availableMinutes = round2(Math.max(item.employees_active - item.base_excluded, 0) * baseMinutesDay());
+    const availableMinutes = round2(item.available_base || 0);
     return {
       ...item,
       available_minutes: availableMinutes,
@@ -3765,8 +3787,8 @@ function getDailyTrackingData(baseDate = today(), period = 'month', employeeId =
     const normalMinutes = round2(Number(accumulated?.normal_minutes || 0));
     const extraMinutes = round2(Number(accumulated?.extra_minutes || 0));
     const producedQuantity = Number(accumulated?.qty || 0);
-    const elapsedAvailableMinutes = round2((progressEnd >= range.start ? getEmployeeBaseDays(employee, range.start, progressEnd).length : 0) * baseMinutesDay());
-    const totalAvailableMinutes = round2(getEmployeeBaseDays(employee, range.start, range.end).length * baseMinutesDay());
+    const elapsedAvailableMinutes = round2((progressEnd >= range.start ? getEmployeeBaseDays(employee, range.start, progressEnd).length : 0) * employeeBaseMinutes(employee));
+    const totalAvailableMinutes = round2(getEmployeeBaseDays(employee, range.start, range.end).length * employeeBaseMinutes(employee));
     const currentTargetMinutes = round2(elapsedAvailableMinutes * targetRatio());
     const currentPercent = elapsedAvailableMinutes > 0 ? round2((producedMinutes / elapsedAvailableMinutes) * 100) : 0;
     const fullPeriodPercent = totalAvailableMinutes > 0 ? round2((producedMinutes / totalAvailableMinutes) * 100) : 0;
@@ -4121,7 +4143,7 @@ function getProductionPrizeData(baseDate = today(), period = 'month', employeeId
     const normalMinutes = round2(Number(productionMap.get(employee.id)?.normal_minutes || 0));
     const producedExtraMinutes = round2(Number(productionMap.get(employee.id)?.extra_minutes || 0));
     const producedMinutes = round2(Number(productionMap.get(employee.id)?.minutes || 0));
-    const availableMinutes = round2(getEmployeeBaseDays(employee, range.start, range.end).length * baseMinutesDay());
+    const availableMinutes = round2(getEmployeeBaseDays(employee, range.start, range.end).length * employeeBaseMinutes(employee));
     const targetMinutes60 = round2(availableMinutes * targetRatio());
     const efficiencyPercent = availableMinutes > 0 ? round2((producedMinutes / availableMinutes) * 100) : 0;
     const productionPrize = getProductionPrizeTier(efficiencyPercent);
@@ -4659,7 +4681,7 @@ function buildEmployeeResultMessage(employee, context) {
       ? `• Faltam ${fmtNum(gap, 2)} min para chegar na meta de ${tp()}%.`
       : `• Meta de ${tp()}% atingida! Parabéns!`,
     '',
-    `Lembrando: a sua meta por dia é de ${fmtNum(round2(baseMinutesDay() * targetRatio()), Number.isInteger(round2(baseMinutesDay() * targetRatio())) ? 0 : 1)} minutos para ${tp()}%.`
+    `Lembrando: a sua meta por dia é de ${fmtNum(round2(employeeBaseMinutes(employee) * targetRatio()), Number.isInteger(round2(employeeBaseMinutes(employee) * targetRatio())) ? 0 : 1)} minutos para ${tp()}%.`
   ];
   return lines.join('\n');
 }
@@ -5177,8 +5199,9 @@ function handleCreateEmployee(form, res) {
   const birthDate = form.birth_date || null;
   const jobRole = form.job_role || null;
   try {
-    db.prepare('INSERT INTO employees (registration_code, full_name, birth_date, start_date, termination_date, job_role, notes, work_schedule_id, phone) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(form.registration_code.trim(), form.full_name.trim(), birthDate, startDate, terminationDate, jobRole, form.notes || null, Number(form.work_schedule_id || 0) || null, normalizePhone(form.phone));
+    db.prepare('INSERT INTO employees (registration_code, full_name, birth_date, start_date, termination_date, job_role, notes, work_schedule_id, phone, base_minutes_day) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(form.registration_code.trim(), form.full_name.trim(), birthDate, startDate, terminationDate, jobRole, form.notes || null, Number(form.work_schedule_id || 0) || null, normalizePhone(form.phone), parseEmployeeBase(form.base_minutes_day));
+    employeeBaseCache.delete(getActiveDb());
     redirect(res, `/employees?notice=${encodeURIComponent('Colaborador cadastrado com sucesso.')}`);
   } catch (error) {
     const msg = error.message.includes('UNIQUE')
@@ -5216,9 +5239,11 @@ function handleUpdateEmployee(employeeId, form, res) {
           notes = ?,
           work_schedule_id = ?,
           phone = ?,
+          base_minutes_day = ?,
           updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `).run(form.registration_code.trim(), form.full_name.trim(), birthDate, startDate, terminationDate, jobRole, form.notes || null, Number(form.work_schedule_id || 0) || null, normalizePhone(form.phone), employeeId);
+    `).run(form.registration_code.trim(), form.full_name.trim(), birthDate, startDate, terminationDate, jobRole, form.notes || null, Number(form.work_schedule_id || 0) || null, normalizePhone(form.phone), parseEmployeeBase(form.base_minutes_day), employeeId);
+    employeeBaseCache.delete(getActiveDb());
     redirect(res, `/employees?notice=${encodeURIComponent('Colaborador atualizado com sucesso.')}`);
   } catch (error) {
     const msg = error.message.includes('UNIQUE')
@@ -5923,7 +5948,7 @@ function renderDashboard(query, role = 'adm') {
   const totalDisplayedMinutes = round2(displayedEmployees.reduce((sum, employee) => sum + Number(employee.produced_minutes || 0), 0));
   const operatorCount = displayedEmployees.length;
   const companyActiveDays = displayedEmployees.reduce((total, employee) => total + employee.active_days, 0);
-  const companyAvailableMinutes = round2(companyActiveDays * baseMinutesDay());
+  const companyAvailableMinutes = round2(displayedEmployees.reduce((total, employee) => total + Number(employee.available_minutes ?? employee.active_days * employeeBaseMinutes(employee)), 0));
   const companyAverageMinutes = operatorCount ? round2(totalDisplayedMinutes / operatorCount) : 0;
   const companyPercent = companyAvailableMinutes > 0 ? round2((totalDisplayedMinutes / companyAvailableMinutes) * 100) : 0;
   const employeeLaunchBreakdown = db.prepare(`
@@ -5989,7 +6014,7 @@ function renderDashboard(query, role = 'adm') {
         <article class="mini-card"><span>% geral até agora</span><strong id="hourly-total-percent">0,00%</strong></article>
       </div>
       <div class="tracking-alert-list" id="hourly-dashboard-list">
-        ${hourlyDashboardData.rows.map(item => `<div class="tracking-alert-item" data-hourly-card data-first-hour="${item.first_hour_number}" data-minutes="${item.total_minutes}" style="margin-bottom:10px;"><div style="display:flex;justify-content:space-between;gap:12px;align-items:center;"><strong>${escapeHtml(item.full_name)}${item.termination_date && item.termination_date <= currentDay ? ' <span style="color:#ef4444;font-weight:600;">(Inativa)</span>' : ''}</strong><span data-hourly-percent>0,00%</span></div><div style="margin-top:8px;background:rgba(148,163,184,.18);border-radius:999px;height:10px;overflow:hidden;"><div data-hourly-bar style="width:2%;height:10px;background:#22c55e;"></div></div><small>${item.total_quantity} peça(s) · ${fmtNum(item.total_minutes, 3)} min · ${item.launched_hours} hora(s) lançada(s) · início ${escapeHtml(item.first_hour_slot || '-')}</small></div>`).join('') || '<p class="hint">Nenhum lançamento por hora hoje.</p>'}
+        ${hourlyDashboardData.rows.map(item => `<div class="tracking-alert-item" data-hourly-card data-first-hour="${item.first_hour_number}" data-minutes="${item.total_minutes}" data-base="${employeeBaseMinutes({ id: item.employee_id })}" style="margin-bottom:10px;"><div style="display:flex;justify-content:space-between;gap:12px;align-items:center;"><strong>${escapeHtml(item.full_name)}${item.termination_date && item.termination_date <= currentDay ? ' <span style="color:#ef4444;font-weight:600;">(Inativa)</span>' : ''}</strong><span data-hourly-percent>0,00%</span></div><div style="margin-top:8px;background:rgba(148,163,184,.18);border-radius:999px;height:10px;overflow:hidden;"><div data-hourly-bar style="width:2%;height:10px;background:#22c55e;"></div></div><small>${item.total_quantity} peça(s) · ${fmtNum(item.total_minutes, 3)} min · ${item.launched_hours} hora(s) lançada(s) · início ${escapeHtml(item.first_hour_slot || '-')}</small></div>`).join('') || '<p class="hint">Nenhum lançamento por hora hoje.</p>'}
       </div>
       <script>
         (() => {
@@ -6004,7 +6029,7 @@ function renderDashboard(query, role = 'adm') {
             const firstHour = Number(card.dataset.firstHour || 0);
             const minutes = Number(card.dataset.minutes || 0);
             const expectedHours = Math.max(Math.min(currentHour - firstHour + 1, 8), 1);
-            const expectedBase = expectedHours * ${round2(baseMinutesDay() / 8)};
+            const expectedBase = expectedHours * (Number(card.dataset.base || ${baseMinutesDay()}) / 8);
             const pct = expectedBase > 0 ? (minutes / expectedBase) * 100 : 0;
             const pctText = card.querySelector('[data-hourly-percent]');
             const bar = card.querySelector('[data-hourly-bar]');
@@ -7926,7 +7951,7 @@ const BOT_HANDLERS = {
     const snap = getTargetSnapshot();
     const todayMin = db.prepare(`SELECT COALESCE(SUM(p.produced_minutes), 0) AS m FROM op_daily_productions p JOIN ops o ON o.id = p.op_id WHERE ${COUNTED_PRODUCTION_WHERE} AND p.production_date = ?`).get(today()).m;
     const active = getActiveEmployees().length;
-    const goalToday = active * baseMinutesDay() * targetRatio();
+    const goalToday = getActiveEmployees().reduce((sum, emp) => sum + employeeBaseMinutes(emp), 0) * targetRatio();
     const below = snap.rows.filter(r => r.pct < targetPercent()).sort((a, b) => a.pct - b.pct);
     const lines = [
       `🎯 <b>Meta ${tp()}%</b> · ${tgEscape(getCompanyName())}`,
@@ -9759,6 +9784,7 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
         <label>Data de rescisão<input type="date" name="termination_date" value="${formatDateInput(values.termination_date)}" /></label>
         <label>Função *<input name="job_role" required value="${escapeHtml(values.job_role || '')}" /></label>
         ${renderWorkScheduleSelect(values.work_schedule_id, true)}
+        <label>Base minutos/dia<input type="number" name="base_minutes_day" min="1" max="1440" step="0.01" inputmode="decimal" placeholder="Padrão: ${fmtNum(baseMinutesDay(), 0)}" value="${escapeHtml(values.base_minutes_day ?? '')}" /><small class="hint">Em branco usa a padrão da empresa</small></label>
         <label class="full">Observações<textarea name="notes" rows="3">${escapeHtml(values.notes || '')}</textarea></label>
         <div class="full actions"><button class="btn" type="submit">Salvar colaborador</button><a class="btn secondary" href="/employees">Cancelar</a></div>
       </form>
@@ -9766,14 +9792,14 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
     </section>` : ''}
     <section class="panel">
       <table class="table-zebra employees-table">
-        <thead><tr><th>Registro</th><th>Nome</th><th>WhatsApp</th><th>Nascimento</th><th>Início</th><th>Rescisão</th><th>Status</th><th>Função</th><th>Jornada</th><th>Observações</th><th>Ações</th></tr></thead>
+        <thead><tr><th>Registro</th><th>Nome</th><th>WhatsApp</th><th>Nascimento</th><th>Início</th><th>Rescisão</th><th>Status</th><th>Função</th><th>Jornada</th><th>Base/dia</th><th>Observações</th><th>Ações</th></tr></thead>
         <tbody>
           ${employees.map(emp => {
             const isEditing = editingId === emp.id;
             const req = emp.termination_date ? '' : 'required';
             if (isEditing) {
               return `<tr>
-                <td colspan="11">
+                <td colspan="12">
                   <form class="form-grid" method="post" action="/employees/${emp.id}">
                     <label>Registro<input name="registration_code" required value="${escapeHtml(emp.registration_code || '')}" /></label>
                     <label>Nome completo *<input name="full_name" required value="${escapeHtml(emp.full_name || '')}" /></label>
@@ -9783,6 +9809,7 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
                     <label>Data de rescisão<input type="date" name="termination_date" value="${formatDateInput(emp.termination_date)}" /></label>
                     <label>Função${req ? ' *' : ''}<input name="job_role" ${req} value="${escapeHtml(emp.job_role || '')}" /></label>
                     ${renderWorkScheduleSelect(emp.work_schedule_id, Boolean(req))}
+                    <label>Base minutos/dia<input type="number" name="base_minutes_day" min="1" max="1440" step="0.01" inputmode="decimal" placeholder="Padrão: ${fmtNum(baseMinutesDay(), 0)}" value="${escapeHtml(emp.base_minutes_day ?? '')}" /><small class="hint">Em branco usa a padrão da empresa</small></label>
                     <label class="full">Observações<textarea name="notes" rows="3">${escapeHtml(emp.notes || '')}</textarea></label>
                     <div class="full actions"><button class="btn" type="submit">Salvar edição</button><a class="btn secondary" href="/employees">Cancelar</a></div>
                   </form>
@@ -9790,8 +9817,8 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
               </tr>`;
             }
             const status = describeEmployeeStatus(emp);
-            return `<tr class="${status === 'Ativo' ? 'is-active' : 'is-inactive'}"><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td>${renderWhatsAppLink(emp.phone, status === 'Ativo' ? buildEmployeeResultMessage(emp, resultContext) : '')}</td><td>${escapeHtml(nowPt(emp.birth_date))}</td><td>${escapeHtml(nowPt(emp.start_date))}</td><td>${escapeHtml(nowPt(emp.termination_date))}</td><td><span class="status-tag ${status === 'Ativo' ? 'ok' : 'off'}">${escapeHtml(status)}</span></td><td>${escapeHtml(emp.job_role || '-')}</td><td>${escapeHtml(scheduleNames.get(emp.work_schedule_id) || 'Sem jornada')}</td><td>${escapeHtml(emp.notes || '-')}</td><td><a href="/employees?edit=${emp.id}">Editar</a></td></tr>`;
-          }).join('') || '<tr><td colspan="11">Nenhum colaborador cadastrado.</td></tr>'}
+            return `<tr class="${status === 'Ativo' ? 'is-active' : 'is-inactive'}"><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td>${renderWhatsAppLink(emp.phone, status === 'Ativo' ? buildEmployeeResultMessage(emp, resultContext) : '')}</td><td>${escapeHtml(nowPt(emp.birth_date))}</td><td>${escapeHtml(nowPt(emp.start_date))}</td><td>${escapeHtml(nowPt(emp.termination_date))}</td><td><span class="status-tag ${status === 'Ativo' ? 'ok' : 'off'}">${escapeHtml(status)}</span></td><td>${escapeHtml(emp.job_role || '-')}</td><td>${escapeHtml(scheduleNames.get(emp.work_schedule_id) || 'Sem jornada')}</td><td title="Meta/dia: ${fmtNum(round2(employeeBaseMinutes(emp) * targetRatio()), 1)} min para ${tp()}%">${Number(emp.base_minutes_day) > 0 ? `<strong>${fmtNum(emp.base_minutes_day, Number.isInteger(Number(emp.base_minutes_day)) ? 0 : 2)}</strong>` : `${fmtNum(baseMinutesDay(), 0)} <small class="hint">padrão</small>`}</td><td>${escapeHtml(emp.notes || '-')}</td><td><a href="/employees?edit=${emp.id}">Editar</a></td></tr>`;
+          }).join('') || '<tr><td colspan="12">Nenhum colaborador cadastrado.</td></tr>'}
           ${PHONE_MASK_SCRIPT}
         </tbody>
       </table>
@@ -9825,7 +9852,7 @@ function getHourlyProductionRows(productionDate = today(), employeeId = '') {
     ORDER BY hp.hour_slot ASC, e.full_name ASC, hp.created_at DESC
   `).all(...params).map(item => ({
     ...item,
-    hour_efficiency_percent: round2((Number(item.produced_minutes || 0) / (baseMinutesDay() / 8)) * 100)
+    hour_efficiency_percent: round2((Number(item.produced_minutes || 0) / (employeeBaseMinutes({ id: item.employee_id }) / 8)) * 100)
   }));
 }
 
@@ -9852,7 +9879,7 @@ function getHourlyValidationSummary(productionDate = today()) {
     ORDER BY e.full_name ASC
   `).all(productionDate, productionDate).map(item => ({
     ...item,
-    day_efficiency_percent: round2((Number(item.total_minutes || 0) / baseMinutesDay()) * 100)
+    day_efficiency_percent: round2((Number(item.total_minutes || 0) / employeeBaseMinutes({ id: item.employee_id ?? item.id })) * 100)
   }));
 }
 
@@ -9872,7 +9899,7 @@ function getHourlyEmployeeDaySummary(employeeId, productionDate = today(), curre
   const launchedHours = new Set(rows.map(item => item.hour_slot)).size;
   const currentHour = Number(String(currentHourSlot || '').split(':')[0] || 0);
   const expectedHours = Math.max(Math.min(currentHour - 7 + 1, 8), 1);
-  const expectedBaseMinutes = expectedHours * (baseMinutesDay() / 8);
+  const expectedBaseMinutes = expectedHours * (employeeBaseMinutes({ id: employeeId }) / 8);
   const dayEfficiencyPercent = expectedBaseMinutes > 0 ? round2((totalMinutes / expectedBaseMinutes) * 100) : 0;
   return {
     totalMinutes,
