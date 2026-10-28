@@ -4657,7 +4657,9 @@ function buildEmployeeResultMessage(employee, context) {
     `• Eficiência: ${fmtNum(eff.efficiency_percent, 2)}%`,
     gap > 0
       ? `• Faltam ${fmtNum(gap, 2)} min para chegar na meta de ${tp()}%.`
-      : `• Meta de ${tp()}% atingida! Parabéns!`
+      : `• Meta de ${tp()}% atingida! Parabéns!`,
+    '',
+    `Lembrando: a sua meta por dia é de ${fmtNum(round2(baseMinutesDay() * targetRatio()), Number.isInteger(round2(baseMinutesDay() * targetRatio())) ? 0 : 1)} minutos para ${tp()}%.`
   ];
   return lines.join('\n');
 }
