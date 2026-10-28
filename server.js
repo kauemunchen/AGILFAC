@@ -663,6 +663,7 @@ function migrateDatabase(tenantDb = db) {
   ensureColumn(tenantDb, 'employees', 'birth_date', 'TEXT');
   ensureColumn(tenantDb, 'employees', 'job_role', 'TEXT');
   ensureColumn(tenantDb, 'employees', 'phone', 'TEXT');
+  ensureColumn(tenantDb, 'employees', 'target_percent', 'REAL');
   ensureColumn(tenantDb, 'ops', 'collection_name', 'TEXT');
   ensureColumn(tenantDb, 'ops', 'delivery_date', 'TEXT');
   ensureColumn(tenantDb, 'ops', 'pilot_mode', 'TEXT');
@@ -2107,6 +2108,28 @@ function baseMinutesDay() { return numParam('base_minutes_day'); }
 function targetPercent() { return numParam('target_percent'); }
 function targetRatio() { return targetPercent() / 100; }
 function tp() { return fmtNum(targetPercent(), Number.isInteger(targetPercent()) ? 0 : 2); }
+// Meta mínima da colaboradora: própria (cadastro) ou a padrão da empresa (Parâmetros)
+const employeeTargetCache = new WeakMap();
+function employeeTargetPercent(employee) {
+  if (!employee) return targetPercent();
+  let value = employee.target_percent;
+  if (value === undefined && (employee.id || employee.employee_id)) {
+    const store = getActiveDb();
+    let map = employeeTargetCache.get(store);
+    if (!map || Date.now() - map.at > 30000) {
+      map = { at: Date.now(), byId: new Map(db.prepare('SELECT id, target_percent FROM employees').all().map(r => [r.id, r.target_percent])) };
+      employeeTargetCache.set(store, map);
+    }
+    value = map.byId.get(Number(employee.employee_id ?? employee.id));
+  }
+  return Number(value) > 0 ? Number(value) : targetPercent();
+}
+function employeeTargetRatio(employee) { return employeeTargetPercent(employee) / 100; }
+function fmtPct(value) { return fmtNum(value, Number.isInteger(Number(value)) ? 0 : 2); }
+function parseEmployeeTarget(value) {
+  const n = Number(String(value ?? '').replace(',', '.').replace('%', ''));
+  return Number.isFinite(n) && n > 0 && n <= 200 ? round2(n) : null;
+}
 function workdaySet() { return new Set(String(getParams().workdays).split(',').map(Number).filter(d => d >= 0 && d <= 6)); }
 function periodStartDay() { return Math.min(Math.max(Math.round(numParam('period_start_day')), 1), 28); }
 function periodLabel() { const s = periodStartDay(); return s === 1 ? 'mês civil' : `${s} → ${s - 1}`; }
@@ -3727,9 +3750,9 @@ function getDailyTrackingQueryString(filters = {}) {
   return query ? `?${query}` : '';
 }
 
-function getDailyTrackingStatusMeta(percent = 0) {
-  if (percent >= targetPercent()) return { key: 'hit', label: `Acima de ${tp()}%`, badgeClass: 'status-pill ok', rowClass: 'tracking-row-hit', cardClass: 'tracking-status-good', textClass: 'perf-high' };
-  return { key: 'below', label: `Abaixo de ${tp()}%`, badgeClass: 'status-pill pending', rowClass: 'tracking-row-below', cardClass: 'tracking-status-risk', textClass: 'perf-low' };
+function getDailyTrackingStatusMeta(percent = 0, target = targetPercent()) {
+  if (percent >= target) return { key: 'hit', label: `Acima de ${fmtPct(target)}%`, badgeClass: 'status-pill ok', rowClass: 'tracking-row-hit', cardClass: 'tracking-status-good', textClass: 'perf-high' };
+  return { key: 'below', label: `Abaixo de ${fmtPct(target)}%`, badgeClass: 'status-pill pending', rowClass: 'tracking-row-below', cardClass: 'tracking-status-risk', textClass: 'perf-low' };
 }
 
 function getDailyTrackingData(baseDate = today(), period = 'month', employeeId = '', startDate = '', endDate = '') {
@@ -3767,12 +3790,13 @@ function getDailyTrackingData(baseDate = today(), period = 'month', employeeId =
     const producedQuantity = Number(accumulated?.qty || 0);
     const elapsedAvailableMinutes = round2((progressEnd >= range.start ? getEmployeeBaseDays(employee, range.start, progressEnd).length : 0) * baseMinutesDay());
     const totalAvailableMinutes = round2(getEmployeeBaseDays(employee, range.start, range.end).length * baseMinutesDay());
-    const currentTargetMinutes = round2(elapsedAvailableMinutes * targetRatio());
+    const employeeTarget = employeeTargetPercent(employee);
+    const currentTargetMinutes = round2(elapsedAvailableMinutes * (employeeTarget / 100));
     const currentPercent = elapsedAvailableMinutes > 0 ? round2((producedMinutes / elapsedAvailableMinutes) * 100) : 0;
     const fullPeriodPercent = totalAvailableMinutes > 0 ? round2((producedMinutes / totalAvailableMinutes) * 100) : 0;
     const minutesToCurrentTarget = Math.max(round2(currentTargetMinutes - producedMinutes), 0);
     const aboveTargetMinutes = Math.max(round2(producedMinutes - currentTargetMinutes), 0);
-    const statusMeta = getDailyTrackingStatusMeta(currentPercent);
+    const statusMeta = getDailyTrackingStatusMeta(currentPercent, employeeTarget);
 
     employeeSummaries.push({
       ...employee,
@@ -3790,7 +3814,8 @@ function getDailyTrackingData(baseDate = today(), period = 'month', employeeId =
       current_percent: currentPercent,
       full_period_percent: fullPeriodPercent,
       last_production_date: accumulated?.last_production_date || '',
-      status_meta: statusMeta
+      status_meta: statusMeta,
+      target_percent: employeeTarget
     });
   }
 
@@ -3817,7 +3842,7 @@ function getDailyTrackingData(baseDate = today(), period = 'month', employeeId =
     acc.currentTargetMinutes = round2(acc.currentTargetMinutes + Number(item.current_target_minutes || 0));
     acc.minutesToCurrentTarget = round2(acc.minutesToCurrentTarget + Number(item.minutes_to_current_target || 0));
     acc.aboveTargetMinutes = round2(acc.aboveTargetMinutes + Number(item.above_target_minutes || 0));
-    if (item.current_percent >= targetPercent()) acc.reachedCurrentTarget += 1;
+    if (item.current_percent >= item.target_percent) acc.reachedCurrentTarget += 1;
     else acc.belowCurrentTarget += 1;
     return acc;
   }, {
@@ -3841,14 +3866,14 @@ function getDailyTrackingData(baseDate = today(), period = 'month', employeeId =
 
   const leader = employeeSummaries[0] || null;
   const lastPlace = employeeSummaries.length ? employeeSummaries[employeeSummaries.length - 1] : null;
-  const attentionRows = employeeSummaries.filter(item => item.current_percent < 60).slice(0, 3);
+  const attentionRows = employeeSummaries.filter(item => item.current_percent < item.target_percent).slice(0, 3);
   const management = {
     leader,
     lastPlace,
     attentionRows,
     hitRatePercent: totals.employees > 0 ? round2((totals.reachedCurrentTarget / totals.employees) * 100) : 0,
     nextActionLabel: attentionRows.length
-      ? `Priorizar ${attentionRows[0].full_name} (${fmtNum(attentionRows[0].current_percent, 2)}%) · faltam ${fmtNum(attentionRows[0].minutes_to_current_target, 2)} min para ${tp()}%.`
+      ? `Priorizar ${attentionRows[0].full_name} (${fmtNum(attentionRows[0].current_percent, 2)}%) · faltam ${fmtNum(attentionRows[0].minutes_to_current_target, 2)} min para ${fmtPct(attentionRows[0].target_percent)}%.`
       : `Time inteiro acima de ${tp()}% no corte atual.`
   };
 
@@ -3925,7 +3950,7 @@ function renderDailyTrackingCards(data) {
 function renderDailyTrackingRankingTable(data) {
   return `
     <table>
-      <thead><tr><th>Rank</th><th>Colaboradora</th><th>Status</th><th>Dias úteis</th><th>Minutos acumulados</th><th>Base atual</th><th>% até o corte</th><th>Meta atual ${tp()}%</th><th>Faltam p/ ${tp()}%</th><th>% período cheio</th><th>Último lançamento</th></tr></thead>
+      <thead><tr><th>Rank</th><th>Colaboradora</th><th>Status</th><th>Dias úteis</th><th>Minutos acumulados</th><th>Base atual</th><th>% até o corte</th><th>Meta atual</th><th>Faltam p/ meta</th><th>% período cheio</th><th>Último lançamento</th></tr></thead>
       <tbody>
         ${data.employeeSummaries.map(emp => `<tr class="${emp.status_meta.rowClass}"><td><strong>#${emp.ranking_position}</strong></td><td><strong>${escapeHtml(emp.full_name)}</strong><br /><span class="hint">${escapeHtml(emp.registration_code)}</span></td><td><span class="${emp.status_meta.badgeClass}">${emp.status_meta.label}</span></td><td>${emp.business_days_elapsed}/${emp.business_days_total}</td><td>${fmtNum(emp.produced_minutes, 2)}</td><td>${fmtNum(emp.elapsed_available_minutes, 2)}</td><td class="${emp.status_meta.textClass}">${fmtNum(emp.current_percent, 2)}%</td><td>${fmtNum(emp.current_target_minutes, 2)}</td><td>${fmtNum(emp.minutes_to_current_target, 2)}</td><td>${fmtNum(emp.full_period_percent, 2)}%</td><td>${emp.last_production_date ? formatDatePtBr(emp.last_production_date) : '-'}</td></tr>`).join('') || '<tr><td colspan="11">Nenhum colaborador ativo nesse período.</td></tr>'}
       </tbody>
@@ -3936,7 +3961,7 @@ function renderDailyTrackingRankingTable(data) {
 function renderDailyTrackingPrintTable(data) {
   return `
     <table>
-      <thead><tr><th>Rank</th><th>Registro</th><th>Colaboradora</th><th>Status</th><th>Dias úteis</th><th>Peças</th><th>Min. normais</th><th>Min. extras</th><th>Min. acumulados</th><th>Base atual</th><th>% até o corte</th><th>Meta ${tp()}%</th><th>Gap ${tp()}%</th><th>% período cheio</th><th>Último lançamento</th></tr></thead>
+      <thead><tr><th>Rank</th><th>Registro</th><th>Colaboradora</th><th>Status</th><th>Dias úteis</th><th>Peças</th><th>Min. normais</th><th>Min. extras</th><th>Min. acumulados</th><th>Base atual</th><th>% até o corte</th><th>Meta</th><th>Gap meta</th><th>% período cheio</th><th>Último lançamento</th></tr></thead>
       <tbody>
         ${data.employeeSummaries.map(emp => `<tr class="${emp.status_meta.rowClass}"><td><strong>#${emp.ranking_position}</strong></td><td>${escapeHtml(emp.registration_code)}</td><td><strong>${escapeHtml(emp.full_name)}</strong></td><td><span class="${emp.status_meta.badgeClass}">${emp.status_meta.label}</span></td><td>${emp.business_days_elapsed}/${emp.business_days_total}</td><td>${emp.produced_quantity}</td><td>${fmtNum(emp.normal_minutes, 2)}</td><td>${fmtNum(emp.extra_minutes, 2)}</td><td>${fmtNum(emp.produced_minutes, 2)}</td><td>${fmtNum(emp.elapsed_available_minutes, 2)}</td><td class="${emp.status_meta.textClass}">${fmtNum(emp.current_percent, 2)}%</td><td>${fmtNum(emp.current_target_minutes, 2)}</td><td>${fmtNum(emp.minutes_to_current_target, 2)}</td><td>${fmtNum(emp.full_period_percent, 2)}%</td><td>${emp.last_production_date ? formatDatePtBr(emp.last_production_date) : '-'}</td></tr>`).join('') || '<tr><td colspan="15">Nenhum colaborador ativo nesse período.</td></tr>'}
       </tbody>
@@ -3987,7 +4012,7 @@ function renderDailyTrackingPage(query = {}, role = 'adm') {
           <div class="tracking-kpi-item">
             <span>Última colocação</span>
             <strong>${data.management.lastPlace ? `${escapeHtml(data.management.lastPlace.full_name)} · ${fmtNum(data.management.lastPlace.current_percent, 2)}%` : 'Sem dados'}</strong>
-            <small>${data.management.lastPlace ? `Gap atual: ${fmtNum(data.management.lastPlace.minutes_to_current_target, 2)} min para chegar em ${tp()}%.` : 'Nenhum colaborador ativo no período.'}</small>
+            <small>${data.management.lastPlace ? `Gap atual: ${fmtNum(data.management.lastPlace.minutes_to_current_target, 2)} min para chegar em ${fmtPct(data.management.lastPlace.target_percent)}%.` : 'Nenhum colaborador ativo no período.'}</small>
           </div>
           <div class="tracking-kpi-item tracking-kpi-next-step">
             <span>Atalhos do período</span>
@@ -4002,9 +4027,9 @@ function renderDailyTrackingPage(query = {}, role = 'adm') {
       </article>
 
       <article class="panel tracking-management-panel">
-        <div class="panel-header"><h3>Radar abaixo de ${tp()}%</h3><span class="hint">Quem está pedindo atenção primeiro.</span></div>
+        <div class="panel-header"><h3>Radar abaixo da meta</h3><span class="hint">Quem está pedindo atenção primeiro.</span></div>
         <div class="tracking-alert-list">
-          ${data.management.attentionRows.map(emp => `<div class="tracking-alert-item ${emp.status_meta.cardClass}"><strong>${escapeHtml(emp.full_name)}</strong><span>${escapeHtml(emp.registration_code)} · ${fmtNum(emp.current_percent, 2)}%</span><small>Faltam ${fmtNum(emp.minutes_to_current_target, 2)} minutos para alcançar ${tp()}%.</small></div>`).join('') || `<p class="hint">Nenhuma colaboradora abaixo de ${tp()}% no recorte atual.</p>`}
+          ${data.management.attentionRows.map(emp => `<div class="tracking-alert-item ${emp.status_meta.cardClass}"><strong>${escapeHtml(emp.full_name)}</strong><span>${escapeHtml(emp.registration_code)} · ${fmtNum(emp.current_percent, 2)}%</span><small>Faltam ${fmtNum(emp.minutes_to_current_target, 2)} minutos para alcançar ${fmtPct(emp.target_percent)}%.</small></div>`).join('') || `<p class="hint">Nenhuma colaboradora abaixo de ${tp()}% no recorte atual.</p>`}
         </div>
       </article>
     </section>
@@ -4065,7 +4090,7 @@ function renderDailyTrackingExportPage(query = {}, role = 'adm') {
           <div class="tracking-kpi-item">
             <span>Última colocação</span>
             <strong>${data.management.lastPlace ? `${escapeHtml(data.management.lastPlace.full_name)} · ${fmtNum(data.management.lastPlace.current_percent, 2)}%` : 'Sem dados'}</strong>
-            <small>${data.management.lastPlace ? `Gap atual: ${fmtNum(data.management.lastPlace.minutes_to_current_target, 2)} min para chegar em ${tp()}%.` : 'Nenhum colaborador ativo no período.'}</small>
+            <small>${data.management.lastPlace ? `Gap atual: ${fmtNum(data.management.lastPlace.minutes_to_current_target, 2)} min para chegar em ${fmtPct(data.management.lastPlace.target_percent)}%.` : 'Nenhum colaborador ativo no período.'}</small>
           </div>
           <div class="tracking-kpi-item tracking-kpi-next-step">
             <span>Próxima ação gerencial</span>
@@ -4076,9 +4101,9 @@ function renderDailyTrackingExportPage(query = {}, role = 'adm') {
       </article>
 
       <article class="panel tracking-management-panel">
-        <div class="panel-header"><h3>Radar abaixo de ${tp()}%</h3><span class="hint">Prioridade rápida para conferência.</span></div>
+        <div class="panel-header"><h3>Radar abaixo da meta</h3><span class="hint">Prioridade rápida para conferência.</span></div>
         <div class="tracking-alert-list">
-          ${data.management.attentionRows.map(emp => `<div class="tracking-alert-item ${emp.status_meta.cardClass}"><strong>${escapeHtml(emp.full_name)}</strong><span>${escapeHtml(emp.registration_code)} · ${fmtNum(emp.current_percent, 2)}%</span><small>Faltam ${fmtNum(emp.minutes_to_current_target, 2)} minutos para alcançar ${tp()}%.</small></div>`).join('') || `<p class="hint">Nenhuma colaboradora abaixo de ${tp()}% no recorte atual.</p>`}
+          ${data.management.attentionRows.map(emp => `<div class="tracking-alert-item ${emp.status_meta.cardClass}"><strong>${escapeHtml(emp.full_name)}</strong><span>${escapeHtml(emp.registration_code)} · ${fmtNum(emp.current_percent, 2)}%</span><small>Faltam ${fmtNum(emp.minutes_to_current_target, 2)} minutos para alcançar ${fmtPct(emp.target_percent)}%.</small></div>`).join('') || `<p class="hint">Nenhuma colaboradora abaixo de ${tp()}% no recorte atual.</p>`}
         </div>
       </article>
     </section>
@@ -4122,10 +4147,11 @@ function getProductionPrizeData(baseDate = today(), period = 'month', employeeId
     const producedExtraMinutes = round2(Number(productionMap.get(employee.id)?.extra_minutes || 0));
     const producedMinutes = round2(Number(productionMap.get(employee.id)?.minutes || 0));
     const availableMinutes = round2(getEmployeeBaseDays(employee, range.start, range.end).length * baseMinutesDay());
-    const targetMinutes60 = round2(availableMinutes * targetRatio());
+    const employeeTarget = employeeTargetPercent(employee);
+    const targetMinutes60 = round2(availableMinutes * (employeeTarget / 100));
     const efficiencyPercent = availableMinutes > 0 ? round2((producedMinutes / availableMinutes) * 100) : 0;
     const productionPrize = getProductionPrizeTier(efficiencyPercent);
-    const sixtyPrize = efficiencyPercent >= targetPercent() ? numParam('prize_target_value') : 0;
+    const sixtyPrize = efficiencyPercent >= employeeTarget ? numParam('prize_target_value') : 0;
     const extraMinutes = Math.max(round2(producedMinutes - targetMinutes60), 0);
     const extraBlocks = numParam('prize_extra_block_minutes') > 0 ? Math.floor(extraMinutes / numParam('prize_extra_block_minutes')) : 0;
     const extraPrize = extraBlocks * numParam('prize_extra_value');
@@ -4284,7 +4310,7 @@ function renderProductionPrizePage(query = {}, role = 'adm') {
     <section class="panel section-gap">
       <div class="panel-header"><h3>Relatório por colaboradora</h3><span class="hint">Prêmio produção, prêmio ${tp()}% e prêmio extra por colaboradora.</span></div>
       <table>
-        <thead><tr><th>Nome</th><th>Prêmio produção</th><th>Prêmio ${tp()}%</th><th>Prêmio extra</th><th>Total</th><th>Normal</th><th>Extra</th><th>Minutos</th><th>Meta ${tp()}%</th><th>Base</th><th>Eficiência</th><th>Dias úteis</th></tr></thead>
+        <thead><tr><th>Nome</th><th>Prêmio produção</th><th>Prêmio ${tp()}%</th><th>Prêmio extra</th><th>Total</th><th>Normal</th><th>Extra</th><th>Minutos</th><th>Meta</th><th>Base</th><th>Eficiência</th><th>Dias úteis</th></tr></thead>
         <tbody>
           ${data.employeeSummaries.map(emp => {
             const perfClass = emp.efficiency_percent < 40 ? 'perf-low' : (emp.efficiency_percent < 60 ? 'perf-mid' : 'perf-high');
@@ -4335,7 +4361,7 @@ function renderProductionPrizeExportPage(query = {}, role = 'adm') {
     <section class="panel section-gap">
       <h3>Relatório por colaboradora</h3>
       <table>
-        <thead><tr><th>Nome</th><th>Prêmio produção</th><th>Prêmio ${tp()}%</th><th>Prêmio extra</th><th>Total</th><th>Normal</th><th>Extra</th><th>Minutos</th><th>Meta ${tp()}%</th><th>Base</th><th>Eficiência</th></tr></thead>
+        <thead><tr><th>Nome</th><th>Prêmio produção</th><th>Prêmio ${tp()}%</th><th>Prêmio extra</th><th>Total</th><th>Normal</th><th>Extra</th><th>Minutos</th><th>Meta</th><th>Base</th><th>Eficiência</th></tr></thead>
         <tbody>
           ${data.employeeSummaries.map(emp => `<tr><td>${escapeHtml(emp.full_name)}</td><td>${fmtMoney(emp.production_prize)}</td><td>${fmtMoney(emp.sixty_prize)}</td><td>${fmtMoney(emp.extra_prize)}</td><td>${fmtMoney(emp.total_prize)}</td><td>${fmtNum(emp.normal_minutes, 2)}</td><td>${fmtNum(emp.produced_extra_minutes, 2)}</td><td>${fmtNum(emp.produced_minutes, 2)}</td><td>${fmtNum(emp.target_minutes_60, 2)}</td><td>${fmtNum(emp.available_minutes, 2)}</td><td>${fmtNum(emp.efficiency_percent, 2)}%</td></tr>`).join('') || '<tr><td colspan="11">Sem dados para o filtro selecionado.</td></tr>'}
         </tbody>
@@ -4648,7 +4674,8 @@ function buildEmployeeResultMessage(employee, context) {
   if (!eff.business_days) return '';
   const firstName = String(employee.full_name || '').trim().split(/\s+/)[0] || '';
   const name = firstName ? firstName.charAt(0).toUpperCase() + firstName.slice(1).toLowerCase() : '';
-  const target = round2(eff.available_minutes * targetRatio());
+  const targetPct = employeeTargetPercent(employee);
+  const target = round2(eff.available_minutes * (targetPct / 100));
   const gap = round2(target - minutes);
   const lines = [
     `Olá, ${name}! Segue seu resultado no período de ${formatDatePtBr(range.start)} a ${formatDatePtBr(range.end)}, até ${formatDatePtBr(cutoff)}:`,
@@ -4656,10 +4683,10 @@ function buildEmployeeResultMessage(employee, context) {
     `• Minutos produzidos: ${fmtNum(minutes, 2)} min`,
     `• Eficiência: ${fmtNum(eff.efficiency_percent, 2)}%`,
     gap > 0
-      ? `• Faltam ${fmtNum(gap, 2)} min para chegar na meta de ${tp()}%.`
-      : `• Meta de ${tp()}% atingida! Parabéns!`,
+      ? `• Faltam ${fmtNum(gap, 2)} min para chegar na meta de ${fmtPct(targetPct)}%.`
+      : `• Meta de ${fmtPct(targetPct)}% atingida! Parabéns!`,
     '',
-    `Lembrando: a sua meta por dia é de ${fmtNum(round2(baseMinutesDay() * targetRatio()), Number.isInteger(round2(baseMinutesDay() * targetRatio())) ? 0 : 1)} minutos para ${tp()}%.`
+    `Lembrando: a sua meta por dia é de ${fmtNum(round2(baseMinutesDay() * targetPct / 100), Number.isInteger(round2(baseMinutesDay() * targetPct / 100)) ? 0 : 1)} minutos para ${fmtPct(targetPct)}%.`
   ];
   return lines.join('\n');
 }
@@ -5177,8 +5204,9 @@ function handleCreateEmployee(form, res) {
   const birthDate = form.birth_date || null;
   const jobRole = form.job_role || null;
   try {
-    db.prepare('INSERT INTO employees (registration_code, full_name, birth_date, start_date, termination_date, job_role, notes, work_schedule_id, phone) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(form.registration_code.trim(), form.full_name.trim(), birthDate, startDate, terminationDate, jobRole, form.notes || null, Number(form.work_schedule_id || 0) || null, normalizePhone(form.phone));
+    db.prepare('INSERT INTO employees (registration_code, full_name, birth_date, start_date, termination_date, job_role, notes, work_schedule_id, phone, target_percent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(form.registration_code.trim(), form.full_name.trim(), birthDate, startDate, terminationDate, jobRole, form.notes || null, Number(form.work_schedule_id || 0) || null, normalizePhone(form.phone), parseEmployeeTarget(form.target_percent));
+    employeeTargetCache.delete(getActiveDb());
     redirect(res, `/employees?notice=${encodeURIComponent('Colaborador cadastrado com sucesso.')}`);
   } catch (error) {
     const msg = error.message.includes('UNIQUE')
@@ -5216,9 +5244,11 @@ function handleUpdateEmployee(employeeId, form, res) {
           notes = ?,
           work_schedule_id = ?,
           phone = ?,
+          target_percent = ?,
           updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `).run(form.registration_code.trim(), form.full_name.trim(), birthDate, startDate, terminationDate, jobRole, form.notes || null, Number(form.work_schedule_id || 0) || null, normalizePhone(form.phone), employeeId);
+    `).run(form.registration_code.trim(), form.full_name.trim(), birthDate, startDate, terminationDate, jobRole, form.notes || null, Number(form.work_schedule_id || 0) || null, normalizePhone(form.phone), parseEmployeeTarget(form.target_percent), employeeId);
+    employeeTargetCache.delete(getActiveDb());
     redirect(res, `/employees?notice=${encodeURIComponent('Colaborador atualizado com sucesso.')}`);
   } catch (error) {
     const msg = error.message.includes('UNIQUE')
@@ -6108,7 +6138,7 @@ function renderDashboard(query, role = 'adm') {
             <a class="btn secondary" href="/premios/producao${getProductionPrizeQueryString(dailyTrackingData.filters)}">Ver prêmio de produção</a>
           </div>
           <table>
-            <thead><tr><th>Rank</th><th>Registro</th><th>Colaboradora</th><th>Status</th><th>Dias úteis</th><th>Minutos</th><th>% até o corte</th><th>Faltam p/ ${tp()}%</th></tr></thead>
+            <thead><tr><th>Rank</th><th>Registro</th><th>Colaboradora</th><th>Status</th><th>Dias úteis</th><th>Minutos</th><th>% até o corte</th><th>Faltam p/ meta</th></tr></thead>
             <tbody>
               ${dailyTrackingTopRows.map(emp => `<tr class="${emp.status_meta.rowClass}"><td><strong>#${emp.ranking_position}</strong></td><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td><span class="${emp.status_meta.badgeClass}">${emp.status_meta.label}</span></td><td>${emp.business_days_elapsed}/${emp.business_days_total}</td><td>${fmtNum(emp.produced_minutes, 2)}</td><td class="${emp.status_meta.textClass}">${fmtNum(emp.current_percent, 2)}%</td><td>${fmtNum(emp.minutes_to_current_target, 2)}</td></tr>`).join('') || '<tr><td colspan="8">Nenhum colaborador ativo no mês operacional atual.</td></tr>'}
             </tbody>
@@ -7479,7 +7509,7 @@ function getTargetSnapshot(lastDayArg = '') {
   const rows = employees.map(emp => {
     const minutes = round2(counted.get(emp.id)?.minutes || 0);
     const eff = calculateEmployeeEfficiency(emp, minutes, range.start, range.end, cutoff);
-    return { emp, minutes, base: eff.available_minutes, pct: eff.efficiency_percent };
+    return { emp, minutes, base: eff.available_minutes, pct: eff.efficiency_percent, target: employeeTargetPercent(emp) };
   }).filter(r => r.base > 0);
   const minutes = rows.reduce((s, r) => s + r.minutes, 0);
   const base = rows.reduce((s, r) => s + r.base, 0);
@@ -7576,8 +7606,8 @@ const ALERT_RULES = {
   },
   below_target() {
     const snap = getTargetSnapshot();
-    const below = snap.rows.filter(r => r.pct < targetPercent()).sort((a, b) => a.pct - b.pct);
-    return below.length ? [{ ref: 'all', text: `📉 <b>${below.length} colaboradora(s) abaixo de ${tp()}%</b> até ${formatDatePtBr(snap.cutoff)}\n${listLines(below.map(r => `• ${tgEscape(r.emp.full_name)}: ${fmtNum(r.pct, 1)}%`))}` }] : [];
+    const below = snap.rows.filter(r => r.pct < r.target).sort((a, b) => a.pct - b.pct);
+    return below.length ? [{ ref: 'all', text: `📉 <b>${below.length} colaboradora(s) abaixo da meta</b> até ${formatDatePtBr(snap.cutoff)}\n${listLines(below.map(r => `• ${tgEscape(r.emp.full_name)}: ${fmtNum(r.pct, 1)}% (meta ${fmtPct(r.target)}%)`))}` }] : [];
   },
   company_below_target() {
     const snap = getTargetSnapshot();
@@ -7657,7 +7687,7 @@ function buildDailySummary() {
   const due = db.prepare(`SELECT COUNT(*) AS n FROM ops o WHERE ${openOpsWhere()} AND o.delivery_date BETWEEN ? AND ?`).get(today(), addDaysIso(today(), 3)).n;
   const late = db.prepare(`SELECT COUNT(*) AS n FROM ops o WHERE ${openOpsWhere()} AND o.delivery_date IS NOT NULL AND o.delivery_date <> '' AND o.delivery_date < ?`).get(today()).n;
   const cells = db.prepare('SELECT COUNT(DISTINCT op_id) AS n FROM op_cell_transfers WHERE quantity_sent > quantity_returned AND sent_at <= ?').get(addDaysIso(today(), -paramOf('cell_stuck'))).n;
-  const below = snap.rows.filter(r => r.pct < targetPercent()).length;
+  const below = snap.rows.filter(r => r.pct < r.target).length;
   let queue = null;
   try { queue = getQueueForecast(); } catch (_) {}
   return [
@@ -7712,7 +7742,7 @@ function buildWeeklyReport() {
   const sorted = [...snap.rows].sort((a, b) => b.pct - a.pct);
   const top = sorted.slice(0, 5);
   const bottom = sorted.slice(-5).reverse().filter(r => !top.includes(r));
-  const below = snap.rows.filter(r => r.pct < targetPercent()).length;
+  const below = snap.rows.filter(r => r.pct < r.target).length;
   return [
     `📊 <b>Relatório semanal · ${tgEscape(getCompanyName())}</b>`,
     `Semana ${formatDatePtBr(start)} a ${formatDatePtBr(end)}`,
@@ -7926,8 +7956,8 @@ const BOT_HANDLERS = {
     const snap = getTargetSnapshot();
     const todayMin = db.prepare(`SELECT COALESCE(SUM(p.produced_minutes), 0) AS m FROM op_daily_productions p JOIN ops o ON o.id = p.op_id WHERE ${COUNTED_PRODUCTION_WHERE} AND p.production_date = ?`).get(today()).m;
     const active = getActiveEmployees().length;
-    const goalToday = active * baseMinutesDay() * targetRatio();
-    const below = snap.rows.filter(r => r.pct < targetPercent()).sort((a, b) => a.pct - b.pct);
+    const goalToday = getActiveEmployees().reduce((sum, emp) => sum + baseMinutesDay() * employeeTargetRatio(emp), 0);
+    const below = snap.rows.filter(r => r.pct < r.target).sort((a, b) => a.pct - b.pct);
     const lines = [
       `🎯 <b>Meta ${tp()}%</b> · ${tgEscape(getCompanyName())}`,
       `Eficiência até ${formatDatePtBr(snap.cutoff)}: <b>${fmtNum(snap.total.pct, 2)}%</b>`,
@@ -7936,7 +7966,7 @@ const BOT_HANDLERS = {
     ];
     if (aud === 'gestor' && snap.rows.length) {
       const sorted = [...snap.rows].sort((a, b) => b.pct - a.pct);
-      lines.push('', sorted.map(r => `${r.pct >= targetPercent() ? '✅' : '🔻'} ${tgEscape(r.emp.full_name)}: ${fmtNum(r.pct, 1)}%`).join('\n'));
+      lines.push('', sorted.map(r => `${r.pct >= r.target ? '✅' : '🔻'} ${tgEscape(r.emp.full_name)}: ${fmtNum(r.pct, 1)}%${r.target !== targetPercent() ? ` (meta ${fmtPct(r.target)}%)` : ''}`).join('\n'));
     }
     return lines.join('\n');
   },
@@ -8274,7 +8304,7 @@ const API_ROUTES = {
       minutos_ate_corte: snap.total.minutes,
       minutos_base_ate_corte: snap.total.base,
       colaboradoras_ativas: getActiveEmployees().length,
-      colaboradoras_abaixo_da_meta: snap.rows.filter(r => r.pct < targetPercent()).length,
+      colaboradoras_abaixo_da_meta: snap.rows.filter(r => r.pct < r.target).length,
       producao_hoje: { minutos: round2(todayMin.m), pecas: Number(todayMin.q) },
       producao_ultimo_dia_util: { data: lastDay, minutos: round2(lastMin) },
       ops_em_aberto: open.length,
@@ -8345,10 +8375,10 @@ const API_ROUTES = {
       base_minutos_dia: baseMinutesDay(),
       empresa: { percentual: snap.total.pct, minutos: snap.total.minutes, minutos_base: snap.total.base },
       colaboradoras_total: snap.rows.length,
-      colaboradoras_abaixo_da_meta: snap.rows.filter(r => r.pct < targetPercent()).length
+      colaboradoras_abaixo_da_meta: snap.rows.filter(r => r.pct < r.target).length
     };
     if (getAlertSetting('api_allow_individual') === '1') {
-      result.colaboradoras = [...snap.rows].sort((a, b) => b.pct - a.pct).map(r => ({ nome: r.emp.full_name, percentual: r.pct, minutos: r.minutes, minutos_base: r.base, atingiu_meta: r.pct >= targetPercent() }));
+      result.colaboradoras = [...snap.rows].sort((a, b) => b.pct - a.pct).map(r => ({ nome: r.emp.full_name, percentual: r.pct, minutos: r.minutes, minutos_base: r.base, meta_percentual: r.target, atingiu_meta: r.pct >= r.target }));
     } else {
       result.colaboradoras = null;
       result.observacao = 'Resultado por colaboradora desativado em Parâmetros → API de leitura.';
@@ -9759,6 +9789,7 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
         <label>Data de rescisão<input type="date" name="termination_date" value="${formatDateInput(values.termination_date)}" /></label>
         <label>Função *<input name="job_role" required value="${escapeHtml(values.job_role || '')}" /></label>
         ${renderWorkScheduleSelect(values.work_schedule_id, true)}
+        <label>Meta mínima (%)<input type="number" name="target_percent" min="1" max="200" step="0.01" inputmode="decimal" placeholder="Padrão: ${tp()}" value="${escapeHtml(values.target_percent ?? '')}" /><small class="hint">Em branco usa a meta padrão (${tp()}%)</small></label>
         <label class="full">Observações<textarea name="notes" rows="3">${escapeHtml(values.notes || '')}</textarea></label>
         <div class="full actions"><button class="btn" type="submit">Salvar colaborador</button><a class="btn secondary" href="/employees">Cancelar</a></div>
       </form>
@@ -9766,14 +9797,14 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
     </section>` : ''}
     <section class="panel">
       <table class="table-zebra employees-table">
-        <thead><tr><th>Registro</th><th>Nome</th><th>WhatsApp</th><th>Nascimento</th><th>Início</th><th>Rescisão</th><th>Status</th><th>Função</th><th>Jornada</th><th>Observações</th><th>Ações</th></tr></thead>
+        <thead><tr><th>Registro</th><th>Nome</th><th>WhatsApp</th><th>Nascimento</th><th>Início</th><th>Rescisão</th><th>Status</th><th>Função</th><th>Jornada</th><th>Meta</th><th>Observações</th><th>Ações</th></tr></thead>
         <tbody>
           ${employees.map(emp => {
             const isEditing = editingId === emp.id;
             const req = emp.termination_date ? '' : 'required';
             if (isEditing) {
               return `<tr>
-                <td colspan="11">
+                <td colspan="12">
                   <form class="form-grid" method="post" action="/employees/${emp.id}">
                     <label>Registro<input name="registration_code" required value="${escapeHtml(emp.registration_code || '')}" /></label>
                     <label>Nome completo *<input name="full_name" required value="${escapeHtml(emp.full_name || '')}" /></label>
@@ -9783,6 +9814,7 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
                     <label>Data de rescisão<input type="date" name="termination_date" value="${formatDateInput(emp.termination_date)}" /></label>
                     <label>Função${req ? ' *' : ''}<input name="job_role" ${req} value="${escapeHtml(emp.job_role || '')}" /></label>
                     ${renderWorkScheduleSelect(emp.work_schedule_id, Boolean(req))}
+                    <label>Meta mínima (%)<input type="number" name="target_percent" min="1" max="200" step="0.01" inputmode="decimal" placeholder="Padrão: ${tp()}" value="${escapeHtml(emp.target_percent ?? '')}" /><small class="hint">Em branco usa a meta padrão (${tp()}%)</small></label>
                     <label class="full">Observações<textarea name="notes" rows="3">${escapeHtml(emp.notes || '')}</textarea></label>
                     <div class="full actions"><button class="btn" type="submit">Salvar edição</button><a class="btn secondary" href="/employees">Cancelar</a></div>
                   </form>
@@ -9790,8 +9822,8 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
               </tr>`;
             }
             const status = describeEmployeeStatus(emp);
-            return `<tr class="${status === 'Ativo' ? 'is-active' : 'is-inactive'}"><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td>${renderWhatsAppLink(emp.phone, status === 'Ativo' ? buildEmployeeResultMessage(emp, resultContext) : '')}</td><td>${escapeHtml(nowPt(emp.birth_date))}</td><td>${escapeHtml(nowPt(emp.start_date))}</td><td>${escapeHtml(nowPt(emp.termination_date))}</td><td><span class="status-tag ${status === 'Ativo' ? 'ok' : 'off'}">${escapeHtml(status)}</span></td><td>${escapeHtml(emp.job_role || '-')}</td><td>${escapeHtml(scheduleNames.get(emp.work_schedule_id) || 'Sem jornada')}</td><td>${escapeHtml(emp.notes || '-')}</td><td><a href="/employees?edit=${emp.id}">Editar</a></td></tr>`;
-          }).join('') || '<tr><td colspan="11">Nenhum colaborador cadastrado.</td></tr>'}
+            return `<tr class="${status === 'Ativo' ? 'is-active' : 'is-inactive'}"><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td>${renderWhatsAppLink(emp.phone, status === 'Ativo' ? buildEmployeeResultMessage(emp, resultContext) : '')}</td><td>${escapeHtml(nowPt(emp.birth_date))}</td><td>${escapeHtml(nowPt(emp.start_date))}</td><td>${escapeHtml(nowPt(emp.termination_date))}</td><td><span class="status-tag ${status === 'Ativo' ? 'ok' : 'off'}">${escapeHtml(status)}</span></td><td>${escapeHtml(emp.job_role || '-')}</td><td>${escapeHtml(scheduleNames.get(emp.work_schedule_id) || 'Sem jornada')}</td><td title="Meta por dia: ${fmtNum(round2(baseMinutesDay() * employeeTargetRatio(emp)), 1)} min">${Number(emp.target_percent) > 0 ? `<strong>${fmtPct(emp.target_percent)}%</strong>` : `${tp()}% <small class="hint">padrão</small>`}</td><td>${escapeHtml(emp.notes || '-')}</td><td><a href="/employees?edit=${emp.id}">Editar</a></td></tr>`;
+          }).join('') || '<tr><td colspan="12">Nenhum colaborador cadastrado.</td></tr>'}
           ${PHONE_MASK_SCRIPT}
         </tbody>
       </table>
