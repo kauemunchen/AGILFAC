@@ -8930,6 +8930,8 @@ function renderExtraLaunchPage(values = {}, error = '', notice = '', role = 'adm
   const rEmp = String(values.r_employee || '');
   const report = getExtraEfficiencyReport(rStart, rEnd, rEmp);
   const effCell = pct => pct === null ? '<span class="hint">sem tempo</span>' : `<strong class="${extraEffClass(pct)}">${fmtNum(pct, 1)}%</strong>`;
+  const backQuery = new URLSearchParams({ r_employee: rEmp, r_start: rStart, r_end: rEnd }).toString();
+  const missingTime = report.rows.filter(r => !(Number(r.worked_minutes) > 0)).length;
   const content = `
     <section class="page-header">
       <div>
@@ -8994,9 +8996,15 @@ function renderExtraLaunchPage(values = {}, error = '', notice = '', role = 'adm
       <h3 style="margin-top:14px">${rEmp ? 'Lançamentos da colaboradora' : 'Lançamentos do período'}</h3>
       <div class="table-wrap"><table>
         <thead><tr><th>Data</th>${rEmp ? '' : '<th>Colaboradora</th>'}<th>OP</th><th>Peças</th><th>Trabalhado</th><th>Min produzidos</th><th>Eficiência</th><th>Meta</th></tr></thead>
-        <tbody>${report.rows.slice(0, 200).map(r => { const pct = Number(r.worked_minutes) > 0 ? round2((Number(r.produced_minutes) / Number(r.worked_minutes)) * 100) : null; return `<tr><td>${formatDatePtBr(r.production_date)}</td>${rEmp ? '' : `<td>${escapeHtml(r.full_name)}</td>`}<td>${escapeHtml(r.op_number)}</td><td>${fmtNum(r.produced_quantity, 0)}</td><td>${Number(r.worked_minutes) > 0 ? fmtHoursMinutes(r.worked_minutes) : '—'}</td><td>${fmtNum(r.produced_minutes, 2)}</td><td>${effCell(pct)}</td><td>${r.counts_for_prize ? '✅ Conta' : '— Não conta'}</td></tr>`; }).join('') || `<tr><td colspan="${rEmp ? 7 : 8}">Nenhum lançamento.</td></tr>`}</tbody>
+        <tbody>${report.rows.slice(0, 200).map(r => { const pct = Number(r.worked_minutes) > 0 ? round2((Number(r.produced_minutes) / Number(r.worked_minutes)) * 100) : null; return `<tr><td>${formatDatePtBr(r.production_date)}</td>${rEmp ? '' : `<td>${escapeHtml(r.full_name)}</td>`}<td>${escapeHtml(r.op_number)}</td><td>${fmtNum(r.produced_quantity, 0)}</td><td><form class="worked-edit" method="post" action="/productions/extra/worked"><input type="hidden" name="id" value="${r.id}" /><input type="hidden" name="back" value="${escapeHtml(backQuery)}" /><input name="worked_time" value="${Number(r.worked_minutes) > 0 ? escapeHtml(fmtHoursMinutes(r.worked_minutes).replace('h', ':').replace(' min', '')) : ''}" placeholder="—" aria-label="Tempo trabalhado" /><button class="btn secondary" type="submit" title="Salvar tempo">✔</button></form></td><td>${fmtNum(r.produced_minutes, 2)}</td><td>${effCell(pct)}</td><td>${r.counts_for_prize ? '✅ Conta' : '— Não conta'}</td></tr>`; }).join('') || `<tr><td colspan="${rEmp ? 7 : 8}">Nenhum lançamento.</td></tr>`}</tbody>
       </table></div>
-      <p class="hint">Eficiência da hora extra = minutos produzidos ÷ tempo trabalhado. Lançamentos sem tempo informado não entram no percentual. Para corrigir um lançamento, use Estornos.</p>
+      ${missingTime ? `
+      <form class="inline-form worked-bulk" method="post" action="/productions/extra/worked-bulk" onsubmit="return confirm('Preencher o tempo nos ${missingTime} lançamento(s) sem tempo deste filtro?')">
+        <input type="hidden" name="r_employee" value="${escapeHtml(rEmp)}" /><input type="hidden" name="r_start" value="${escapeHtml(rStart)}" /><input type="hidden" name="r_end" value="${escapeHtml(rEnd)}" />
+        <label>${missingTime} lançamento(s) sem tempo trabalhado: preencher com<input name="worked_time" required placeholder="Ex.: 120 ou 2:00" /></label>
+        <div class="actions" style="align-self:flex-end"><button class="btn" type="submit">Aplicar</button></div>
+      </form>` : ''}
+      <p class="hint">Eficiência da hora extra = minutos produzidos ÷ tempo trabalhado. Lançamentos sem tempo informado não entram no percentual. O tempo pode ser corrigido direto na tabela (✔ salva). Para corrigir peças ou OP, use Estornos.</p>
     </section>
     ${renderScannerScript()}
     <script>
@@ -9060,6 +9068,30 @@ function renderExtraLaunchPage(values = {}, error = '', notice = '', role = 'adm
       })();
     </script>`;
   return pageLayout({ title: 'Lançamento hora extra', content, notice, error, role });
+}
+
+function handleUpdateWorkedTime(form, res, role) {
+  const back = String(form.back || '');
+  const go = (msg, isError) => redirect(res, `/productions/extra?${back}&${isError ? 'error' : 'notice'}=${encodeURIComponent(msg)}#relatorio`);
+  const minutes = String(form.worked_time || '').trim() === '' ? 0 : parseWorkedMinutes(form.worked_time);
+  if (Number.isNaN(minutes) || minutes < 0 || minutes > 16 * 60) return go('Tempo inválido. Use 120, 2:00 ou 1h30.', true);
+  const row = db.prepare("SELECT id FROM op_daily_productions WHERE id = ? AND launch_kind = 'hora_extra' AND is_reversed = 0").get(Number(form.id));
+  if (!row) return go('Lançamento não encontrado.', true);
+  db.prepare('UPDATE op_daily_productions SET worked_minutes = ? WHERE id = ?').run(minutes || null, row.id);
+  go(minutes ? `Tempo trabalhado salvo: ${fmtHoursMinutes(minutes)}.` : 'Tempo trabalhado removido.');
+}
+
+function handleBulkWorkedTime(form, res, role) {
+  const minutes = parseWorkedMinutes(form.worked_time);
+  const back = new URLSearchParams({ r_employee: String(form.r_employee || ''), r_start: String(form.r_start || ''), r_end: String(form.r_end || '') }).toString();
+  if (!(minutes > 0) || minutes > 16 * 60) return redirect(res, `/productions/extra?${back}&error=${encodeURIComponent('Tempo inválido. Use 120, 2:00 ou 1h30.')}#relatorio`);
+  const valid = d => /^\d{4}-\d{2}-\d{2}$/.test(String(d || ''));
+  if (!valid(form.r_start) || !valid(form.r_end)) return redirect(res, `/productions/extra?error=${encodeURIComponent('Período inválido.')}#relatorio`);
+  const params = [minutes, form.r_start, form.r_end];
+  let where = "launch_kind = 'hora_extra' AND is_reversed = 0 AND (worked_minutes IS NULL OR worked_minutes <= 0) AND production_date BETWEEN ? AND ?";
+  if (form.r_employee) { where += ' AND employee_id = ?'; params.push(Number(form.r_employee)); }
+  const result = db.prepare(`UPDATE op_daily_productions SET worked_minutes = ? WHERE ${where}`).run(...params);
+  redirect(res, `/productions/extra?${back}&notice=${encodeURIComponent(`Tempo de ${fmtHoursMinutes(minutes)} preenchido em ${result.changes} lançamento(s).`)}#relatorio`);
 }
 
 function handleCreateExtraLaunch(form, res, role) {
@@ -11932,9 +11964,11 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === 'GET' && pathname === '/productions/new') return sendHtml(res, renderProductionForm(query, query.error || '', query.notice || '', role));
       if (req.method === 'POST' && pathname === '/productions') return handleCreateProduction(await parseBody(req), res);
-      if (pathname === '/productions/extra' && (isLancadorRole(role) || isHourlyLauncherRole(role))) return requireAdmin(req, res, role);
+      if (pathname.startsWith('/productions/extra') && (isLancadorRole(role) || isHourlyLauncherRole(role))) return requireAdmin(req, res, role);
       if (req.method === 'GET' && pathname === '/productions/extra') return sendHtml(res, renderExtraLaunchPage(query, query.error || '', query.notice || '', role));
       if (req.method === 'POST' && pathname === '/productions/extra') return handleCreateExtraLaunch(await parseBody(req), res, role);
+      if (req.method === 'POST' && pathname === '/productions/extra/worked') return handleUpdateWorkedTime(await parseBody(req), res, role);
+      if (req.method === 'POST' && pathname === '/productions/extra/worked-bulk') return handleBulkWorkedTime(await parseBody(req), res, role);
 
       if (req.method === 'GET' && pathname === '/labels/entry') return sendHtml(res, renderEntryLabelsPage(query, role));
       if (req.method === 'GET' && pathname === '/labels/shipment') return sendHtml(res, renderShipmentLabelsPage(query, role));

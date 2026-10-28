@@ -301,3 +301,7 @@ fieldset { border: 1px solid rgba(148, 163, 184, .35); border-radius: 10px; padd
 .extra-calc strong { font-size: 18px; }
 .extra-calc.is-good { background: #dcfce7; color: #166534; }
 .extra-calc.is-bad { background: #fee2e2; color: #991b1b; }
+.worked-edit { display: flex; gap: 4px; align-items: center; margin: 0; }
+.worked-edit input { width: 70px; padding: 4px 6px; }
+.worked-edit .btn { padding: 4px 8px; min-height: 0; }
+.worked-bulk { margin-top: 12px; padding: 10px; border: 1px dashed #93c5fd; border-radius: 12px; background: #f8fbff; }
