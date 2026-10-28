@@ -1122,6 +1122,7 @@ function migrateWorkSchedulesAndPrizeFlag(tenantDb) {
     tenantDb.prepare("INSERT INTO app_settings (key, value, updated_at) VALUES ('seed_work_schedules_v1', '1', CURRENT_TIMESTAMP)").run();
   }
   ensureColumn(tenantDb, 'op_daily_productions', 'counts_for_prize', 'INTEGER NOT NULL DEFAULT 1');
+  ensureColumn(tenantDb, 'op_daily_productions', 'launch_kind', 'TEXT');
   ensureColumn(tenantDb, 'hourly_productions', 'counts_for_prize', 'INTEGER NOT NULL DEFAULT 1');
   tenantDb.exec(`
     CREATE TABLE IF NOT EXISTS prize_flag_migration_log (
@@ -2198,7 +2199,7 @@ function renderRoleSwitcher(role) {
 
 // T1.7 — Menu agrupado (Produção, Expedição, Financeiro, Pessoas, Configurações), grupos recolhíveis
 const NAV_GROUPS = [
-  { key: 'producao', label: 'Produção', hrefs: ['/', '/acompanhamento/diario', '/productions/hourly', '/productions/new', '/ops/new', '/ops', '/labels/entry', '/op-extra-times'] },
+  { key: 'producao', label: 'Produção', hrefs: ['/', '/acompanhamento/diario', '/productions/hourly', '/productions/new', '/productions/extra', '/ops/new', '/ops', '/labels/entry', '/op-extra-times'] },
   { key: 'expedicao', label: 'Expedição', hrefs: ['/shipments/new', '/shipments', '/labels/shipment'] },
   { key: 'financeiro', label: 'Financeiro', hrefs: ['/billing-reconciliation', '/closures', '/ausencias/importar', '/premios/producao', '/cells/report', '/cells/closures'] },
   { key: 'pessoas', label: 'Pessoas', hrefs: ['/employees'] },
@@ -2254,6 +2255,7 @@ function pageLayout({ title, content, notice = '', error = '', role = 'adm' }) {
         { href: '/acompanhamento/diario', label: 'Acomp. diário', icon: '📈', active: title.startsWith('Acompanhamento diário') },
         { href: '/productions/hourly', label: 'Lanç. hora', icon: '⏰', active: title === 'Lançamento por hora' },
         { href: '/productions/new', label: 'Lançamentos', icon: '🧵', active: title === 'Novo lançamento' },
+        { href: '/productions/extra', label: 'Hora extra', icon: '🌙', active: title === 'Lançamento hora extra' },
         { href: '/ops/new', label: 'Cadastro OP', icon: '📝', active: title === 'Nova OP' },
         { href: '/labels/entry', label: 'Etiq. entrada', icon: '🏷️', active: title.startsWith('Etiquetas de entrada') },
         { href: '/ops', label: 'Consulta OP', icon: '📦', active: title.startsWith('OPs') },
@@ -8851,6 +8853,145 @@ async function handleAbsenceImport(req, res, role) {
 }
 // ===============================================================
 
+// ===================== LANÇAMENTO HORA EXTRA / RETROATIVO =====================
+// Lançamento único (como o rápido), com data livre (passada) e a flag decidindo se conta
+// na meta/eficiência e nos minutos do mês. A flag vale sempre, mesmo dentro da jornada.
+function renderExtraLaunchPage(values = {}, error = '', notice = '', role = 'adm') {
+  const employees = db.prepare('SELECT id, registration_code, full_name, start_date, termination_date FROM employees ORDER BY full_name').all()
+    .filter(emp => !emp.termination_date || emp.termination_date >= addDaysIso(today(), -60));
+  const selectedEmployeeId = String(values.employee_id || '');
+  const counts = values.counts_for_prize === undefined ? true : parseCountsForPrizeFlag(values.counts_for_prize) === 1;
+  const recent = db.prepare(`
+    SELECT p.id, p.production_date, p.produced_quantity, p.produced_minutes, p.counts_for_prize, p.created_at, o.op_number, e.full_name
+    FROM op_daily_productions p JOIN ops o ON o.id = p.op_id JOIN employees e ON e.id = p.employee_id
+    WHERE p.launch_kind = 'hora_extra' AND p.is_reversed = 0
+    ORDER BY p.created_at DESC, p.id DESC LIMIT 25`).all();
+  const content = `
+    <section class="page-header">
+      <div>
+        <h2>Lançamento hora extra / retroativo</h2>
+        <p>Peças feitas em hora extra ou esquecidas em outro dia. Escolha a data e se os minutos contam na meta e na soma do mês.</p>
+      </div>
+      <div class="header-actions"><a class="btn secondary" href="/productions/new">Lançamento rápido</a></div>
+    </section>
+    <section class="panel quick-launch-panel">
+      <form class="form-grid quick-launch-form" method="post" action="/productions/extra" data-extra-launch>
+        <label>Colaborador
+          <select name="employee_id" required data-x="employee">
+            <option value="">Selecione</option>
+            ${employees.map(emp => `<option value="${emp.id}" ${selectedEmployeeId === String(emp.id) ? 'selected' : ''}>${escapeHtml(emp.registration_code)} - ${escapeHtml(emp.full_name)}${emp.termination_date ? ' (desligada)' : ''}</option>`).join('')}
+          </select>
+        </label>
+        <label>Data
+          <input type="date" name="production_date" required max="${today()}" value="${escapeHtml(values.production_date || '')}" data-x="date" />
+        </label>
+        <label>OP
+          <span class="scan-input"><input name="op_number" required autocomplete="off" placeholder="Bipe ou digite a OP" value="${escapeHtml(values.op_number || '')}" data-x="op" data-scan-input /><button class="btn secondary scan-btn" type="button" data-scan-camera title="Ler com a câmera">📷</button></span>
+        </label>
+        <label>Quantidade de peças
+          <input type="number" inputmode="numeric" min="1" name="produced_quantity" required value="${escapeHtml(values.produced_quantity || '')}" data-x="quantity" />
+        </label>
+        <div class="extra-flag">
+          <input type="hidden" name="counts_for_prize" value="0" />
+          <label class="extra-flag-line"><input type="checkbox" name="counts_for_prize" value="1" ${counts ? 'checked' : ''} /> Conta na meta</label>
+          <small class="hint">Marcado: minutos entram na eficiência, no prêmio e na soma do mês. Desmarcado: só baixa as peças da OP.</small>
+        </div>
+        <div class="full actions"><button class="btn" type="submit">Salvar lançamento</button></div>
+      </form>
+      <div class="quick-op-preview" data-x="preview" hidden></div>
+    </section>
+    <section class="panel section-gap" style="margin-top:14px">
+      <h3>Últimos lançamentos de hora extra / retroativos</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Data</th><th>Colaboradora</th><th>OP</th><th>Peças</th><th>Minutos</th><th>Conta na meta</th><th>Lançado em</th></tr></thead>
+        <tbody>${recent.map(r => `<tr><td>${formatDatePtBr(r.production_date)}</td><td>${escapeHtml(r.full_name)}</td><td>${escapeHtml(r.op_number)}</td><td>${fmtNum(r.produced_quantity, 0)}</td><td>${fmtNum(r.produced_minutes, 2)}</td><td>${r.counts_for_prize ? '✅ Conta' : '— Não conta'}</td><td>${escapeHtml(nowPt(r.created_at))}</td></tr>`).join('') || '<tr><td colspan="7">Nenhum lançamento ainda.</td></tr>'}</tbody>
+      </table></div>
+      <p class="hint">Para corrigir um lançamento, use Estornos.</p>
+    </section>
+    ${renderScannerScript()}
+    <script>
+      (() => {
+        const form = document.querySelector('[data-extra-launch]');
+        if (!form) return;
+        const q = k => form.querySelector('[data-x="' + k + '"]');
+        const op = q('op'), quantity = q('quantity'), preview = document.querySelector('[data-x="preview"]');
+        const ordered = [q('employee'), q('date'), op, quantity];
+        (ordered.find(f => f && !f.value) || quantity).focus();
+        const show = async () => {
+          const n = (op.value || '').trim();
+          if (!n) { preview.hidden = true; return; }
+          try {
+            const r = await fetch('/api/op-preview?op_number=' + encodeURIComponent(n), { headers: { Accept: 'application/json' } });
+            const d = await r.json();
+            preview.hidden = false;
+            if (!d.found) { preview.className = 'quick-op-preview is-missing'; preview.innerHTML = '<strong>OP não encontrada.</strong>'; return; }
+            preview.className = 'quick-op-preview' + (d.remaining_quantity <= 0 ? ' is-finished' : '');
+            preview.innerHTML = '<strong></strong><span></span>';
+            preview.querySelector('strong').textContent = d.op_number + ' · ' + (d.product_name || '');
+            preview.querySelector('span').textContent = 'Saldo: ' + d.remaining_quantity + ' peça(s) · Produzido: ' + d.produced_quantity + '/' + d.total_pieces + ' · Total/pç: ' + Number(d.total_launch_minutes_per_piece || 0).toFixed(3) + ' min';
+          } catch (_) {}
+        };
+        op.addEventListener('change', show);
+        op.addEventListener('blur', show);
+        op.addEventListener('scan', () => { show(); quantity.focus(); });
+        ordered.forEach((field, i) => field && field.addEventListener('keydown', e => {
+          if (e.key !== 'Enter' || field === quantity) return;
+          e.preventDefault();
+          if (field === op) show();
+          const next = ordered[i + 1]; if (next) next.focus();
+        }));
+        if (op.value) show();
+      })();
+    </script>`;
+  return pageLayout({ title: 'Lançamento hora extra', content, notice, error, role });
+}
+
+function handleCreateExtraLaunch(form, res, role) {
+  const fail = (msg, status = 422) => sendHtml(res, renderExtraLaunchPage(form, msg, '', role), status);
+  const employeeId = Number(form.employee_id);
+  const producedQuantity = Number(form.produced_quantity);
+  const productionDate = String(form.production_date || '').trim();
+  const counts = parseCountsForPrizeFlag(form.counts_for_prize);
+  if (!employeeId || !productionDate || !String(form.op_number || '').trim() || !(producedQuantity > 0) || !Number.isInteger(producedQuantity)) return fail('Preencha colaborador, data, OP e quantidade de peças.');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(productionDate) || productionDate > today()) return fail('A data não pode ser futura.');
+  const found = getOpByNumber(form.op_number);
+  if (!found) return fail('OP não encontrada.', 404);
+  const op = db.prepare('SELECT * FROM ops WHERE id = ?').get(found.id);
+  const employee = db.prepare('SELECT * FROM employees WHERE id = ?').get(employeeId);
+  if (!op || !employee) return fail('OP ou colaborador não encontrado.', 404);
+  if (employee.start_date && productionDate < employee.start_date) return fail(`A colaboradora foi admitida em ${formatDatePtBr(employee.start_date)}. Confira a data.`);
+  if (employee.termination_date && productionDate > employee.termination_date) return fail(`A colaboradora foi desligada em ${formatDatePtBr(employee.termination_date)}. Confira a data.`);
+  // OP na célula só bloqueia se o envio for anterior à data do lançamento
+  const cell = getCurrentCellTransfer(op.id);
+  if (cell && String(cell.sent_at || '').slice(0, 10) <= productionDate) return fail('Esta OP está em célula desde antes dessa data. Faça o retorno da célula antes de lançar.');
+  const totals = db.prepare(`
+    SELECT
+      COALESCE((SELECT SUM(produced_quantity) FROM op_daily_productions WHERE op_id = ? AND is_reversed = 0), 0) AS produced_total,
+      COALESCE((SELECT SUM(quantity) FROM op_problem_items WHERE op_id = ?), 0) AS problem_total
+  `).get(op.id, op.id);
+  const futureTotal = Number(totals.produced_total || 0) + Number(totals.problem_total || 0) + producedQuantity;
+  if (futureTotal > Number(op.total_pieces || 0)) return fail(`Lançamento bloqueado: a OP ultrapassaria o total em ${futureTotal - Number(op.total_pieces || 0)} peça(s).`);
+  const launchF21 = round3(Number(op.minutes_f21 || 0));
+  if (!(launchF21 > 0)) return fail('A OP não tem minuto F21 cadastrado.');
+  const metrics = calculateProductionLaunchMetrics(op, producedQuantity, launchF21, productionDate);
+  db.prepare(`
+    INSERT INTO op_daily_productions (
+      op_id, employee_id, production_date, produced_quantity, used_minutes_f21, normal_minutes, extra_minutes, produced_minutes,
+      extra_time_id, extra_reason_snapshot, extra_description_snapshot, extra_effective_date_snapshot, extra_minutes_per_piece_snapshot,
+      counts_for_prize, launch_kind
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'hora_extra')
+  `).run(
+    op.id, employeeId, productionDate, producedQuantity, launchF21, metrics.normalMinutes, metrics.extraMinutes, metrics.totalMinutes,
+    metrics.extraSnapshot.extra_time_id, metrics.extraSnapshot.extra_reason_snapshot, metrics.extraSnapshot.extra_description_snapshot,
+    metrics.extraSnapshot.extra_effective_date_snapshot, metrics.extraSnapshot.extra_minutes_per_piece_snapshot, counts
+  );
+  recalculateOpStatus(op.id);
+  const msg = `Lançado: ${employee.full_name} · ${op.op_number} · ${producedQuantity} pç · ${fmtNum(metrics.totalMinutes, 2)} min em ${formatDatePtBr(productionDate)} · ${counts ? 'conta na meta' : 'não conta na meta'}.`;
+  const back = new URLSearchParams({ notice: msg, employee_id: String(employeeId), production_date: productionDate, counts_for_prize: String(counts) });
+  redirect(res, `/productions/extra?${back.toString()}`);
+}
+// ===============================================================
+
 // ===================== TELA PARÂMETROS =====================
 const ABSENCE_TYPE_LABELS = { falta: 'Falta', atestado: 'Atestado', ferias: 'Férias', folga: 'Folga', afastamento: 'Afastamento', outro: 'Outro' };
 
@@ -11671,6 +11812,9 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === 'GET' && pathname === '/productions/new') return sendHtml(res, renderProductionForm(query, query.error || '', query.notice || '', role));
       if (req.method === 'POST' && pathname === '/productions') return handleCreateProduction(await parseBody(req), res);
+      if (pathname === '/productions/extra' && (isLancadorRole(role) || isHourlyLauncherRole(role))) return requireAdmin(req, res, role);
+      if (req.method === 'GET' && pathname === '/productions/extra') return sendHtml(res, renderExtraLaunchPage(query, query.error || '', query.notice || '', role));
+      if (req.method === 'POST' && pathname === '/productions/extra') return handleCreateExtraLaunch(await parseBody(req), res, role);
 
       if (req.method === 'GET' && pathname === '/labels/entry') return sendHtml(res, renderEntryLabelsPage(query, role));
       if (req.method === 'GET' && pathname === '/labels/shipment') return sendHtml(res, renderShipmentLabelsPage(query, role));

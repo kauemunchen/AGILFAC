@@ -292,3 +292,8 @@ fieldset { border: 1px solid rgba(148, 163, 184, .35); border-radius: 10px; padd
 .alert-bot > label:not(.checkbox-line) { display: flex; flex-direction: column; gap: 4px; align-items: stretch; }
 .alert-bot > label:not(.checkbox-line) input { width: 100%; }
 .alerts-form .form-grid .checkbox-line { flex-direction: row; align-items: center; gap: 8px; align-self: end; padding-bottom: 10px; }
+/* Lançamento hora extra / retroativo */
+.extra-flag { flex: 1; min-width: 200px; display: flex; flex-direction: column; justify-content: flex-end; gap: 4px; }
+.extra-flag .extra-flag-line { display: flex !important; flex-direction: row !important; align-items: center; gap: 8px; min-height: 36px; padding: 6px 12px; border: 1px solid #93c5fd; border-radius: 10px; background: #eff6ff; font-weight: 700; font-size: 14px; color: #1e3a8a; cursor: pointer; min-width: 0 !important; }
+.extra-flag .extra-flag-line input { width: 18px; height: 18px; }
+.extra-flag small { font-size: 11px; line-height: 1.3; }
