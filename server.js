@@ -2081,7 +2081,8 @@ const PARAM_DEFAULTS = {
   absence_types_excluded_from_base: 'atestado,ferias,folga,afastamento',
   holiday_dates: '',
   holiday_recurring_mmdd: '',
-  worked_holiday_dates: ''
+  worked_holiday_dates: '',
+  launch_previous_day_until_hour: '9'
 };
 const paramsCache = new WeakMap();
 
@@ -2132,6 +2133,43 @@ function parseEmployeeTarget(value) {
   return Number.isFinite(n) && n > 0 && n <= 200 ? round2(n) : null;
 }
 function workdaySet() { return new Set(String(getParams().workdays).split(',').map(Number).filter(d => d >= 0 && d <= 6)); }
+// Janela de data dos lançamentos (rápido, lista e por hora): hoje sempre; o dia anterior
+// (último dia útil e o fim de semana entre eles) só até a hora definida em Parâmetros (padrão 09h).
+// Administrador não tem trava (para datas antigas existe Hora extra / retroativo).
+function launchDateWindow() {
+  const cutoff = Math.min(Math.max(Math.round(numParam('launch_previous_day_until_hour')), 0), 23);
+  const now = Number(BUSINESS_HOUR_FMT.format(new Date()));
+  const max = today();
+  const previousOpen = now < cutoff;
+  return { min: previousOpen ? getPreviousBusinessDay(max) : max, max, cutoff, previousOpen };
+}
+
+function checkLaunchDate(date, role) {
+  const d = String(date || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return 'Data inválida.';
+  if (d > today()) return 'Não é permitido lançar em data futura.';
+  if (isAdminRole(role)) return '';
+  const w = launchDateWindow();
+  if (d < w.min) {
+    return w.cutoff > 0
+      ? `Lançamento do dia anterior só até as ${String(w.cutoff).padStart(2, '0')}h de hoje. Para outras datas, fale com o administrador.`
+      : 'Só é permitido lançar na data de hoje. Para outras datas, fale com o administrador.';
+  }
+  return '';
+}
+
+function launchDateAttrs(role) {
+  if (isAdminRole(role)) return `max="${today()}"`;
+  const w = launchDateWindow();
+  return `min="${w.min}" max="${w.max}"`;
+}
+
+function launchDateHint(role) {
+  const w = launchDateWindow();
+  if (isAdminRole(role) || !w.previousOpen) return '';
+  return `<small class="hint">Até as ${String(w.cutoff).padStart(2, '0')}h dá para lançar no dia anterior (${formatDatePtBr(w.min)}).</small>`;
+}
+
 function periodStartDay() { return Math.min(Math.max(Math.round(numParam('period_start_day')), 1), 28); }
 function periodLabel() { const s = periodStartDay(); return s === 1 ? 'mês civil' : `${s} → ${s - 1}`; }
 
@@ -5276,8 +5314,10 @@ function handleCreateProduction(form, res) {
   if (employeeId) redirectQuery.set('employee_id', String(employeeId));
 
   if (!employeeId || !opId || !producedQuantity || producedQuantity <= 0) {
-    return sendHtml(res, renderProductionForm(form, 'Preencha colaborador, OP e quantidade produzida.'), 422);
+    return sendHtml(res, renderProductionForm(form, 'Preencha colaborador, OP e quantidade produzida.', '', getRequestRole()), 422);
   }
+  const dateError = checkLaunchDate(productionDate, getRequestRole());
+  if (dateError) return sendHtml(res, renderProductionForm(form, dateError, '', getRequestRole()), 422);
 
   const op = db.prepare('SELECT * FROM ops WHERE id = ?').get(opId);
   const employee = db.prepare('SELECT * FROM employees WHERE id = ?').get(employeeId);
@@ -9201,6 +9241,7 @@ function renderParametersPage(query = {}, values = null, error = '', role = 'adm
         <h3>Período e dias úteis</h3>
         <div class="form-grid">
           <label>Dia de início do mês operacional ${num('period_start_day', 'min="1" max="28" step="1" required')}<small class="hint">Ex.: 26 = período de 26 a 25. Use 1 para mês civil.</small></label>
+          <label>Lançar no dia anterior até (hora) ${num('launch_previous_day_until_hour', 'min="0" max="23" step="1" required')}<small class="hint">Lançamento rápido e por hora: até essa hora dá para escolher o dia anterior. 0 = só o dia de hoje. Administrador não tem trava.</small></label>
         </div>
         <fieldset><legend>Dias úteis (entram na base de cálculo)</legend>
           ${[1, 2, 3, 4, 5, 6, 0].map(d => `<label class="checkbox-line"><input type="checkbox" name="workdays" value="${d}" ${workdays.has(String(d)) ? 'checked' : ''} /> ${WEEKDAY_LABELS[d]}</label>`).join('')}
@@ -9264,6 +9305,7 @@ function handleSaveParameters(form, res, role) {
   number('base_minutes_day', 'Minutos de base por dia', { min: 1, max: 1440, integer: true });
   number('target_percent', 'Meta de eficiência', { min: 1, max: 200 });
   number('period_start_day', 'Dia de início do período', { min: 1, max: 28, integer: true });
+  number('launch_previous_day_until_hour', 'Hora limite para lançar no dia anterior', { min: 0, max: 23, integer: true });
   for (const i of [1, 2, 3]) {
     number(`prize_tier${i}_percent`, `Percentual da faixa ${i}`, { min: 0, max: 200 });
     number(`prize_tier${i}_value`, `Valor da faixa ${i}`, { min: 0 });
@@ -9983,8 +10025,10 @@ function handleCreateHourlyProduction(form, res) {
   if (employeeId) redirectQuery.set('employee_id', String(employeeId));
 
   if (!employeeId || !hourSlot || !opNumber || !producedQuantity || producedQuantity <= 0) {
-    return sendHtml(res, renderHourlyProductionPage(form, 'Preencha costureira, hora, OP e quantidade.'), 422);
+    return sendHtml(res, renderHourlyProductionPage(form, 'Preencha costureira, hora, OP e quantidade.', '', getRequestRole()), 422);
   }
+  const dateError = checkLaunchDate(productionDate, getRequestRole());
+  if (dateError) return sendHtml(res, renderHourlyProductionPage(form, dateError, '', getRequestRole()), 422);
 
   const employee = db.prepare('SELECT * FROM employees WHERE id = ?').get(employeeId);
   const op = getOpByNumber(opNumber);
@@ -10296,7 +10340,7 @@ function handleValidateHourlyProductionDay(form, res) {
   redirect(res, buildRedirectWithFlash(`/productions/hourly?production_date=${encodeURIComponent(productionDate)}`, 'Dia validado com sucesso. Os lançamentos por hora foram consolidados no diário.'));
 }
 
-function renderHourlyProductionPage(values = {}, error = '', notice = '', role = 'adm') {
+function renderHourlyProductionPage(values = {}, error = '', notice = '', role = getRequestRole() || 'adm') {
   const employees = db.prepare(`
     SELECT id, registration_code, full_name, start_date, termination_date
     FROM employees
@@ -10345,7 +10389,8 @@ function renderHourlyProductionPage(values = {}, error = '', notice = '', role =
           <input type="hidden" name="employee_id" value="${escapeHtml(selectedEmployeeId)}" data-hourly-field="employee-id" />
         </label>
         <label>Data do lançamento
-          <input type="date" name="production_date" value="${escapeHtml(productionDate)}" readonly data-hourly-field="date" />
+          <input type="date" name="production_date" value="${escapeHtml(productionDate)}" ${launchDateAttrs(role)} data-hourly-field="date" onchange="window.location.href='/productions/hourly?employee_id=' + encodeURIComponent(document.querySelector('[data-hourly-field=employee-id]')?.value || '') + '&production_date=' + encodeURIComponent(this.value)" />
+          ${launchDateHint(role)}
         </label>
         <label>Hora atual
           <input name="hour_slot" value="${escapeHtml(hourSlot)}" data-hourly-field="hour" placeholder="Ex.: 15:00" />
@@ -10486,7 +10531,7 @@ function renderHourlyProductionPage(values = {}, error = '', notice = '', role =
   return pageLayout({ title: 'Lançamento por hora', content, error, notice, role });
 }
 
-function renderProductionForm(values = {}, error = '', notice = '', role = 'adm') {
+function renderProductionForm(values = {}, error = '', notice = '', role = getRequestRole() || 'adm') {
   const employees = db.prepare('SELECT id, registration_code, full_name, start_date, termination_date FROM employees ORDER BY full_name').all();
   const allOps = getOpList({});
   const blockedCellOps = allOps.filter(op => op.status_color === 'rosa');
@@ -10526,7 +10571,8 @@ function renderProductionForm(values = {}, error = '', notice = '', role = 'adm'
           </select>
         </label>
         <label>Data
-          <input type="date" name="production_date" value="${escapeHtml(selectedDate)}" data-quick-field="date" />
+          <input type="date" name="production_date" value="${escapeHtml(selectedDate)}" ${launchDateAttrs(role)} data-quick-field="date" />
+          ${launchDateHint(role)}
         </label>
         <label class="quick-checkbox">
           <span>Manter colaborador</span>
@@ -10637,7 +10683,7 @@ function renderProductionForm(values = {}, error = '', notice = '', role = 'adm'
       </label>
       <label>Minutos F21 do lançamento<input type="number" min="0.001" step="0.001" name="used_minutes_f21" value="${escapeHtml(values.used_minutes_f21 || '')}" /></label>
       <label>Quantidade produzida<input type="number" inputmode="numeric" min="1" name="produced_quantity" required value="${escapeHtml(values.produced_quantity || '')}" /></label>
-      <label>Data<input type="date" name="production_date" value="${escapeHtml(selectedDate)}" /></label>
+      <label>Data<input type="date" name="production_date" value="${escapeHtml(selectedDate)}" ${launchDateAttrs(role)} />${launchDateHint(role)}</label>
       <div class="full">${renderPrizeFlagField(values)}</div>
       <div class="full actions"><button class="btn" type="submit">Salvar lançamento</button><a class="btn secondary" href="/ops">Consultar OPs</a></div>
       <p class="hint full">${blockedCellOps.length ? `${blockedCellOps.length} OP(s) em célula foram retiradas da lista normal até o retorno. <a href="/ops?status=rosa">Ver OPs em célula</a>.` : 'Nenhuma OP bloqueada por célula no momento.'}</p>
