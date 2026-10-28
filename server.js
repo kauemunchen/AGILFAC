@@ -4147,11 +4147,11 @@ function getProductionPrizeData(baseDate = today(), period = 'month', employeeId
     const producedExtraMinutes = round2(Number(productionMap.get(employee.id)?.extra_minutes || 0));
     const producedMinutes = round2(Number(productionMap.get(employee.id)?.minutes || 0));
     const availableMinutes = round2(getEmployeeBaseDays(employee, range.start, range.end).length * baseMinutesDay());
-    const employeeTarget = employeeTargetPercent(employee);
-    const targetMinutes60 = round2(availableMinutes * (employeeTarget / 100));
+    // Prêmio: regra geral da empresa para todas (a meta individual é só de cobrança/acompanhamento)
+    const targetMinutes60 = round2(availableMinutes * targetRatio());
     const efficiencyPercent = availableMinutes > 0 ? round2((producedMinutes / availableMinutes) * 100) : 0;
     const productionPrize = getProductionPrizeTier(efficiencyPercent);
-    const sixtyPrize = efficiencyPercent >= employeeTarget ? numParam('prize_target_value') : 0;
+    const sixtyPrize = efficiencyPercent >= targetPercent() ? numParam('prize_target_value') : 0;
     const extraMinutes = Math.max(round2(producedMinutes - targetMinutes60), 0);
     const extraBlocks = numParam('prize_extra_block_minutes') > 0 ? Math.floor(extraMinutes / numParam('prize_extra_block_minutes')) : 0;
     const extraPrize = extraBlocks * numParam('prize_extra_value');
@@ -4310,7 +4310,7 @@ function renderProductionPrizePage(query = {}, role = 'adm') {
     <section class="panel section-gap">
       <div class="panel-header"><h3>Relatório por colaboradora</h3><span class="hint">Prêmio produção, prêmio ${tp()}% e prêmio extra por colaboradora.</span></div>
       <table>
-        <thead><tr><th>Nome</th><th>Prêmio produção</th><th>Prêmio ${tp()}%</th><th>Prêmio extra</th><th>Total</th><th>Normal</th><th>Extra</th><th>Minutos</th><th>Meta</th><th>Base</th><th>Eficiência</th><th>Dias úteis</th></tr></thead>
+        <thead><tr><th>Nome</th><th>Prêmio produção</th><th>Prêmio ${tp()}%</th><th>Prêmio extra</th><th>Total</th><th>Normal</th><th>Extra</th><th>Minutos</th><th>Meta ${tp()}%</th><th>Base</th><th>Eficiência</th><th>Dias úteis</th></tr></thead>
         <tbody>
           ${data.employeeSummaries.map(emp => {
             const perfClass = emp.efficiency_percent < 40 ? 'perf-low' : (emp.efficiency_percent < 60 ? 'perf-mid' : 'perf-high');
@@ -4361,7 +4361,7 @@ function renderProductionPrizeExportPage(query = {}, role = 'adm') {
     <section class="panel section-gap">
       <h3>Relatório por colaboradora</h3>
       <table>
-        <thead><tr><th>Nome</th><th>Prêmio produção</th><th>Prêmio ${tp()}%</th><th>Prêmio extra</th><th>Total</th><th>Normal</th><th>Extra</th><th>Minutos</th><th>Meta</th><th>Base</th><th>Eficiência</th></tr></thead>
+        <thead><tr><th>Nome</th><th>Prêmio produção</th><th>Prêmio ${tp()}%</th><th>Prêmio extra</th><th>Total</th><th>Normal</th><th>Extra</th><th>Minutos</th><th>Meta ${tp()}%</th><th>Base</th><th>Eficiência</th></tr></thead>
         <tbody>
           ${data.employeeSummaries.map(emp => `<tr><td>${escapeHtml(emp.full_name)}</td><td>${fmtMoney(emp.production_prize)}</td><td>${fmtMoney(emp.sixty_prize)}</td><td>${fmtMoney(emp.extra_prize)}</td><td>${fmtMoney(emp.total_prize)}</td><td>${fmtNum(emp.normal_minutes, 2)}</td><td>${fmtNum(emp.produced_extra_minutes, 2)}</td><td>${fmtNum(emp.produced_minutes, 2)}</td><td>${fmtNum(emp.target_minutes_60, 2)}</td><td>${fmtNum(emp.available_minutes, 2)}</td><td>${fmtNum(emp.efficiency_percent, 2)}%</td></tr>`).join('') || '<tr><td colspan="11">Sem dados para o filtro selecionado.</td></tr>'}
         </tbody>
@@ -9789,7 +9789,7 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
         <label>Data de rescisão<input type="date" name="termination_date" value="${formatDateInput(values.termination_date)}" /></label>
         <label>Função *<input name="job_role" required value="${escapeHtml(values.job_role || '')}" /></label>
         ${renderWorkScheduleSelect(values.work_schedule_id, true)}
-        <label>Meta mínima (%)<input type="number" name="target_percent" min="1" max="200" step="0.01" inputmode="decimal" placeholder="Padrão: ${tp()}" value="${escapeHtml(values.target_percent ?? '')}" /><small class="hint">Em branco usa a meta padrão (${tp()}%)</small></label>
+        <label>Meta de cobrança (%)<input type="number" name="target_percent" min="1" max="200" step="0.01" inputmode="decimal" placeholder="Padrão: ${tp()}" value="${escapeHtml(values.target_percent ?? '')}" /><small class="hint">Em branco: ${tp()}%. Vale para acompanhamento e mensagens; o prêmio segue a regra geral.</small></label>
         <label class="full">Observações<textarea name="notes" rows="3">${escapeHtml(values.notes || '')}</textarea></label>
         <div class="full actions"><button class="btn" type="submit">Salvar colaborador</button><a class="btn secondary" href="/employees">Cancelar</a></div>
       </form>
@@ -9797,7 +9797,7 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
     </section>` : ''}
     <section class="panel">
       <table class="table-zebra employees-table">
-        <thead><tr><th>Registro</th><th>Nome</th><th>WhatsApp</th><th>Nascimento</th><th>Início</th><th>Rescisão</th><th>Status</th><th>Função</th><th>Jornada</th><th>Meta</th><th>Observações</th><th>Ações</th></tr></thead>
+        <thead><tr><th>Registro</th><th>Nome</th><th>WhatsApp</th><th>Nascimento</th><th>Início</th><th>Rescisão</th><th>Status</th><th>Função</th><th>Jornada</th><th>Meta cobrança</th><th>Observações</th><th>Ações</th></tr></thead>
         <tbody>
           ${employees.map(emp => {
             const isEditing = editingId === emp.id;
@@ -9814,7 +9814,7 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
                     <label>Data de rescisão<input type="date" name="termination_date" value="${formatDateInput(emp.termination_date)}" /></label>
                     <label>Função${req ? ' *' : ''}<input name="job_role" ${req} value="${escapeHtml(emp.job_role || '')}" /></label>
                     ${renderWorkScheduleSelect(emp.work_schedule_id, Boolean(req))}
-                    <label>Meta mínima (%)<input type="number" name="target_percent" min="1" max="200" step="0.01" inputmode="decimal" placeholder="Padrão: ${tp()}" value="${escapeHtml(emp.target_percent ?? '')}" /><small class="hint">Em branco usa a meta padrão (${tp()}%)</small></label>
+                    <label>Meta de cobrança (%)<input type="number" name="target_percent" min="1" max="200" step="0.01" inputmode="decimal" placeholder="Padrão: ${tp()}" value="${escapeHtml(emp.target_percent ?? '')}" /><small class="hint">Em branco: ${tp()}%. Vale para acompanhamento e mensagens; o prêmio segue a regra geral.</small></label>
                     <label class="full">Observações<textarea name="notes" rows="3">${escapeHtml(emp.notes || '')}</textarea></label>
                     <div class="full actions"><button class="btn" type="submit">Salvar edição</button><a class="btn secondary" href="/employees">Cancelar</a></div>
                   </form>
