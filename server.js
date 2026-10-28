@@ -1123,6 +1123,7 @@ function migrateWorkSchedulesAndPrizeFlag(tenantDb) {
   }
   ensureColumn(tenantDb, 'op_daily_productions', 'counts_for_prize', 'INTEGER NOT NULL DEFAULT 1');
   ensureColumn(tenantDb, 'op_daily_productions', 'launch_kind', 'TEXT');
+  ensureColumn(tenantDb, 'op_daily_productions', 'worked_minutes', 'REAL');
   ensureColumn(tenantDb, 'hourly_productions', 'counts_for_prize', 'INTEGER NOT NULL DEFAULT 1');
   tenantDb.exec(`
     CREATE TABLE IF NOT EXISTS prize_flag_migration_log (
@@ -8854,23 +8855,86 @@ async function handleAbsenceImport(req, res, role) {
 // ===============================================================
 
 // ===================== LANÇAMENTO HORA EXTRA / RETROATIVO =====================
-// Lançamento único (como o rápido), com data livre (passada) e a flag decidindo se conta
-// na meta/eficiência e nos minutos do mês. A flag vale sempre, mesmo dentro da jornada.
+// Lançamento único (como o rápido), com data livre (passada), tempo trabalhado e a flag decidindo
+// se conta na meta/eficiência e nos minutos do mês. A flag vale sempre, mesmo dentro da jornada.
+// Eficiência da hora extra = minutos produzidos ÷ minutos trabalhados.
+
+// Aceita "150", "2:30", "2h30", "2h", "1,5h"
+function parseWorkedMinutes(value) {
+  const t = String(value || '').trim().toLowerCase().replace(/\s+/g, '');
+  if (!t) return 0;
+  let m = t.match(/^(\d{1,2}):(\d{1,2})$/) || t.match(/^(\d{1,2})h(\d{1,2})?(?:m|min)?$/);
+  if (m) return Number(m[1]) * 60 + Number(m[2] || 0);
+  m = t.match(/^(\d+(?:[.,]\d+)?)h$/);
+  if (m) return Math.round(Number(m[1].replace(',', '.')) * 60);
+  m = t.match(/^(\d+)(?:m|min)?$/);
+  return m ? Number(m[1]) : NaN;
+}
+
+function fmtHoursMinutes(minutes) {
+  const total = Math.round(Number(minutes || 0));
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  return h ? `${h}h${String(m).padStart(2, '0')}` : `${m} min`;
+}
+
+function extraEffClass(pct) {
+  if (pct === null) return '';
+  return pct >= targetPercent() ? 'perf-high' : (pct >= targetPercent() * 0.8 ? 'perf-mid' : 'perf-low');
+}
+
+function getExtraEfficiencyReport(start, end, employeeId = '') {
+  const params = [start, end];
+  let where = "p.launch_kind = 'hora_extra' AND p.is_reversed = 0 AND p.production_date BETWEEN ? AND ?";
+  if (employeeId) { where += ' AND p.employee_id = ?'; params.push(Number(employeeId)); }
+  const rows = db.prepare(`
+    SELECT p.id, p.production_date, p.produced_quantity, p.produced_minutes, p.worked_minutes, p.counts_for_prize, p.created_at,
+      o.op_number, e.id AS employee_id, e.full_name
+    FROM op_daily_productions p JOIN ops o ON o.id = p.op_id JOIN employees e ON e.id = p.employee_id
+    WHERE ${where}
+    ORDER BY p.production_date DESC, p.id DESC`).all(...params);
+  const byEmp = new Map();
+  for (const r of rows) {
+    if (!byEmp.has(r.employee_id)) byEmp.set(r.employee_id, { employee_id: r.employee_id, name: r.full_name, launches: 0, pieces: 0, produced: 0, worked: 0, producedWithTime: 0, days: new Set(), counted: 0, notCounted: 0 });
+    const a = byEmp.get(r.employee_id);
+    a.launches += 1;
+    a.pieces += Number(r.produced_quantity || 0);
+    a.produced += Number(r.produced_minutes || 0);
+    a.days.add(r.production_date);
+    if (Number(r.worked_minutes) > 0) { a.worked += Number(r.worked_minutes); a.producedWithTime += Number(r.produced_minutes || 0); }
+    if (r.counts_for_prize) a.counted += Number(r.produced_minutes || 0); else a.notCounted += Number(r.produced_minutes || 0);
+  }
+  const summary = [...byEmp.values()].map(a => ({ ...a, days: a.days.size, pct: a.worked > 0 ? round2((a.producedWithTime / a.worked) * 100) : null }))
+    .sort((x, y) => (y.pct ?? -1) - (x.pct ?? -1) || x.name.localeCompare(y.name));
+  const worked = summary.reduce((s, a) => s + a.worked, 0);
+  const producedWithTime = summary.reduce((s, a) => s + a.producedWithTime, 0);
+  const total = {
+    launches: rows.length,
+    pieces: summary.reduce((s, a) => s + a.pieces, 0),
+    produced: round2(summary.reduce((s, a) => s + a.produced, 0)),
+    worked,
+    pct: worked > 0 ? round2((producedWithTime / worked) * 100) : null
+  };
+  return { rows, summary, total };
+}
+
 function renderExtraLaunchPage(values = {}, error = '', notice = '', role = 'adm') {
   const employees = db.prepare('SELECT id, registration_code, full_name, start_date, termination_date FROM employees ORDER BY full_name').all()
     .filter(emp => !emp.termination_date || emp.termination_date >= addDaysIso(today(), -60));
   const selectedEmployeeId = String(values.employee_id || '');
   const counts = values.counts_for_prize === undefined ? true : parseCountsForPrizeFlag(values.counts_for_prize) === 1;
-  const recent = db.prepare(`
-    SELECT p.id, p.production_date, p.produced_quantity, p.produced_minutes, p.counts_for_prize, p.created_at, o.op_number, e.full_name
-    FROM op_daily_productions p JOIN ops o ON o.id = p.op_id JOIN employees e ON e.id = p.employee_id
-    WHERE p.launch_kind = 'hora_extra' AND p.is_reversed = 0
-    ORDER BY p.created_at DESC, p.id DESC LIMIT 25`).all();
+  // Relatório: período atual por padrão, filtro por colaboradora
+  const period = getPeriodRange('month', today());
+  const rStart = /^\d{4}-\d{2}-\d{2}$/.test(String(values.r_start || '')) ? values.r_start : period.start;
+  const rEnd = /^\d{4}-\d{2}-\d{2}$/.test(String(values.r_end || '')) ? values.r_end : period.end;
+  const rEmp = String(values.r_employee || '');
+  const report = getExtraEfficiencyReport(rStart, rEnd, rEmp);
+  const effCell = pct => pct === null ? '<span class="hint">sem tempo</span>' : `<strong class="${extraEffClass(pct)}">${fmtNum(pct, 1)}%</strong>`;
   const content = `
     <section class="page-header">
       <div>
         <h2>Lançamento hora extra / retroativo</h2>
-        <p>Peças feitas em hora extra ou esquecidas em outro dia. Escolha a data e se os minutos contam na meta e na soma do mês.</p>
+        <p>Peças feitas em hora extra ou esquecidas em outro dia. Informe o tempo trabalhado para medir a eficiência da hora extra.</p>
       </div>
       <div class="header-actions"><a class="btn secondary" href="/productions/new">Lançamento rápido</a></div>
     </section>
@@ -8891,22 +8955,48 @@ function renderExtraLaunchPage(values = {}, error = '', notice = '', role = 'adm
         <label>Quantidade de peças
           <input type="number" inputmode="numeric" min="1" name="produced_quantity" required value="${escapeHtml(values.produced_quantity || '')}" data-x="quantity" />
         </label>
+        <label>Tempo trabalhado
+          <input name="worked_time" required inputmode="numeric" placeholder="Ex.: 2:00 ou 120" value="${escapeHtml(values.worked_time || '')}" data-x="worked" />
+        </label>
         <div class="extra-flag">
           <input type="hidden" name="counts_for_prize" value="0" />
           <label class="extra-flag-line"><input type="checkbox" name="counts_for_prize" value="1" ${counts ? 'checked' : ''} /> Conta na meta</label>
           <small class="hint">Marcado: minutos entram na eficiência, no prêmio e na soma do mês. Desmarcado: só baixa as peças da OP.</small>
         </div>
+        <div class="full extra-calc" data-x="calc" hidden></div>
         <div class="full actions"><button class="btn" type="submit">Salvar lançamento</button></div>
       </form>
       <div class="quick-op-preview" data-x="preview" hidden></div>
+      <p class="hint">Hora extra em mais de uma OP: lance cada OP separada e divida o tempo trabalhado entre elas.</p>
     </section>
-    <section class="panel section-gap" style="margin-top:14px">
-      <h3>Últimos lançamentos de hora extra / retroativos</h3>
+
+    <section class="panel" style="margin-top:14px" id="relatorio">
+      <h3>Eficiência em hora extra</h3>
+      <form class="inline-form" method="get" action="/productions/extra#relatorio">
+        <label>Colaboradora
+          <select name="r_employee"><option value="">Todas</option>${employees.map(emp => `<option value="${emp.id}" ${rEmp === String(emp.id) ? 'selected' : ''}>${escapeHtml(emp.full_name)}</option>`).join('')}</select>
+        </label>
+        <label>De<input type="date" name="r_start" value="${escapeHtml(rStart)}" /></label>
+        <label>Até<input type="date" name="r_end" value="${escapeHtml(rEnd)}" /></label>
+        <div class="actions" style="align-self:flex-end"><button class="btn" type="submit">Filtrar</button><a class="btn secondary" href="/productions/extra#relatorio">Período atual</a></div>
+      </form>
+      <div class="cards" style="margin-top:12px">
+        <div class="mini-card"><span>Eficiência hora extra</span><strong class="${extraEffClass(report.total.pct)}">${report.total.pct === null ? '—' : `${fmtNum(report.total.pct, 1)}%`}</strong></div>
+        <div class="mini-card"><span>Tempo trabalhado</span><strong>${fmtHoursMinutes(report.total.worked)}</strong></div>
+        <div class="mini-card"><span>Minutos produzidos</span><strong>${fmtNum(report.total.produced, 0)}</strong></div>
+        <div class="mini-card"><span>Lançamentos · peças</span><strong>${report.total.launches} · ${fmtNum(report.total.pieces, 0)}</strong></div>
+      </div>
+      ${rEmp ? '' : `
       <div class="table-wrap"><table>
-        <thead><tr><th>Data</th><th>Colaboradora</th><th>OP</th><th>Peças</th><th>Minutos</th><th>Conta na meta</th><th>Lançado em</th></tr></thead>
-        <tbody>${recent.map(r => `<tr><td>${formatDatePtBr(r.production_date)}</td><td>${escapeHtml(r.full_name)}</td><td>${escapeHtml(r.op_number)}</td><td>${fmtNum(r.produced_quantity, 0)}</td><td>${fmtNum(r.produced_minutes, 2)}</td><td>${r.counts_for_prize ? '✅ Conta' : '— Não conta'}</td><td>${escapeHtml(nowPt(r.created_at))}</td></tr>`).join('') || '<tr><td colspan="7">Nenhum lançamento ainda.</td></tr>'}</tbody>
+        <thead><tr><th>Colaboradora</th><th>Dias</th><th>Peças</th><th>Trabalhado</th><th>Min produzidos</th><th>Eficiência</th><th>Conta / não conta (min)</th><th></th></tr></thead>
+        <tbody>${report.summary.map(a => `<tr><td>${escapeHtml(a.name)}</td><td>${a.days}</td><td>${fmtNum(a.pieces, 0)}</td><td>${a.worked ? fmtHoursMinutes(a.worked) : '—'}</td><td>${fmtNum(a.produced, 0)}</td><td>${effCell(a.pct)}</td><td>${fmtNum(a.counted, 0)} / ${fmtNum(a.notCounted, 0)}</td><td><a class="btn secondary" href="/productions/extra?r_employee=${a.employee_id}&r_start=${rStart}&r_end=${rEnd}#relatorio">Ver</a></td></tr>`).join('') || '<tr><td colspan="8">Nenhuma hora extra no período.</td></tr>'}</tbody>
+      </table></div>`}
+      <h3 style="margin-top:14px">${rEmp ? 'Lançamentos da colaboradora' : 'Lançamentos do período'}</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Data</th>${rEmp ? '' : '<th>Colaboradora</th>'}<th>OP</th><th>Peças</th><th>Trabalhado</th><th>Min produzidos</th><th>Eficiência</th><th>Meta</th></tr></thead>
+        <tbody>${report.rows.slice(0, 200).map(r => { const pct = Number(r.worked_minutes) > 0 ? round2((Number(r.produced_minutes) / Number(r.worked_minutes)) * 100) : null; return `<tr><td>${formatDatePtBr(r.production_date)}</td>${rEmp ? '' : `<td>${escapeHtml(r.full_name)}</td>`}<td>${escapeHtml(r.op_number)}</td><td>${fmtNum(r.produced_quantity, 0)}</td><td>${Number(r.worked_minutes) > 0 ? fmtHoursMinutes(r.worked_minutes) : '—'}</td><td>${fmtNum(r.produced_minutes, 2)}</td><td>${effCell(pct)}</td><td>${r.counts_for_prize ? '✅ Conta' : '— Não conta'}</td></tr>`; }).join('') || `<tr><td colspan="${rEmp ? 7 : 8}">Nenhum lançamento.</td></tr>`}</tbody>
       </table></div>
-      <p class="hint">Para corrigir um lançamento, use Estornos.</p>
+      <p class="hint">Eficiência da hora extra = minutos produzidos ÷ tempo trabalhado. Lançamentos sem tempo informado não entram no percentual. Para corrigir um lançamento, use Estornos.</p>
     </section>
     ${renderScannerScript()}
     <script>
@@ -8914,28 +9004,54 @@ function renderExtraLaunchPage(values = {}, error = '', notice = '', role = 'adm
         const form = document.querySelector('[data-extra-launch]');
         if (!form) return;
         const q = k => form.querySelector('[data-x="' + k + '"]');
-        const op = q('op'), quantity = q('quantity'), preview = document.querySelector('[data-x="preview"]');
-        const ordered = [q('employee'), q('date'), op, quantity];
-        (ordered.find(f => f && !f.value) || quantity).focus();
+        const op = q('op'), quantity = q('quantity'), worked = q('worked'), calc = q('calc');
+        const preview = document.querySelector('[data-x="preview"]');
+        const target = ${targetPercent()};
+        let perPiece = 0;
+        const ordered = [q('employee'), q('date'), op, quantity, worked];
+        if (!location.hash) (ordered.find(f => f && !f.value) || quantity).focus();
+        const parseWorked = v => {
+          const t = String(v || '').trim().toLowerCase().replace(/\\s+/g, '');
+          let m = t.match(/^(\\d{1,2}):(\\d{1,2})$/) || t.match(/^(\\d{1,2})h(\\d{1,2})?(?:m|min)?$/);
+          if (m) return Number(m[1]) * 60 + Number(m[2] || 0);
+          m = t.match(/^(\\d+(?:[.,]\\d+)?)h$/); if (m) return Math.round(Number(m[1].replace(',', '.')) * 60);
+          m = t.match(/^(\\d+)(?:m|min)?$/); return m ? Number(m[1]) : 0;
+        };
+        const fmt = (n, d) => Number(n).toLocaleString('pt-BR', { minimumFractionDigits: d, maximumFractionDigits: d });
+        const updateCalc = () => {
+          const qty = Number(quantity.value || 0), w = parseWorked(worked.value);
+          if (!perPiece || !qty) { calc.hidden = true; return; }
+          const produced = qty * perPiece;
+          calc.hidden = false;
+          if (!w) { calc.className = 'full extra-calc'; calc.textContent = 'Produção: ' + fmt(produced, 2) + ' min. Informe o tempo trabalhado para ver a eficiência.'; return; }
+          const pct = produced / w * 100;
+          calc.className = 'full extra-calc ' + (pct >= target ? 'is-good' : 'is-bad');
+          calc.innerHTML = '<strong></strong><span></span>';
+          calc.querySelector('strong').textContent = 'Eficiência da hora extra: ' + fmt(pct, 1) + '%';
+          calc.querySelector('span').textContent = fmt(produced, 2) + ' min produzidos em ' + w + ' min trabalhados (' + fmt(perPiece, 3) + ' min/pç) · meta ' + target + '%';
+        };
         const show = async () => {
           const n = (op.value || '').trim();
-          if (!n) { preview.hidden = true; return; }
+          if (!n) { preview.hidden = true; perPiece = 0; updateCalc(); return; }
           try {
             const r = await fetch('/api/op-preview?op_number=' + encodeURIComponent(n), { headers: { Accept: 'application/json' } });
             const d = await r.json();
             preview.hidden = false;
-            if (!d.found) { preview.className = 'quick-op-preview is-missing'; preview.innerHTML = '<strong>OP não encontrada.</strong>'; return; }
+            if (!d.found) { perPiece = 0; preview.className = 'quick-op-preview is-missing'; preview.innerHTML = '<strong>OP não encontrada.</strong>'; updateCalc(); return; }
+            perPiece = Number(d.total_launch_minutes_per_piece || 0);
             preview.className = 'quick-op-preview' + (d.remaining_quantity <= 0 ? ' is-finished' : '');
             preview.innerHTML = '<strong></strong><span></span>';
             preview.querySelector('strong').textContent = d.op_number + ' · ' + (d.product_name || '');
-            preview.querySelector('span').textContent = 'Saldo: ' + d.remaining_quantity + ' peça(s) · Produzido: ' + d.produced_quantity + '/' + d.total_pieces + ' · Total/pç: ' + Number(d.total_launch_minutes_per_piece || 0).toFixed(3) + ' min';
+            preview.querySelector('span').textContent = 'Saldo: ' + d.remaining_quantity + ' peça(s) · Produzido: ' + d.produced_quantity + '/' + d.total_pieces + ' · Total/pç: ' + perPiece.toFixed(3) + ' min';
+            updateCalc();
           } catch (_) {}
         };
         op.addEventListener('change', show);
         op.addEventListener('blur', show);
         op.addEventListener('scan', () => { show(); quantity.focus(); });
+        [quantity, worked].forEach(el => el.addEventListener('input', updateCalc));
         ordered.forEach((field, i) => field && field.addEventListener('keydown', e => {
-          if (e.key !== 'Enter' || field === quantity) return;
+          if (e.key !== 'Enter' || field === worked) return;
           e.preventDefault();
           if (field === op) show();
           const next = ordered[i + 1]; if (next) next.focus();
@@ -8952,7 +9068,9 @@ function handleCreateExtraLaunch(form, res, role) {
   const producedQuantity = Number(form.produced_quantity);
   const productionDate = String(form.production_date || '').trim();
   const counts = parseCountsForPrizeFlag(form.counts_for_prize);
+  const workedMinutes = parseWorkedMinutes(form.worked_time);
   if (!employeeId || !productionDate || !String(form.op_number || '').trim() || !(producedQuantity > 0) || !Number.isInteger(producedQuantity)) return fail('Preencha colaborador, data, OP e quantidade de peças.');
+  if (!(workedMinutes > 0) || workedMinutes > 16 * 60) return fail('Informe o tempo trabalhado (ex.: 2:00 ou 120 minutos, até 16 horas).');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(productionDate) || productionDate > today()) return fail('A data não pode ser futura.');
   const found = getOpByNumber(form.op_number);
   if (!found) return fail('OP não encontrada.', 404);
@@ -8978,19 +9096,21 @@ function handleCreateExtraLaunch(form, res, role) {
     INSERT INTO op_daily_productions (
       op_id, employee_id, production_date, produced_quantity, used_minutes_f21, normal_minutes, extra_minutes, produced_minutes,
       extra_time_id, extra_reason_snapshot, extra_description_snapshot, extra_effective_date_snapshot, extra_minutes_per_piece_snapshot,
-      counts_for_prize, launch_kind
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'hora_extra')
+      counts_for_prize, launch_kind, worked_minutes
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'hora_extra', ?)
   `).run(
     op.id, employeeId, productionDate, producedQuantity, launchF21, metrics.normalMinutes, metrics.extraMinutes, metrics.totalMinutes,
     metrics.extraSnapshot.extra_time_id, metrics.extraSnapshot.extra_reason_snapshot, metrics.extraSnapshot.extra_description_snapshot,
-    metrics.extraSnapshot.extra_effective_date_snapshot, metrics.extraSnapshot.extra_minutes_per_piece_snapshot, counts
+    metrics.extraSnapshot.extra_effective_date_snapshot, metrics.extraSnapshot.extra_minutes_per_piece_snapshot, counts, workedMinutes
   );
   recalculateOpStatus(op.id);
-  const msg = `Lançado: ${employee.full_name} · ${op.op_number} · ${producedQuantity} pç · ${fmtNum(metrics.totalMinutes, 2)} min em ${formatDatePtBr(productionDate)} · ${counts ? 'conta na meta' : 'não conta na meta'}.`;
+  const pct = round2((metrics.totalMinutes / workedMinutes) * 100);
+  const msg = `Lançado: ${employee.full_name} · ${op.op_number} · ${producedQuantity} pç · ${fmtNum(metrics.totalMinutes, 2)} min produzidos em ${fmtHoursMinutes(workedMinutes)} → eficiência ${fmtNum(pct, 1)}% · ${formatDatePtBr(productionDate)} · ${counts ? 'conta na meta' : 'não conta na meta'}.`;
   const back = new URLSearchParams({ notice: msg, employee_id: String(employeeId), production_date: productionDate, counts_for_prize: String(counts) });
   redirect(res, `/productions/extra?${back.toString()}`);
 }
 // ===============================================================
+
 
 // ===================== TELA PARÂMETROS =====================
 const ABSENCE_TYPE_LABELS = { falta: 'Falta', atestado: 'Atestado', ferias: 'Férias', folga: 'Folga', afastamento: 'Afastamento', outro: 'Outro' };
