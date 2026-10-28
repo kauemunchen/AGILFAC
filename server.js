@@ -10051,6 +10051,63 @@ function handleCreateHourlyProduction(form, res) {
   redirect(res, `/productions/hourly?${redirectQuery.toString()}`);
 }
 
+// Estorna a validação do dia: tira do diário oficial o que veio dos lançamentos por hora
+// e volta esses lançamentos para "pendente" (podem ser corrigidos e validados de novo).
+function handleUnvalidateHourlyProductionDay(form, res, role) {
+  const productionDate = String(form.production_date || '').trim();
+  const back = (msg, isError) => redirect(res, buildRedirectWithFlash(`/productions/hourly?production_date=${encodeURIComponent(productionDate)}`, msg, isError));
+  if (!isAdminRole(role)) return back('Somente o administrador pode estornar a validação.', true);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(productionDate)) return back('Informe a data.', true);
+  const reason = normalizeReason(form.reason) || 'Estorno da validação do lançamento por hora';
+  const rows = db.prepare(`
+    SELECT * FROM hourly_productions
+    WHERE production_date = ? AND is_reversed = 0 AND is_validated = 1 AND validated_daily_production_id IS NOT NULL
+    ORDER BY validated_daily_production_id, id`).all(productionDate);
+  if (!rows.length) return back('Nenhum lançamento por hora validado neste dia.', true);
+  const byDaily = new Map();
+  for (const row of rows) {
+    if (!byDaily.has(row.validated_daily_production_id)) byDaily.set(row.validated_daily_production_id, []);
+    byDaily.get(row.validated_daily_production_id).push(row);
+  }
+  const ops = new Set();
+  let removedDaily = 0;
+  try {
+    db.exec('BEGIN');
+    for (const [dailyId, list] of byDaily) {
+      const daily = db.prepare('SELECT * FROM op_daily_productions WHERE id = ?').get(dailyId);
+      const sum = list.reduce((acc, r) => ({
+        qty: acc.qty + Number(r.produced_quantity || 0),
+        normal: acc.normal + Number(r.normal_minutes || 0),
+        extra: acc.extra + Number(r.extra_minutes || 0),
+        total: acc.total + Number(r.produced_minutes || 0)
+      }), { qty: 0, normal: 0, extra: 0, total: 0 });
+      if (daily && !daily.is_reversed) {
+        const remainingQty = Number(daily.produced_quantity || 0) - sum.qty;
+        if (remainingQty <= 0) {
+          db.prepare('UPDATE op_daily_productions SET is_reversed = 1, reversed_at = CURRENT_TIMESTAMP, reversed_reason = ? WHERE id = ?').run(reason, daily.id);
+          removedDaily += 1;
+        } else {
+          // O lançamento diário tinha também peças lançadas direto (lançamento rápido): só tira a parte do lançamento por hora
+          db.prepare(`
+            UPDATE op_daily_productions
+            SET produced_quantity = ?, normal_minutes = ROUND(MAX(COALESCE(normal_minutes, 0) - ?, 0), 3),
+                extra_minutes = ROUND(MAX(COALESCE(extra_minutes, 0) - ?, 0), 3), produced_minutes = ROUND(MAX(COALESCE(produced_minutes, 0) - ?, 0), 3)
+            WHERE id = ?`).run(remainingQty, sum.normal, sum.extra, sum.total, daily.id);
+        }
+        logAuditEntry('production', daily.id, 'estorno', reason, daily, db.prepare('SELECT * FROM op_daily_productions WHERE id = ?').get(daily.id));
+        ops.add(daily.op_id);
+      }
+      db.prepare(`UPDATE hourly_productions SET is_validated = 0, validated_at = NULL, validated_daily_production_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id IN (${list.map(() => '?').join(',')})`).run(...list.map(r => r.id));
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    return back(`Nada foi alterado: ${error.message}`, true);
+  }
+  ops.forEach(opId => recalculateOpStatus(opId));
+  back(`Validação de ${formatDatePtBr(productionDate)} estornada: ${rows.length} lançamento(s) por hora voltaram para pendente (${removedDaily} lançamento(s) diário(s) estornado(s)). Corrija o que precisar e valide o dia de novo.`);
+}
+
 function handleValidateHourlyProductionDay(form, res) {
   const productionDate = String(form.production_date || today()).trim() || today();
   const pendingRows = db.prepare(`
@@ -10280,6 +10337,16 @@ function renderHourlyProductionPage(values = {}, error = '', notice = '', role =
         <label>Data para validar<input type="date" name="production_date" value="${escapeHtml(productionDate)}" /></label>
         <button class="btn" type="submit">Validar dia</button>
       </form>
+      ${isAdminRole(role) && summary.some(item => Number(item.validated_rows) > 0) ? `
+      <details class="unvalidate-box">
+        <summary>Estornar a validação de ${formatDatePtBr(productionDate)}</summary>
+        <form class="inline-form" method="post" action="/productions/hourly/unvalidate" onsubmit="return confirm('Estornar a validação de ${formatDatePtBr(productionDate)}? Os lançamentos por hora voltam para pendente e saem do diário.')">
+          <input type="hidden" name="production_date" value="${escapeHtml(productionDate)}" />
+          <label>Motivo<input name="reason" required placeholder="Ex.: validação feita com lançamento errado" /></label>
+          <button class="btn btn-danger-soft" type="submit">Estornar validação</button>
+        </form>
+        <p class="hint">Os lançamentos por hora do dia voltam para pendente e saem do lançamento diário. Peças lançadas pelo lançamento rápido não são afetadas. Depois de corrigir, valide o dia de novo.</p>
+      </details>` : ''}
       <table>
         <thead><tr><th>Registro</th><th>Costureira</th><th>Horas lançadas</th><th>Qtd total</th><th>Min. total</th><th>% do dia</th><th>Pendentes</th><th>Validados</th></tr></thead>
         <tbody>
@@ -11996,6 +12063,10 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && pathname === '/productions/hourly/validate') {
         if (requireHourlyLauncherAccess(res, role)) return;
         return handleValidateHourlyProductionDay(await parseBody(req), res);
+      }
+      if (req.method === 'POST' && pathname === '/productions/hourly/unvalidate') {
+        if (requireAdmin(req, res, role)) return;
+        return handleUnvalidateHourlyProductionDay(await parseBody(req), res, role);
       }
       if (req.method === 'GET' && pathname === '/productions/new') return sendHtml(res, renderProductionForm(query, query.error || '', query.notice || '', role));
       if (req.method === 'POST' && pathname === '/productions') return handleCreateProduction(await parseBody(req), res);
