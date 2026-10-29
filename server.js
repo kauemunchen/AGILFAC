@@ -10073,6 +10073,8 @@ function handleCreateZeroHour(form, res) {
   const hourSlot = normalizeHourSlotInput(form.hour_slot);
   const employeeId = Number(form.employee_id || 0);
   if (!employeeId || !hourSlot) return sendHtml(res, renderHourlyProductionPage(form, 'Para a hora zero, informe a costureira e a hora.', '', getRequestRole()), 422);
+  const zeroReason = String(form.zero_reason || '').trim().slice(0, 200);
+  if (!zeroReason) return sendHtml(res, renderHourlyProductionPage(form, 'Informe o motivo da hora zero.', '', getRequestRole()), 422);
   const dateError = checkLaunchDate(productionDate, getRequestRole());
   if (dateError) return sendHtml(res, renderHourlyProductionPage(form, dateError, '', getRequestRole()), 422);
   const employee = db.prepare('SELECT * FROM employees WHERE id = ?').get(employeeId);
@@ -10080,8 +10082,8 @@ function handleCreateZeroHour(form, res) {
   const taken = db.prepare('SELECT 1 FROM hourly_productions WHERE employee_id = ? AND production_date = ? AND hour_slot = ? AND is_reversed = 0').get(employeeId, productionDate, hourSlot)
     || db.prepare('SELECT 1 FROM hourly_zero_hours WHERE employee_id = ? AND production_date = ? AND hour_slot = ? AND is_reversed = 0').get(employeeId, productionDate, hourSlot);
   if (taken) return sendHtml(res, renderHourlyProductionPage(form, `A hora ${hourSlot} já foi lançada para essa costureira.`, '', getRequestRole()), 422);
-  db.prepare('INSERT INTO hourly_zero_hours (employee_id, production_date, hour_slot, reason) VALUES (?, ?, ?, ?)').run(employeeId, productionDate, hourSlot, String(form.notes || '').trim() || null);
-  const q = new URLSearchParams({ production_date: productionDate, employee_id: String(employeeId), notice: `Hora ${hourSlot} registrada como hora zero (sem produção) para ${employee.full_name}.` });
+  db.prepare('INSERT INTO hourly_zero_hours (employee_id, production_date, hour_slot, reason) VALUES (?, ?, ?, ?)').run(employeeId, productionDate, hourSlot, zeroReason);
+  const q = new URLSearchParams({ production_date: productionDate, employee_id: String(employeeId), notice: `Hora ${hourSlot} registrada como hora zero para ${employee.full_name}. Motivo: ${zeroReason}.` });
   redirect(res, `/productions/hourly?${q.toString()}`);
 }
 
@@ -10488,13 +10490,48 @@ function renderHourlyProductionPage(values = {}, error = '', notice = '', role =
           <input name="notes" value="${escapeHtml(values.notes || '')}" placeholder="Opcional" />
         </label>
         <div class="full">${renderPrizeFlagField(values)}</div>
+        <div class="full zero-box" data-zero-box hidden>
+          <input type="hidden" name="zero_hour" value="" data-zero-flag />
+          <label>Motivo da hora zero *
+            <input name="zero_reason" list="zero-reasons" autocomplete="off" placeholder="Ex.: máquina parada — Enter salva" data-zero-reason />
+            <datalist id="zero-reasons">
+              ${['Sem peça / aguardando OP', 'Máquina parada / manutenção', 'Falta de material / aviamento', 'Retrabalho / conserto', 'Ajudando outro setor', 'Treinamento', 'Problema de saúde no trabalho'].map(r => `<option value="${r}"></option>`).join('')}
+            </datalist>
+          </label>
+          <div class="actions"><button class="btn" type="button" data-zero-save>Salvar hora zero</button><button class="btn secondary" type="button" data-zero-cancel>Cancelar</button></div>
+        </div>
         <div class="full actions">
           <button class="btn" type="submit">Salvar rápido</button>
-          <button class="btn secondary" type="submit" name="zero_hour" value="1" formnovalidate onclick="return confirm('Registrar a hora ' + this.form.hour_slot.value + ' como HORA ZERO (sem produção) para ' + (this.form.employee_label.value || 'a costureira') + '?')" title="A costureira não produziu peça nesta hora">⓪ Hora zero</button>
+          <button class="btn secondary" type="button" data-zero-open title="A costureira não produziu peça nesta hora">⓪ Hora zero</button>
           <button class="btn secondary" type="button" onclick="window.location.href='/productions/hourly?employee_id=' + encodeURIComponent(document.querySelector('[data-hourly-field=employee-id]').value) + '&production_date=' + encodeURIComponent(document.querySelector('[data-hourly-field=date]').value)">Atualizar tela</button>
         </div>
       </form>
       ${renderPrizeFlagScript({ formSelector: '[data-hourly-launch]', employeeFieldSelector: '[name=employee_id]', dateFieldSelector: '[name=production_date]', hourFieldSelector: '[name=hour_slot]' })}
+      <script>
+        (() => {
+          const form = document.querySelector('[data-hourly-launch]');
+          if (!form) return;
+          const box = form.querySelector('[data-zero-box]');
+          const reason = form.querySelector('[data-zero-reason]');
+          const flag = form.querySelector('[data-zero-flag]');
+          const open = () => { box.hidden = false; reason.focus(); reason.select(); };
+          const close = () => { box.hidden = true; flag.value = ''; };
+          const save = () => {
+            const text = reason.value.trim();
+            if (!form.employee_id.value) { alert('Selecione a costureira.'); return; }
+            if (!form.hour_slot.value.trim()) { alert('Informe a hora.'); return; }
+            if (!text) { reason.focus(); reason.classList.add('is-invalid'); return; }
+            flag.value = '1';
+            form.noValidate = true;
+            form.submit();
+          };
+          form.querySelector('[data-zero-open]').addEventListener('click', open);
+          form.querySelector('[data-zero-cancel]').addEventListener('click', close);
+          form.querySelector('[data-zero-save]').addEventListener('click', save);
+          reason.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); save(); } if (e.key === 'Escape') close(); });
+          reason.addEventListener('input', () => reason.classList.remove('is-invalid'));
+        })();
+      </script>
       ${renderScannerScript()}
       ${quickPreview ? `
         <div class="quick-op-preview ${quickPreview.is_in_cell ? 'is-blocked' : (quickPreview.remaining_quantity <= 0 ? 'is-finished' : '')}">
