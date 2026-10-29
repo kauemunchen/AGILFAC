@@ -333,3 +333,5 @@ fieldset { border: 1px solid rgba(148, 163, 184, .35); border-radius: 10px; padd
 .hourly-fix { display: flex; gap: 4px; align-items: center; margin: 0; }
 .hourly-fix input { width: 64px; padding: 4px 6px; }
 .hourly-fix .btn { padding: 4px 8px; min-height: 0; }
+.zero-hour-row { background: #fffbeb; }
+.zero-hour-row td { color: #92400e; }

@@ -724,6 +724,19 @@ function migrateDatabase(tenantDb = db) {
     )
   `);
   tenantDb.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_hourly_productions_unique_active ON hourly_productions (employee_id, production_date, hour_slot) WHERE is_reversed = 0`);
+  // Hora zero: hora em que a costureira não produziu peça (fica registrada, sem minutos)
+  tenantDb.exec(`
+    CREATE TABLE IF NOT EXISTS hourly_zero_hours (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER NOT NULL REFERENCES employees(id),
+      production_date TEXT NOT NULL,
+      hour_slot TEXT NOT NULL,
+      reason TEXT,
+      is_reversed INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_hourly_zero_unique_active ON hourly_zero_hours (employee_id, production_date, hour_slot) WHERE is_reversed = 0;
+  `);
 
   tenantDb.exec(`
     CREATE TABLE IF NOT EXISTS op_extra_times (
@@ -1619,7 +1632,7 @@ function isLancadorAllowed(method, pathname) {
   if (method === 'GET' && ['/productions/new', '/productions/hourly', '/ops', '/labels/entry', '/api/op-preview', '/conta/senha'].includes(pathname)) return true;
   if (method === 'POST' && ['/productions', '/productions/hourly', '/productions/hourly/validate', '/conta/senha', '/logout'].includes(pathname)) return true;
   if (method === 'GET' && /^\/ops\/\d+$/.test(pathname)) return true;
-  if (method === 'POST' && /^\/productions\/hourly\/\d+\/fix$/.test(pathname)) return true;
+  if (method === 'POST' && /^\/productions\/hourly\/(\d+\/fix|zero\/\d+\/delete)$/.test(pathname)) return true;
   if (method === 'POST' && /^\/ops\/\d+\/(occurrences|problem-items|cell\/send|cell\/return)$/.test(pathname)) return true;
   if (method === 'POST' && /^\/ops\/\d+\/occurrences\/\d+\/conclude$/.test(pathname)) return true;
   return false;
@@ -6075,8 +6088,8 @@ function renderDashboard(query, role = 'adm') {
           cards.forEach(card => {
             const firstHour = Number(card.dataset.firstHour || 0);
             const minutes = Number(card.dataset.minutes || 0);
-            const expectedHours = Math.max(Math.min(currentHour - firstHour + 1, 8), 1);
-            const expectedBase = expectedHours * ${round2(baseMinutesDay() / 8)};
+            // Eficiência do dia sempre sobre a base cheia do dia
+            const expectedBase = ${baseMinutesDay()};
             const pct = expectedBase > 0 ? (minutes / expectedBase) * 100 : 0;
             const pctText = card.querySelector('[data-hourly-percent]');
             const bar = card.querySelector('[data-hourly-bar]');
@@ -9928,6 +9941,7 @@ function getHourlyValidationSummary(productionDate = today()) {
     ORDER BY e.full_name ASC
   `).all(productionDate, productionDate).map(item => ({
     ...item,
+    launched_hours: Number(item.launched_hours || 0) + (zeroHourCountByEmployee(productionDate).get(item.employee_id) || 0),
     day_efficiency_percent: round2((Number(item.total_minutes || 0) / baseMinutesDay()) * 100)
   }));
 }
@@ -9945,15 +9959,18 @@ function getHourlyEmployeeDaySummary(employeeId, productionDate = today(), curre
   `).all(Number(employeeId), productionDate, currentHourSlot);
   const totalMinutes = round3(rows.reduce((sum, item) => sum + Number(item.produced_minutes || 0), 0));
   const totalQuantity = rows.reduce((sum, item) => sum + Number(item.produced_quantity || 0), 0);
-  const launchedHours = new Set(rows.map(item => item.hour_slot)).size;
-  const currentHour = Number(String(currentHourSlot || '').split(':')[0] || 0);
-  const expectedHours = Math.max(Math.min(currentHour - 7 + 1, 8), 1);
-  const expectedBaseMinutes = expectedHours * (baseMinutesDay() / 8);
+  const zeroSlots = db.prepare('SELECT hour_slot FROM hourly_zero_hours WHERE employee_id = ? AND production_date = ? AND is_reversed = 0').all(Number(employeeId), productionDate).map(r => r.hour_slot);
+  const launchedHours = new Set([...rows.map(item => item.hour_slot), ...zeroSlots]).size;
+  const zeroHours = zeroSlots.length;
+  const expectedHours = 8;
+  // Eficiência do dia sempre sobre a base cheia do dia (528 min)
+  const expectedBaseMinutes = baseMinutesDay();
   const dayEfficiencyPercent = expectedBaseMinutes > 0 ? round2((totalMinutes / expectedBaseMinutes) * 100) : 0;
   return {
     totalMinutes,
     totalQuantity,
     launchedHours,
+    zeroHours,
     expectedHours,
     expectedBaseMinutes,
     dayEfficiencyPercent
@@ -9975,6 +9992,7 @@ function getLastHourlyOpForEmployee(employeeId, productionDate = today()) {
 }
 
 function getHourlyDashboardData(productionDate = today()) {
+  const zeroCounts = zeroHourCountByEmployee(productionDate);
   const rows = db.prepare(`
     SELECT
       e.id AS employee_id,
@@ -9998,7 +10016,7 @@ function getHourlyDashboardData(productionDate = today()) {
     ...item,
     total_minutes: round3(item.total_minutes || 0),
     total_quantity: Number(item.total_quantity || 0),
-    launched_hours: Number(item.launched_hours || 0),
+    launched_hours: Number(item.launched_hours || 0) + (zeroCounts.get(item.employee_id) || 0),
     first_hour_number: Number(String(item.first_hour_slot || '00:00').split(':')[0] || 0),
     last_hour_number: Number(String(item.last_hour_slot || '00:00').split(':')[0] || 0)
   }));
@@ -10014,7 +10032,44 @@ function getHourlyDashboardData(productionDate = today()) {
   };
 }
 
+function getZeroHours(productionDate, employeeId = '') {
+  const params = [productionDate];
+  let where = 'z.production_date = ? AND z.is_reversed = 0';
+  if (employeeId) { where += ' AND z.employee_id = ?'; params.push(Number(employeeId)); }
+  return db.prepare(`SELECT z.*, e.registration_code, e.full_name FROM hourly_zero_hours z JOIN employees e ON e.id = z.employee_id WHERE ${where} ORDER BY z.hour_slot, e.full_name`).all(...params);
+}
+
+function zeroHourCountByEmployee(productionDate) {
+  return new Map(db.prepare('SELECT employee_id, COUNT(*) AS n FROM hourly_zero_hours WHERE production_date = ? AND is_reversed = 0 GROUP BY employee_id').all(productionDate).map(r => [r.employee_id, Number(r.n)]));
+}
+
+function handleCreateZeroHour(form, res) {
+  const productionDate = String(form.production_date || today()).trim() || today();
+  const hourSlot = normalizeHourSlotInput(form.hour_slot);
+  const employeeId = Number(form.employee_id || 0);
+  if (!employeeId || !hourSlot) return sendHtml(res, renderHourlyProductionPage(form, 'Para a hora zero, informe a costureira e a hora.', '', getRequestRole()), 422);
+  const dateError = checkLaunchDate(productionDate, getRequestRole());
+  if (dateError) return sendHtml(res, renderHourlyProductionPage(form, dateError, '', getRequestRole()), 422);
+  const employee = db.prepare('SELECT * FROM employees WHERE id = ?').get(employeeId);
+  if (!employee) return sendHtml(res, renderHourlyProductionPage(form, 'Costureira não encontrada.', '', getRequestRole()), 404);
+  const taken = db.prepare('SELECT 1 FROM hourly_productions WHERE employee_id = ? AND production_date = ? AND hour_slot = ? AND is_reversed = 0').get(employeeId, productionDate, hourSlot)
+    || db.prepare('SELECT 1 FROM hourly_zero_hours WHERE employee_id = ? AND production_date = ? AND hour_slot = ? AND is_reversed = 0').get(employeeId, productionDate, hourSlot);
+  if (taken) return sendHtml(res, renderHourlyProductionPage(form, `A hora ${hourSlot} já foi lançada para essa costureira.`, '', getRequestRole()), 422);
+  db.prepare('INSERT INTO hourly_zero_hours (employee_id, production_date, hour_slot, reason) VALUES (?, ?, ?, ?)').run(employeeId, productionDate, hourSlot, String(form.notes || '').trim() || null);
+  const q = new URLSearchParams({ production_date: productionDate, employee_id: String(employeeId), notice: `Hora ${hourSlot} registrada como hora zero (sem produção) para ${employee.full_name}.` });
+  redirect(res, `/productions/hourly?${q.toString()}`);
+}
+
+function handleDeleteZeroHour(id, form, res, role) {
+  const row = db.prepare('SELECT * FROM hourly_zero_hours WHERE id = ? AND is_reversed = 0').get(Number(id));
+  const backUrl = row ? `/productions/hourly?production_date=${encodeURIComponent(row.production_date)}${form.back_employee ? `&employee_id=${encodeURIComponent(form.back_employee)}` : ''}` : '/productions/hourly';
+  if (!row) return redirect(res, buildRedirectWithFlash(backUrl, 'Hora zero não encontrada.', true));
+  db.prepare('UPDATE hourly_zero_hours SET is_reversed = 1 WHERE id = ?').run(row.id);
+  redirect(res, buildRedirectWithFlash(backUrl, `Hora zero das ${row.hour_slot} excluída.`));
+}
+
 function handleCreateHourlyProduction(form, res) {
+  if (form.zero_hour === '1') return handleCreateZeroHour(form, res);
   const productionDate = String(form.production_date || today()).trim() || today();
   const hourSlot = normalizeHourSlotInput(form.hour_slot);
   const employeeId = Number(form.employee_id || 0);
@@ -10051,6 +10106,9 @@ function handleCreateHourlyProduction(form, res) {
   `).get(employeeId, productionDate, hourSlot);
   if (existingHour) {
     return sendHtml(res, renderHourlyProductionPage(form, `A hora ${hourSlot} já foi lançada para essa costureira na OP ${existingHour.op_number}.`), 422);
+  }
+  if (db.prepare('SELECT 1 FROM hourly_zero_hours WHERE employee_id = ? AND production_date = ? AND hour_slot = ? AND is_reversed = 0').get(employeeId, productionDate, hourSlot)) {
+    return sendHtml(res, renderHourlyProductionPage(form, `A hora ${hourSlot} está marcada como hora zero. Exclua a hora zero na lista antes de lançar peças nela.`), 422);
   }
 
   const totals = db.prepare(`
@@ -10407,6 +10465,7 @@ function renderHourlyProductionPage(values = {}, error = '', notice = '', role =
         <div class="full">${renderPrizeFlagField(values)}</div>
         <div class="full actions">
           <button class="btn" type="submit">Salvar rápido</button>
+          <button class="btn secondary" type="submit" name="zero_hour" value="1" formnovalidate onclick="return confirm('Registrar a hora ' + this.form.hour_slot.value + ' como HORA ZERO (sem produção) para ' + (this.form.employee_label.value || 'a costureira') + '?')" title="A costureira não produziu peça nesta hora">⓪ Hora zero</button>
           <button class="btn secondary" type="button" onclick="window.location.href='/productions/hourly?employee_id=' + encodeURIComponent(document.querySelector('[data-hourly-field=employee-id]').value) + '&production_date=' + encodeURIComponent(document.querySelector('[data-hourly-field=date]').value)">Atualizar tela</button>
         </div>
       </form>
@@ -10422,7 +10481,7 @@ function renderHourlyProductionPage(values = {}, error = '', notice = '', role =
         </div>
       ` : values.op_number ? '<div class="quick-op-preview is-missing"><strong>OP não encontrada.</strong><span>Confira o número digitado antes de salvar.</span></div>' : ''}
       ${selectedEmployee ? `<p class="hint">Costureira selecionada: <strong>${escapeHtml(selectedEmployee.full_name)}</strong>. Total do dia nessa seleção: <strong>${totalSelectedQty} peça(s)</strong> · <strong>${fmtNum(totalSelectedMinutes, 3)} min</strong>.${lastHourlyOp ? ` Última OP sugerida: <strong>${escapeHtml(lastHourlyOp.op_number)}</strong>.` : ''}</p>` : '<p class="hint">Selecione a costureira para acompanhar os lançamentos dela no dia.</p>'}
-      ${selectedEmployeeDaySummary ? `<div class="shipment-summary-grid section-gap"><article class="mini-card"><span>Peças do dia</span><strong>${selectedEmployeeDaySummary.totalQuantity}</strong></article><article class="mini-card"><span>Minutos do dia</span><strong>${fmtNum(selectedEmployeeDaySummary.totalMinutes, 3)}</strong></article><article class="mini-card"><span>Horas lançadas</span><strong>${selectedEmployeeDaySummary.launchedHours}</strong></article><article class="mini-card"><span>% do dia até ${escapeHtml(hourSlot)}</span><strong>${fmtNum(selectedEmployeeDaySummary.dayEfficiencyPercent, 2)}%</strong></article></div>` : ''}
+      ${selectedEmployeeDaySummary ? `<div class="shipment-summary-grid section-gap"><article class="mini-card"><span>Peças do dia</span><strong>${selectedEmployeeDaySummary.totalQuantity}</strong></article><article class="mini-card"><span>Minutos do dia</span><strong>${fmtNum(selectedEmployeeDaySummary.totalMinutes, 3)}</strong></article><article class="mini-card"><span>Horas lançadas</span><strong>${selectedEmployeeDaySummary.launchedHours}${selectedEmployeeDaySummary.zeroHours ? ` <small class="hint">(${selectedEmployeeDaySummary.zeroHours} zero)</small>` : ''}</strong></article><article class="mini-card"><span>% do dia (base ${fmtNum(baseMinutesDay(), 0)} min)</span><strong>${fmtNum(selectedEmployeeDaySummary.dayEfficiencyPercent, 2)}%</strong></article></div>` : ''}
     </section>
 
     <section class="panel section-gap">
@@ -10430,7 +10489,8 @@ function renderHourlyProductionPage(values = {}, error = '', notice = '', role =
       <table>
         <thead><tr><th>Hora</th><th>OP</th><th>Produto</th><th>Costureira</th><th>Qtd</th><th>Normal</th><th>Extra</th><th>Total</th><th>% hora</th><th>Status</th><th>Corrigir</th></tr></thead>
         <tbody>
-          ${recent.map(item => { const canFix = !item.is_validated || isAdminRole(role); return `<tr><td>${escapeHtml(item.hour_slot)}</td><td>${escapeHtml(item.op_number)}</td><td>${escapeHtml(item.product_name)}</td><td>${escapeHtml(item.registration_code)} - ${escapeHtml(item.full_name)}</td><td>${item.produced_quantity}</td><td>${fmtNum(round3(item.normal_minutes || 0), 3)}</td><td>${fmtNum(round3(item.extra_minutes || 0), 3)}</td><td>${fmtNum(round3(item.produced_minutes || 0), 3)}</td><td>${fmtNum(Number(item.hour_efficiency_percent || 0), 2)}%</td><td>${item.is_validated ? `<span class="status-pill ok">Validado</span>` : `<span class="status-pill pending">Pendente</span>`}</td><td>${canFix ? `<form class="hourly-fix" method="post" action="/productions/hourly/${item.id}/fix" onsubmit="return confirm('Corrigir ${escapeHtml(item.hour_slot)} de ${escapeHtml(String(item.full_name).replace(/'/g, ''))} de ${item.produced_quantity} para ' + this.produced_quantity.value + ' peça(s)?' + (this.produced_quantity.value === '0' ? ' (0 = excluir o lançamento)' : ''))"><input type="hidden" name="back_employee" value="${escapeHtml(selectedEmployeeId || '')}" /><input type="number" name="produced_quantity" min="0" step="1" required value="${item.produced_quantity}" aria-label="Quantidade correta" /><button class="btn secondary" type="submit" title="Salvar correção">✔</button></form>` : '<span class="hint">só adm</span>'}</td></tr>`; }).join('') || '<tr><td colspan="11">Nenhum lançamento por hora gravado para esse filtro.</td></tr>'}
+          ${getZeroHours(productionDate, selectedEmployeeId || '').map(z => `<tr class="zero-hour-row"><td>${escapeHtml(z.hour_slot)}</td><td>—</td><td><span class="status-pill pending">Hora zero</span></td><td>${escapeHtml(z.registration_code)} - ${escapeHtml(z.full_name)}</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0%</td><td>${escapeHtml(z.reason || 'Sem produção')}</td><td><form class="hourly-fix" method="post" action="/productions/hourly/zero/${z.id}/delete" onsubmit="return confirm('Excluir a hora zero das ${escapeHtml(z.hour_slot)}?')"><input type="hidden" name="back_employee" value="${escapeHtml(selectedEmployeeId || '')}" /><button class="btn secondary" type="submit" title="Excluir hora zero">Excluir</button></form></td></tr>`).join('')}
+          ${recent.map(item => { const canFix = !item.is_validated || isAdminRole(role); return `<tr><td>${escapeHtml(item.hour_slot)}</td><td>${escapeHtml(item.op_number)}</td><td>${escapeHtml(item.product_name)}</td><td>${escapeHtml(item.registration_code)} - ${escapeHtml(item.full_name)}</td><td>${item.produced_quantity}</td><td>${fmtNum(round3(item.normal_minutes || 0), 3)}</td><td>${fmtNum(round3(item.extra_minutes || 0), 3)}</td><td>${fmtNum(round3(item.produced_minutes || 0), 3)}</td><td>${fmtNum(Number(item.hour_efficiency_percent || 0), 2)}%</td><td>${item.is_validated ? `<span class="status-pill ok">Validado</span>` : `<span class="status-pill pending">Pendente</span>`}</td><td>${canFix ? `<form class="hourly-fix" method="post" action="/productions/hourly/${item.id}/fix" onsubmit="return confirm('Corrigir ${escapeHtml(item.hour_slot)} de ${escapeHtml(String(item.full_name).replace(/'/g, ''))} de ${item.produced_quantity} para ' + this.produced_quantity.value + ' peça(s)?' + (this.produced_quantity.value === '0' ? ' (0 = excluir o lançamento)' : ''))"><input type="hidden" name="back_employee" value="${escapeHtml(selectedEmployeeId || '')}" /><input type="number" name="produced_quantity" min="0" step="1" required value="${item.produced_quantity}" aria-label="Quantidade correta" /><button class="btn secondary" type="submit" title="Salvar correção">✔</button></form>` : '<span class="hint">só adm</span>'}</td></tr>`; }).join('') || (getZeroHours(productionDate, selectedEmployeeId || '').length ? '' : '<tr><td colspan="11">Nenhum lançamento por hora gravado para esse filtro.</td></tr>')}
         </tbody>
       </table>
     </section>
@@ -12067,7 +12127,7 @@ const server = http.createServer(async (req, res) => {
           (req.method === 'GET' && pathname === '/productions/hourly') ||
           (req.method === 'POST' && pathname === '/productions/hourly') ||
           (req.method === 'POST' && pathname === '/productions/hourly/validate') ||
-          (req.method === 'POST' && /^\/productions\/hourly\/\d+\/fix$/.test(pathname)) ||
+          (req.method === 'POST' && /^\/productions\/hourly\/(\d+\/fix|zero\/\d+\/delete)$/.test(pathname)) ||
           (req.method === 'GET' && pathname === '/login') ||
           (req.method === 'POST' && pathname === '/logout')
         );
@@ -12169,6 +12229,11 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && pathname === '/productions/hourly/validate') {
         if (requireHourlyLauncherAccess(res, role)) return;
         return handleValidateHourlyProductionDay(await parseBody(req), res);
+      }
+      const zeroDelete = pathname.match(/^\/productions\/hourly\/zero\/(\d+)\/delete$/);
+      if (req.method === 'POST' && zeroDelete) {
+        if (requireHourlyLauncherAccess(res, role)) return;
+        return handleDeleteZeroHour(zeroDelete[1], await parseBody(req), res, role);
       }
       const hourlyFix = pathname.match(/^\/productions\/hourly\/(\d+)\/fix$/);
       if (req.method === 'POST' && hourlyFix) {
