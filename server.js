@@ -6072,6 +6072,16 @@ function renderDashboard(query, role = 'adm') {
         <article class="mini-card"><span>Minutos lançados hoje</span><strong id="hourly-total-minutes">${fmtNum(hourlyDashboardData.totalMinutes, 3)}</strong></article>
         <article class="mini-card"><span>% geral até agora</span><strong id="hourly-total-percent">0,00%</strong></article>
       </div>
+      ${(() => {
+        const absent = getEmployeesWithoutLaunch(currentDay);
+        const labels = { atestado: 'Atestado', ferias: 'Férias', folga: 'Folga', afastamento: 'Afastamento', falta: 'Falta', outro: 'Outro' };
+        if (!absent.active) return '';
+        return `<details class="absent-box ${absent.list.length ? 'has-absent' : ''}" ${absent.list.length && absent.list.length <= 12 ? 'open' : ''}>
+          <summary><strong>${absent.list.length}</strong> de ${absent.active} colaboradora(s) sem lançamento hoje${absent.withAbsence ? ` · ${absent.withAbsence} com ausência registrada` : ''}</summary>
+          ${absent.list.length ? `<div class="absent-list">${absent.list.map(i => `<span class="absent-chip ${i.absence ? 'is-justified' : ''}">${escapeHtml(i.name)}${i.absence ? ` <small>${escapeHtml(labels[i.absence] || i.absence)}</small>` : ''}</span>`).join('')}</div>
+          <p class="hint">Sem nenhum lançamento hoje (por hora, hora zero ou lançamento rápido). Ausências registradas aparecem marcadas. <a href="/closures">Tratar no fechamento</a></p>` : '<p class="hint">Todas as colaboradoras ativas já têm lançamento hoje.</p>'}
+        </details>`;
+      })()}
       ${hourlyDashboardData.rows.length ? `<div class="hourly-list-head"><span>#</span><span>Colaboradora</span><span>Andamento</span><span>%</span><span>Peças</span><span>Min</span><span>Horas</span><span>Início</span></div>` : ''}
       <div class="hourly-list" id="hourly-dashboard-list">
         ${hourlyDashboardData.rows.map(item => `<div class="hourly-row" data-hourly-card data-first-hour="${item.first_hour_number}" data-minutes="${item.total_minutes}"><span class="hourly-rank" data-hourly-rank></span><strong class="hourly-name" title="${escapeHtml(item.full_name)}">${escapeHtml(item.full_name)}${item.termination_date && item.termination_date <= currentDay ? ' <span style="color:#ef4444;font-weight:600;">(Inativa)</span>' : ''}</strong><span class="hourly-bar"><span data-hourly-bar></span></span><strong class="hourly-pct" data-hourly-percent>0,00%</strong><span>${item.total_quantity}</span><span>${fmtNum(item.total_minutes, 0)}</span><span>${item.launched_hours}h</span><span>${escapeHtml(item.first_hour_slot || '-')}</span></div>`).join('') || '<p class="hint">Nenhum lançamento por hora hoje.</p>'}
@@ -9989,6 +9999,21 @@ function getLastHourlyOpForEmployee(employeeId, productionDate = today()) {
     ORDER BY hp.hour_slot DESC, hp.id DESC
     LIMIT 1
   `).get(Number(employeeId), productionDate) || null;
+}
+
+// Colaboradoras ativas, em dia útil delas, sem nenhum lançamento no dia (hora, hora zero ou diário)
+function getEmployeesWithoutLaunch(productionDate = today()) {
+  const employees = db.prepare('SELECT * FROM employees').all()
+    .filter(emp => describeEmployeeStatus(emp) === 'Ativo' && getEmployeeBusinessDaysInRange(emp, productionDate, productionDate).length);
+  const launched = new Set([
+    ...db.prepare('SELECT DISTINCT employee_id FROM hourly_productions WHERE production_date = ? AND is_reversed = 0').all(productionDate),
+    ...db.prepare('SELECT DISTINCT employee_id FROM hourly_zero_hours WHERE production_date = ? AND is_reversed = 0').all(productionDate),
+    ...db.prepare('SELECT DISTINCT employee_id FROM op_daily_productions WHERE production_date = ? AND is_reversed = 0').all(productionDate)
+  ].map(r => r.employee_id));
+  const absences = new Map(db.prepare('SELECT employee_id, absence_type FROM employee_absences WHERE absence_date = ?').all(productionDate).map(r => [r.employee_id, r.absence_type]));
+  const list = employees.filter(emp => !launched.has(emp.id)).map(emp => ({ id: emp.id, name: emp.full_name, absence: absences.get(emp.id) || '' }))
+    .sort((a, b) => Number(Boolean(a.absence)) - Number(Boolean(b.absence)) || a.name.localeCompare(b.name));
+  return { list, active: employees.length, withAbsence: list.filter(i => i.absence).length };
 }
 
 function getHourlyDashboardData(productionDate = today()) {

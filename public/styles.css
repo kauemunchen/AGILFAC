@@ -335,3 +335,12 @@ fieldset { border: 1px solid rgba(148, 163, 184, .35); border-radius: 10px; padd
 .hourly-fix .btn { padding: 4px 8px; min-height: 0; }
 .zero-hour-row { background: #fffbeb; }
 .zero-hour-row td { color: #92400e; }
+/* Dashboard: sem lançamento hoje */
+.absent-box { margin: 0 0 12px; padding: 10px 14px; border-radius: 12px; border: 1px solid #bbf7d0; background: #f0fdf4; }
+.absent-box.has-absent { border-color: #fecaca; background: #fef2f2; }
+.absent-box summary { cursor: pointer; font-size: 14px; color: #1f2937; }
+.absent-box.has-absent summary strong { color: #b91c1c; font-size: 18px; }
+.absent-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.absent-chip { background: #fff; border: 1px solid #fecaca; color: #991b1b; border-radius: 999px; padding: 4px 10px; font-size: 12px; font-weight: 600; }
+.absent-chip.is-justified { border-color: #cbd5e1; color: #475569; }
+.absent-chip small { font-weight: 500; color: #64748b; }
