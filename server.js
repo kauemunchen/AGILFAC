@@ -9768,7 +9768,8 @@ function getFinanceData(start, end) {
   return {
     start, end, rateProd, rateMost, byType, days: [...days.values()].sort((a, b) => a.day.localeCompare(b.day)),
     expenses, expensesTotal, expensesByCategory: [...expensesByCategory].sort((a, b) => b[1] - a[1]), incidents,
-    people: people.sort((a, b) => b.result - a.result), groups,
+    // Ordem alfabética; indiretos no fim
+    people: people.sort((a, b) => Number(Boolean(a.indirect)) - Number(Boolean(b.indirect)) || String(a.emp.full_name).localeCompare(String(b.emp.full_name), 'pt-BR')), groups,
     totals: {
       revenue, payroll, expenses: expensesTotal, result: revenue - payroll - expensesTotal, minutes,
       margin: revenue > 0 ? ((revenue - payroll - expensesTotal) / revenue) * 100 : null,
