@@ -9358,6 +9358,22 @@ function renderHourlyGridPage(query = {}, error = '', notice = '', role = getReq
         ${selected ? `<input type="hidden" name="employee_id" value="${selected.id}" />` : ''}
       </form>
     </section>
+    ${selected ? '' : (() => {
+      // Resultado geral da empresa (costureiras da lista)
+      const totMin = summary.reduce((a, x) => a + x.minutes, 0);
+      const totElapsed = summary.reduce((a, x) => a + x.elapsedBase, 0);
+      const totPcs = summary.reduce((a, x) => a + x.pieces, 0);
+      const dayBase = summary.length * base;
+      const nowPct = totElapsed > 0 ? (totMin / totElapsed) * 100 : null;
+      const dayPct = dayBase > 0 ? (totMin / dayBase) * 100 : 0;
+      const launched = summary.filter(x => x.hours > 0).length;
+      return `<section class="company-now">
+        <article class="mini-card company-now-main"><span>Empresa · até agora</span><strong class="${nowPct === null ? '' : pctClass(nowPct)}">${nowPct === null ? '—' : `${fmtNum(nowPct, 1)}%`}</strong><small>${fmtNum(totMin, 0)} min em ${fmtNum(totElapsed, 0)} min lançados</small></article>
+        <article class="mini-card company-now-main"><span>Empresa · resultado do dia</span><strong class="${pctClass(dayPct)}">${fmtNum(dayPct, 1)}%</strong><small>${fmtNum(totMin, 0)} de ${fmtNum(dayBase, 0)} min (${summary.length} × ${fmtNum(base, 0)})</small></article>
+        <article class="mini-card"><span>Peças · minutos</span><strong>${fmtNum(totPcs, 0)} · ${fmtNum(totMin, 0)}</strong><small>meta do dia: ${fmtNum(dayBase * target / 100, 0)} min (${fmtPct(target)}%)</small></article>
+        <article class="mini-card"><span>Costureiras lançadas</span><strong>${launched} de ${summary.length}</strong><small>${summary.length - launched ? `${summary.length - launched} sem nenhuma hora` : 'todas com hora lançada'}</small></article>
+      </section>`;
+    })()}
     ${selected ? '' : `<section class="panel section-gap">
       <h3>Clique na costureira para lançar as horas dela</h3>
       ${summary.length ? `<div class="hourly-list-head"><span>#</span><span>Colaboradora</span><span>Andamento do dia</span><span>% dia</span><span>Peças</span><span>Min</span><span>Horas</span><span>Até agora</span></div>

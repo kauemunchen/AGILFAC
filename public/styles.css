@@ -376,3 +376,7 @@ a.hourly-row:hover { background: #eef2ff; }
 .hour-grid .row-pct th, .hour-grid .row-pct td, .hour-grid .row-now th, .hour-grid .row-now td { border-top: 2px solid #94a3b8; }
 .hour-grid .row-now td, .hour-grid .row-now th { border-top-width: 1px; }
 .hour-grid .row-pct td { font-weight: 700; }
+.company-now { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+.company-now .mini-card small { display: block; color: #607089; font-size: 12px; margin-top: 4px; }
+.company-now-main strong { font-size: 30px !important; }
+@media (max-width: 900px) { .company-now { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
