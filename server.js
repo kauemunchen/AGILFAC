@@ -9248,6 +9248,7 @@ function handleCreateExtraLaunch(form, res, role) {
 // ===================== QUADRO POR HORA =====================
 // Grade por costureira com as horas da jornada dela: OP (vem da hora anterior), peças, % e minutos.
 // 0 = hora zero (pede motivo). Cada quadro tem o seu botão Salvar.
+const ZERO_HOUR_REASONS = ['Troca de OP', 'Não entregou peça', 'Sem peça / aguardando OP', 'Máquina parada / manutenção', 'Falta de material / aviamento', 'Retrabalho / conserto', 'Ajudando outro setor', 'Treinamento', 'Problema de saúde no trabalho'];
 const DEFAULT_GRID_SCHEDULE = { start_time: '07:00', end_time: '16:48', break_start: '12:00', break_end: '13:00' };
 
 function minutesToTime(total) {
@@ -9298,7 +9299,10 @@ function renderHourlyGridPage(query = {}, error = '', notice = '', role = getReq
     const own = rows.filter(r => r.employee_id === emp.id);
     const minutes = round3(own.reduce((s, r) => s + Number(r.produced_minutes || 0), 0));
     const pieces = own.reduce((s, r) => s + Number(r.produced_quantity || 0), 0);
-    return { emp, minutes, pieces, pct: base > 0 ? (minutes / base) * 100 : 0, hours: own.length + zeros.filter(z => z.employee_id === emp.id).length };
+    // Eficiência até agora: minutos ÷ minutos das horas já lançadas (com peças ou hora zero)
+    const launchedSlots = new Set([...own.map(r => r.hour_slot), ...zeros.filter(z => z.employee_id === emp.id).map(z => z.hour_slot)]);
+    const elapsedBase = getEmployeeHourBlocks(emp).filter(b => launchedSlots.has(b.slot)).reduce((sum, b) => sum + b.minutes, 0);
+    return { emp, minutes, pieces, pct: base > 0 ? (minutes / base) * 100 : 0, nowPct: elapsedBase > 0 ? (minutes / elapsedBase) * 100 : null, elapsedBase, hours: launchedSlots.size };
   }).sort((a, b) => b.pct - a.pct || a.emp.full_name.localeCompare(b.emp.full_name));
 
   // Lista primeiro; ao clicar numa costureira abre só o quadro dela
@@ -9325,7 +9329,7 @@ function renderHourlyGridPage(query = {}, error = '', notice = '', role = getReq
         <div class="grid-card-head">
           <h3>${escapeHtml(emp.full_name)}</h3>
           <span class="hint">${escapeHtml(emp.work_schedule_id ? (getWorkSchedules().find(w => w.id === emp.work_schedule_id)?.name || '') : 'Sem jornada (07:00–16:48)')}</span>
-          <strong class="${pctClass(own.pct)}" data-day-pct>${fmtNum(own.pct, 1)}%</strong>
+          <span class="grid-head-pcts"><span>Até agora <strong class="${own.nowPct === null ? '' : pctClass(own.nowPct)}" data-now-pct>${own.nowPct === null ? '—' : `${fmtNum(own.nowPct, 1)}%`}</strong></span><span>Dia <strong class="${pctClass(own.pct)}" data-day-pct>${fmtNum(own.pct, 1)}%</strong></span></span>
         </div>
         <form method="post" action="/productions/hourly/quadro" data-grid-form>
           <input type="hidden" name="production_date" value="${escapeHtml(productionDate)}" />
@@ -9337,6 +9341,7 @@ function renderHourlyGridPage(query = {}, error = '', notice = '', role = getReq
               <tr class="row-qty"><th>Peças</th>${cells.map(c => `<td class="${c.zero ? 'is-zero' : ''}${c.locked ? ' is-locked' : ''}"><input type="number" min="0" step="1" inputmode="numeric" name="qty_${c.b.slot}" value="${c.row ? c.row.produced_quantity : (c.zero ? '0' : '')}" ${c.locked ? 'disabled title="Validado — corrija em Lanç. hora"' : ''} data-qty data-slot="${c.b.slot}" data-block="${c.b.minutes}" /></td>`).join('')}<td class="grid-total" data-total-pieces>${own.pieces}</td></tr>
               <tr class="row-reason" ${cells.some(c => c.zero) ? '' : 'hidden'}><th>Motivo (0)</th>${cells.map(c => `<td><input name="reason_${c.b.slot}" value="${escapeHtml(c.zero?.reason || '')}" list="zero-reasons" placeholder="motivo" data-reason data-slot="${c.b.slot}" ${c.zero ? '' : 'hidden'} /></td>`).join('')}<td></td></tr>
               <tr class="row-pct"><th>%</th>${cells.map(c => `<td data-pct data-slot="${c.b.slot}" class="${c.pct === null ? '' : pctClass(c.pct)}">${c.pct === null ? '' : `${fmtNum(c.pct, 0)}%`}</td>`).join('')}<td class="grid-total ${pctClass(own.pct)}" data-total-pct>${fmtNum(own.pct, 1)}%</td></tr>
+              <tr class="row-now"><th>Até agora</th><td colspan="${cells.length}" class="grid-now-note" data-now-note>${own.nowPct === null ? 'Sem horas lançadas' : `${fmtNum(own.minutes, 1)} min em ${own.elapsedBase} min lançados`}</td><td class="grid-total ${own.nowPct === null ? '' : pctClass(own.nowPct)}" data-total-now>${own.nowPct === null ? '—' : `${fmtNum(own.nowPct, 1)}%`}</td></tr>
               <tr class="row-min"><th>Min</th>${cells.map(c => `<td data-min data-slot="${c.b.slot}">${c.row ? fmtNum(c.minutes, 1) : ''}</td>`).join('')}<td class="grid-total" data-total-min>${fmtNum(own.minutes, 1)}</td></tr>
             </tbody>
           </table></div>
@@ -9355,11 +9360,11 @@ function renderHourlyGridPage(query = {}, error = '', notice = '', role = getReq
     </section>
     ${selected ? '' : `<section class="panel section-gap">
       <h3>Clique na costureira para lançar as horas dela</h3>
-      ${summary.length ? `<div class="hourly-list-head"><span>#</span><span>Colaboradora</span><span>Andamento</span><span>%</span><span>Peças</span><span>Min</span><span>Horas</span><span></span></div>
-      <div class="hourly-list">${summary.map((s, i) => `<a class="hourly-row" href="/productions/hourly/quadro?production_date=${encodeURIComponent(productionDate)}&employee_id=${s.emp.id}"><span class="hourly-rank">${i + 1}</span><strong class="hourly-name">${escapeHtml(s.emp.full_name)}</strong><span class="hourly-bar"><span style="width:${Math.max(2, Math.min(s.pct, 100))}%;background:${s.pct >= target ? '#16a34a' : (s.pct >= 40 ? '#f59e0b' : '#ef4444')}"></span></span><strong class="hourly-pct ${pctClass(s.pct)}">${fmtNum(s.pct, 1)}%</strong><span>${s.pieces}</span><span>${fmtNum(s.minutes, 0)}</span><span>${s.hours}h</span><span></span></a>`).join('')}</div>` : '<p class="hint">Nenhuma costureira ativa (função "Costureira") para esta data.</p>'}
-      <p class="hint">% do dia = minutos ÷ ${fmtNum(base, 0)} min. % da hora = minutos ÷ minutos da hora (60, ou menos na última hora).</p>
+      ${summary.length ? `<div class="hourly-list-head"><span>#</span><span>Colaboradora</span><span>Andamento do dia</span><span>% dia</span><span>Peças</span><span>Min</span><span>Horas</span><span>Até agora</span></div>
+      <div class="hourly-list">${summary.map((s, i) => `<a class="hourly-row" href="/productions/hourly/quadro?production_date=${encodeURIComponent(productionDate)}&employee_id=${s.emp.id}"><span class="hourly-rank">${i + 1}</span><strong class="hourly-name">${escapeHtml(s.emp.full_name)}</strong><span class="hourly-bar"><span style="width:${Math.max(2, Math.min(s.pct, 100))}%;background:${s.pct >= target ? '#16a34a' : (s.pct >= 40 ? '#f59e0b' : '#ef4444')}"></span></span><strong class="hourly-pct ${pctClass(s.pct)}">${fmtNum(s.pct, 1)}%</strong><span>${s.pieces}</span><span>${fmtNum(s.minutes, 0)}</span><span>${s.hours}h</span><strong class="${s.nowPct === null ? '' : pctClass(s.nowPct)}">${s.nowPct === null ? '—' : `${fmtNum(s.nowPct, 1)}%`}</strong></a>`).join('')}</div>` : '<p class="hint">Nenhuma costureira ativa (função "Costureira") para esta data.</p>'}
+      <p class="hint">% dia = minutos ÷ ${fmtNum(base, 0)} min. Até agora = minutos ÷ minutos das horas já lançadas (com peças ou hora zero). % da hora = minutos ÷ minutos da hora (60, ou menos na última hora).</p>
     </section>`}
-    <datalist id="zero-reasons">${['Sem peça / aguardando OP', 'Máquina parada / manutenção', 'Falta de material / aviamento', 'Retrabalho / conserto', 'Ajudando outro setor', 'Treinamento', 'Problema de saúde no trabalho'].map(r => `<option value="${r}"></option>`).join('')}</datalist>
+    <datalist id="zero-reasons">${ZERO_HOUR_REASONS.map(r => `<option value="${r}"></option>`).join('')}</datalist>
     ${grids}
     <script>
       (() => {
@@ -9381,7 +9386,7 @@ function renderHourlyGridPage(query = {}, error = '', notice = '', role = getReq
           const qtys = Array.from(form.querySelectorAll('[data-qty]'));
           const reasonRow = form.querySelector('.row-reason');
           const recalc = async () => {
-            let totalMin = 0, totalPcs = 0;
+            let totalMin = 0, totalPcs = 0, elapsed = 0;
             for (let i = 0; i < qtys.length; i++) {
               const q = qtys[i], slot = q.dataset.slot;
               const pctCell = form.querySelector('[data-pct][data-slot="' + slot + '"]');
@@ -9392,6 +9397,7 @@ function renderHourlyGridPage(query = {}, error = '', notice = '', role = getReq
               if (reason) reason.hidden = v !== '0';
               if (v === '' ) { pctCell.textContent = ''; minCell.textContent = ''; pctCell.className = ''; continue; }
               const n = Number(v);
+              elapsed += Number(q.dataset.block || 60);
               const m = n * await perPiece(ops[i].value);
               const p = m / Number(q.dataset.block || 60) * 100;
               totalMin += m; totalPcs += n;
@@ -9403,6 +9409,12 @@ function renderHourlyGridPage(query = {}, error = '', notice = '', role = getReq
             form.querySelector('[data-total-pieces]').textContent = totalPcs;
             form.querySelector('[data-total-min]').textContent = fmt(totalMin, 1);
             const tp = form.querySelector('[data-total-pct]'); tp.textContent = fmt(dayPct, 1) + '%'; tp.className = 'grid-total ' + cls(dayPct);
+            const nowPct = elapsed > 0 ? totalMin / elapsed * 100 : null;
+            const tn = form.querySelector('[data-total-now]'); tn.textContent = nowPct === null ? '—' : fmt(nowPct, 1) + '%'; tn.className = 'grid-total ' + (nowPct === null ? '' : cls(nowPct));
+            form.querySelector('[data-now-note]').textContent = nowPct === null ? 'Sem horas lançadas' : fmt(totalMin, 1) + ' min em ' + elapsed + ' min lançados';
+            const card = form.closest('.grid-card');
+            const hn = card.querySelector('[data-now-pct]'); if (hn) { hn.textContent = nowPct === null ? '—' : fmt(nowPct, 1) + '%'; hn.className = nowPct === null ? '' : cls(nowPct); }
+            const hd = card.querySelector('[data-day-pct]'); if (hd) { hd.textContent = fmt(dayPct, 1) + '%'; hd.className = cls(dayPct); }
           };
           // OP digitada passa para as horas seguintes que ainda não têm peça lançada
           ops.forEach((op, i) => op.addEventListener('change', () => {
@@ -10779,7 +10791,7 @@ function renderHourlyProductionPage(values = {}, error = '', notice = '', role =
           <label>Motivo da hora zero *
             <input name="zero_reason" list="zero-reasons" autocomplete="off" placeholder="Ex.: máquina parada — Enter salva" data-zero-reason />
             <datalist id="zero-reasons">
-              ${['Sem peça / aguardando OP', 'Máquina parada / manutenção', 'Falta de material / aviamento', 'Retrabalho / conserto', 'Ajudando outro setor', 'Treinamento', 'Problema de saúde no trabalho'].map(r => `<option value="${r}"></option>`).join('')}
+              ${ZERO_HOUR_REASONS.map(r => `<option value="${r}"></option>`).join('')}
             </datalist>
           </label>
           <div class="actions"><button class="btn" type="button" data-zero-save>Salvar hora zero</button><button class="btn secondary" type="button" data-zero-cancel>Cancelar</button></div>

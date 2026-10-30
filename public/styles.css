@@ -368,3 +368,8 @@ fieldset { border: 1px solid rgba(148, 163, 184, .35); border-radius: 10px; padd
 .grid-actions { margin-top: 8px; flex-wrap: wrap; }
 a.hourly-row { color: inherit; text-decoration: none; }
 a.hourly-row:hover { background: #eef2ff; }
+.grid-head-pcts { margin-left: auto; display: flex; gap: 16px; font-size: 13px; color: #475569; }
+.grid-head-pcts strong { font-size: 18px; margin-left: 4px; }
+.hour-grid .grid-now-note { text-align: left; color: #475569; font-size: 12px; background: #f8fafc; }
+.hour-grid .row-now th { background: #eef2ff; }
+.hourly-list-head > span:nth-child(8), a.hourly-row > strong:last-child { text-align: right; }
