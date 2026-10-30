@@ -1629,6 +1629,7 @@ function isLancadorRole(role) {
 }
 
 function isLancadorAllowed(method, pathname) {
+  if (['GET', 'POST'].includes(method) && pathname === '/productions/hourly/quadro') return true;
   if (method === 'GET' && ['/productions/new', '/productions/hourly', '/ops', '/labels/entry', '/api/op-preview', '/conta/senha'].includes(pathname)) return true;
   if (method === 'POST' && ['/productions', '/productions/hourly', '/productions/hourly/validate', '/conta/senha', '/logout'].includes(pathname)) return true;
   if (method === 'GET' && /^\/ops\/\d+$/.test(pathname)) return true;
@@ -2275,7 +2276,7 @@ function renderRoleSwitcher(role) {
 
 // T1.7 — Menu agrupado (Produção, Expedição, Financeiro, Pessoas, Configurações), grupos recolhíveis
 const NAV_GROUPS = [
-  { key: 'producao', label: 'Produção', hrefs: ['/', '/acompanhamento/diario', '/productions/hourly', '/productions/new', '/productions/extra', '/ops/new', '/ops', '/labels/entry', '/op-extra-times'] },
+  { key: 'producao', label: 'Produção', hrefs: ['/', '/acompanhamento/diario', '/productions/hourly', '/productions/hourly/quadro', '/productions/new', '/productions/extra', '/ops/new', '/ops', '/labels/entry', '/op-extra-times'] },
   { key: 'expedicao', label: 'Expedição', hrefs: ['/shipments/new', '/shipments', '/labels/shipment'] },
   { key: 'financeiro', label: 'Financeiro', hrefs: ['/billing-reconciliation', '/closures', '/ausencias/importar', '/premios/producao', '/cells/report', '/cells/closures'] },
   { key: 'pessoas', label: 'Pessoas', hrefs: ['/employees'] },
@@ -2318,18 +2319,21 @@ function pageLayout({ title, content, notice = '', error = '', role = 'adm' }) {
     ? [
         { href: '/productions/new', label: 'Lançamentos', icon: '🧵', active: title === 'Novo lançamento' },
         { href: '/productions/hourly', label: 'Lanç. hora', icon: '⏰', active: title === 'Lançamento por hora' },
+        { href: '/productions/hourly/quadro', label: 'Quadro hora', icon: '🗓️', active: title === 'Quadro por hora' },
         { href: '/ops', label: 'Consulta OP', icon: '📦', active: title.startsWith('OPs') || title.startsWith('OP ') },
         { href: '/labels/entry', label: 'Etiq. entrada', icon: '🏷️', active: title.startsWith('Etiquetas de entrada') }
       ]
     : isHourlyLauncherRole(role)
     ? [
         { href: '/', label: 'Dashboard', icon: '🏠', active: title === 'Dashboard' },
-        { href: '/productions/hourly', label: 'Lanç. hora', icon: '⏰', active: title === 'Lançamento por hora' }
+        { href: '/productions/hourly', label: 'Lanç. hora', icon: '⏰', active: title === 'Lançamento por hora' },
+        { href: '/productions/hourly/quadro', label: 'Quadro hora', icon: '🗓️', active: title === 'Quadro por hora' }
       ]
     : [
         { href: '/', label: 'Dashboard', icon: '🏠', active: title === 'Dashboard' },
         { href: '/acompanhamento/diario', label: 'Acomp. diário', icon: '📈', active: title.startsWith('Acompanhamento diário') },
         { href: '/productions/hourly', label: 'Lanç. hora', icon: '⏰', active: title === 'Lançamento por hora' },
+        { href: '/productions/hourly/quadro', label: 'Quadro hora', icon: '🗓️', active: title === 'Quadro por hora' },
         { href: '/productions/new', label: 'Lançamentos', icon: '🧵', active: title === 'Novo lançamento' },
         { href: '/productions/extra', label: 'Hora extra', icon: '🌙', active: title === 'Lançamento hora extra' },
         { href: '/ops/new', label: 'Cadastro OP', icon: '📝', active: title === 'Nova OP' },
@@ -9241,6 +9245,279 @@ function handleCreateExtraLaunch(form, res, role) {
 // ===============================================================
 
 
+// ===================== QUADRO POR HORA =====================
+// Grade por costureira com as horas da jornada dela: OP (vem da hora anterior), peças, % e minutos.
+// 0 = hora zero (pede motivo). Cada quadro tem o seu botão Salvar.
+const DEFAULT_GRID_SCHEDULE = { start_time: '07:00', end_time: '16:48', break_start: '12:00', break_end: '13:00' };
+
+function minutesToTime(total) {
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
+function getEmployeeHourBlocks(employee) {
+  const schedule = (employee.work_schedule_id && db.prepare('SELECT * FROM work_schedules WHERE id = ?').get(employee.work_schedule_id)) || DEFAULT_GRID_SCHEDULE;
+  const t = getScheduleTimes(schedule);
+  const blocks = [];
+  let cursor = t.start;
+  let guard = 0;
+  while (cursor < t.end && guard < 48) {
+    guard += 1;
+    if (t.breakStart !== null && cursor >= t.breakStart && cursor < t.breakEnd) { cursor = t.breakEnd; continue; }
+    let blockEnd = Math.min((Math.floor(cursor / 60) + 1) * 60, t.end);
+    if (t.breakStart !== null && cursor < t.breakStart) blockEnd = Math.min(blockEnd, t.breakStart);
+    const slot = `${String(Math.floor(cursor / 60)).padStart(2, '0')}:00`;
+    const last = blocks[blocks.length - 1];
+    if (last && last.slot === slot) { last.minutes += blockEnd - cursor; last.label = minutesToTime(blockEnd); }
+    else blocks.push({ slot, from: minutesToTime(cursor), label: minutesToTime(blockEnd), minutes: blockEnd - cursor });
+    cursor = blockEnd;
+  }
+  return blocks;
+}
+
+function getGridEmployees(productionDate) {
+  return db.prepare(`
+    SELECT * FROM employees
+    WHERE is_active = 1 AND COALESCE(termination_date, '9999-12-31') >= ? AND COALESCE(start_date, '0000-01-01') <= ?
+      AND UPPER(TRIM(COALESCE(job_role, ''))) LIKE 'COSTUREIRA%'
+    ORDER BY full_name COLLATE NOCASE`).all(productionDate, productionDate);
+}
+
+function renderHourlyGridPage(query = {}, error = '', notice = '', role = getRequestRole() || 'adm') {
+  const productionDate = /^\d{4}-\d{2}-\d{2}$/.test(String(query.production_date || '')) ? query.production_date : today();
+  const employees = getGridEmployees(productionDate);
+  const rows = db.prepare(`
+    SELECT hp.*, o.op_number FROM hourly_productions hp JOIN ops o ON o.id = hp.op_id
+    WHERE hp.production_date = ? AND hp.is_reversed = 0`).all(productionDate);
+  const zeros = db.prepare('SELECT * FROM hourly_zero_hours WHERE production_date = ? AND is_reversed = 0').all(productionDate);
+  const byKey = new Map(rows.map(r => [`${r.employee_id}|${r.hour_slot}`, r]));
+  const zeroByKey = new Map(zeros.map(z => [`${z.employee_id}|${z.hour_slot}`, z]));
+  const base = baseMinutesDay();
+  const target = targetPercent();
+  const pctClass = pct => pct >= target ? 'perf-high' : (pct >= 40 ? 'perf-mid' : 'perf-low');
+  const summary = employees.map(emp => {
+    const own = rows.filter(r => r.employee_id === emp.id);
+    const minutes = round3(own.reduce((s, r) => s + Number(r.produced_minutes || 0), 0));
+    const pieces = own.reduce((s, r) => s + Number(r.produced_quantity || 0), 0);
+    return { emp, minutes, pieces, pct: base > 0 ? (minutes / base) * 100 : 0, hours: own.length + zeros.filter(z => z.employee_id === emp.id).length };
+  }).sort((a, b) => b.pct - a.pct || a.emp.full_name.localeCompare(b.emp.full_name));
+
+  const grids = employees.map(emp => {
+    const blocks = getEmployeeHourBlocks(emp);
+    const lastOp = getLastHourlyOpForEmployee(emp.id, productionDate)?.op_number || '';
+    let carryOp = '';
+    const cells = blocks.map(b => {
+      const row = byKey.get(`${emp.id}|${b.slot}`);
+      const zero = zeroByKey.get(`${emp.id}|${b.slot}`);
+      const op = row ? row.op_number : carryOp;
+      if (row) carryOp = row.op_number;
+      const minutes = row ? Number(row.produced_minutes || 0) : 0;
+      const pct = row ? round2((minutes / b.minutes) * 100) : (zero ? 0 : null);
+      return { b, row, zero, op, minutes, pct, locked: Boolean(row && row.is_validated) };
+    });
+    // Primeira hora sem OP: usa a última OP do dia (ou fica em branco)
+    if (cells.length && !cells[0].op) cells[0].op = lastOp;
+    const own = summary.find(s => s.emp.id === emp.id);
+    return `
+      <section class="panel grid-card" id="emp-${emp.id}">
+        <div class="grid-card-head">
+          <h3>${escapeHtml(emp.full_name)}</h3>
+          <span class="hint">${escapeHtml(emp.work_schedule_id ? (getWorkSchedules().find(w => w.id === emp.work_schedule_id)?.name || '') : 'Sem jornada (07:00–16:48)')}</span>
+          <strong class="${pctClass(own.pct)}" data-day-pct>${fmtNum(own.pct, 1)}%</strong>
+        </div>
+        <form method="post" action="/productions/hourly/quadro" data-grid-form>
+          <input type="hidden" name="production_date" value="${escapeHtml(productionDate)}" />
+          <input type="hidden" name="employee_id" value="${emp.id}" />
+          <div class="table-wrap"><table class="hour-grid">
+            <tbody>
+              <tr class="row-op"><th>OP</th>${cells.map(c => `<td><input name="op_${c.b.slot}" value="${escapeHtml(c.op || '')}" ${c.locked ? 'disabled' : ''} data-op data-slot="${c.b.slot}" autocomplete="off" placeholder="OP" /></td>`).join('')}<td class="grid-total" rowspan="2">Total</td></tr>
+              <tr class="row-hour"><th>Hora</th>${cells.map(c => `<td title="${c.b.from}–${c.b.label} (${c.b.minutes} min)">${c.b.label}</td>`).join('')}</tr>
+              <tr class="row-qty"><th>Peças</th>${cells.map(c => `<td class="${c.zero ? 'is-zero' : ''}${c.locked ? ' is-locked' : ''}"><input type="number" min="0" step="1" inputmode="numeric" name="qty_${c.b.slot}" value="${c.row ? c.row.produced_quantity : (c.zero ? '0' : '')}" ${c.locked ? 'disabled title="Validado — corrija em Lanç. hora"' : ''} data-qty data-slot="${c.b.slot}" data-block="${c.b.minutes}" /></td>`).join('')}<td class="grid-total" data-total-pieces>${own.pieces}</td></tr>
+              <tr class="row-reason" ${cells.some(c => c.zero) ? '' : 'hidden'}><th>Motivo (0)</th>${cells.map(c => `<td><input name="reason_${c.b.slot}" value="${escapeHtml(c.zero?.reason || '')}" list="zero-reasons" placeholder="motivo" data-reason data-slot="${c.b.slot}" ${c.zero ? '' : 'hidden'} /></td>`).join('')}<td></td></tr>
+              <tr class="row-pct"><th>%</th>${cells.map(c => `<td data-pct data-slot="${c.b.slot}" class="${c.pct === null ? '' : pctClass(c.pct)}">${c.pct === null ? '' : `${fmtNum(c.pct, 0)}%`}</td>`).join('')}<td class="grid-total ${pctClass(own.pct)}" data-total-pct>${fmtNum(own.pct, 1)}%</td></tr>
+              <tr class="row-min"><th>Min</th>${cells.map(c => `<td data-min data-slot="${c.b.slot}">${c.row ? fmtNum(c.minutes, 1) : ''}</td>`).join('')}<td class="grid-total" data-total-min>${fmtNum(own.minutes, 1)}</td></tr>
+            </tbody>
+          </table></div>
+          <div class="actions grid-actions"><button class="btn" type="submit">Salvar ${escapeHtml(String(emp.full_name).split(' ')[0])}</button><span class="hint">0 = hora zero (informe o motivo). Apagar a quantidade remove a hora. Horas validadas ficam travadas.</span></div>
+        </form>
+      </section>`;
+  }).join('');
+
+  const content = `
+    <section class="page-header">
+      <div><h2>Quadro por hora</h2><p>Uma grade por costureira com as horas da jornada dela. A OP vem da hora anterior; troque quando mudar de OP.</p></div>
+      <form class="inline-form" method="get" action="/productions/hourly/quadro">
+        <label>Data<input type="date" name="production_date" value="${escapeHtml(productionDate)}" ${launchDateAttrs(role)} onchange="this.form.submit()" />${launchDateHint(role)}</label>
+      </form>
+    </section>
+    <section class="panel section-gap">
+      ${summary.length ? `<div class="hourly-list-head"><span>#</span><span>Colaboradora</span><span>Andamento</span><span>%</span><span>Peças</span><span>Min</span><span>Horas</span><span></span></div>
+      <div class="hourly-list">${summary.map((s, i) => `<a class="hourly-row" href="#emp-${s.emp.id}"><span class="hourly-rank">${i + 1}</span><strong class="hourly-name">${escapeHtml(s.emp.full_name)}</strong><span class="hourly-bar"><span style="width:${Math.max(2, Math.min(s.pct, 100))}%;background:${s.pct >= target ? '#16a34a' : (s.pct >= 40 ? '#f59e0b' : '#ef4444')}"></span></span><strong class="hourly-pct ${pctClass(s.pct)}">${fmtNum(s.pct, 1)}%</strong><span>${s.pieces}</span><span>${fmtNum(s.minutes, 0)}</span><span>${s.hours}h</span><span></span></a>`).join('')}</div>` : '<p class="hint">Nenhuma costureira ativa (função "Costureira") para esta data.</p>'}
+      <p class="hint">% do dia = minutos ÷ ${fmtNum(base, 0)} min. % da hora = minutos ÷ minutos da hora (60, ou menos na última hora).</p>
+    </section>
+    <datalist id="zero-reasons">${['Sem peça / aguardando OP', 'Máquina parada / manutenção', 'Falta de material / aviamento', 'Retrabalho / conserto', 'Ajudando outro setor', 'Treinamento', 'Problema de saúde no trabalho'].map(r => `<option value="${r}"></option>`).join('')}</datalist>
+    ${grids}
+    <script>
+      (() => {
+        const cache = {};
+        const target = ${target};
+        const cls = p => p >= target ? 'perf-high' : (p >= 40 ? 'perf-mid' : 'perf-low');
+        const fmt = (n, d) => Number(n).toLocaleString('pt-BR', { minimumFractionDigits: d, maximumFractionDigits: d });
+        const perPiece = async op => {
+          op = String(op || '').trim();
+          if (!op) return 0;
+          if (cache[op] === undefined) {
+            cache[op] = fetch('/api/op-preview?op_number=' + encodeURIComponent(op), { headers: { Accept: 'application/json' } })
+              .then(r => r.json()).then(d => d && d.found ? Number(d.total_launch_minutes_per_piece || 0) : 0).catch(() => 0);
+          }
+          return cache[op];
+        };
+        document.querySelectorAll('[data-grid-form]').forEach(form => {
+          const ops = Array.from(form.querySelectorAll('[data-op]'));
+          const qtys = Array.from(form.querySelectorAll('[data-qty]'));
+          const reasonRow = form.querySelector('.row-reason');
+          const recalc = async () => {
+            let totalMin = 0, totalPcs = 0;
+            for (let i = 0; i < qtys.length; i++) {
+              const q = qtys[i], slot = q.dataset.slot;
+              const pctCell = form.querySelector('[data-pct][data-slot="' + slot + '"]');
+              const minCell = form.querySelector('[data-min][data-slot="' + slot + '"]');
+              const reason = form.querySelector('[data-reason][data-slot="' + slot + '"]');
+              const v = q.value.trim();
+              q.parentElement.classList.toggle('is-zero', v === '0');
+              if (reason) reason.hidden = v !== '0';
+              if (v === '' ) { pctCell.textContent = ''; minCell.textContent = ''; pctCell.className = ''; continue; }
+              const n = Number(v);
+              const m = n * await perPiece(ops[i].value);
+              const p = m / Number(q.dataset.block || 60) * 100;
+              totalMin += m; totalPcs += n;
+              pctCell.textContent = fmt(p, 0) + '%'; pctCell.className = cls(p);
+              minCell.textContent = n ? fmt(m, 1) : '';
+            }
+            reasonRow.hidden = !qtys.some(q => q.value.trim() === '0');
+            const dayPct = totalMin / ${base} * 100;
+            form.querySelector('[data-total-pieces]').textContent = totalPcs;
+            form.querySelector('[data-total-min]').textContent = fmt(totalMin, 1);
+            const tp = form.querySelector('[data-total-pct]'); tp.textContent = fmt(dayPct, 1) + '%'; tp.className = 'grid-total ' + cls(dayPct);
+          };
+          // OP digitada passa para as horas seguintes que ainda não têm peça lançada
+          ops.forEach((op, i) => op.addEventListener('change', () => {
+            for (let j = i + 1; j < ops.length; j++) {
+              if (ops[j].disabled || qtys[j].value.trim() !== '') break;
+              ops[j].value = op.value;
+            }
+            recalc();
+          }));
+          qtys.forEach((q, i) => {
+            q.addEventListener('input', recalc);
+            q.addEventListener('keydown', e => {
+              if (e.key !== 'Enter') return;
+              e.preventDefault();
+              if (q.value.trim() === '0') { const r = form.querySelector('[data-reason][data-slot="' + q.dataset.slot + '"]'); if (r) { r.hidden = false; r.focus(); return; } }
+              const next = qtys.slice(i + 1).find(x => !x.disabled);
+              if (next) next.focus(); else form.querySelector('button[type=submit]').focus();
+            });
+          });
+          form.querySelectorAll('[data-reason]').forEach(r => r.addEventListener('keydown', e => {
+            if (e.key !== 'Enter') return;
+            e.preventDefault();
+            const i = qtys.findIndex(q => q.dataset.slot === r.dataset.slot);
+            const next = qtys.slice(i + 1).find(x => !x.disabled);
+            if (next) next.focus(); else form.querySelector('button[type=submit]').focus();
+          }));
+          form.addEventListener('submit', e => {
+            const missing = qtys.find(q => q.value.trim() === '0' && !form.querySelector('[data-reason][data-slot="' + q.dataset.slot + '"]').value.trim());
+            if (missing) { e.preventDefault(); const r = form.querySelector('[data-reason][data-slot="' + missing.dataset.slot + '"]'); reasonRow.hidden = false; r.hidden = false; r.focus(); r.classList.add('is-invalid'); }
+          });
+          recalc();
+        });
+        if (location.hash) { const el = document.querySelector(location.hash); if (el) el.scrollIntoView(); }
+      })();
+    </script>`;
+  return pageLayout({ title: 'Quadro por hora', content, notice, error, role });
+}
+
+function handleSaveHourlyGrid(form, res, role) {
+  const productionDate = String(form.production_date || '').trim();
+  const employeeId = Number(form.employee_id || 0);
+  const back = (msg, isError) => redirect(res, buildRedirectWithFlash(`/productions/hourly/quadro?production_date=${encodeURIComponent(productionDate)}#emp-${employeeId}`, msg, isError));
+  const dateError = checkLaunchDate(productionDate, role);
+  if (dateError) return back(dateError, true);
+  const employee = db.prepare('SELECT * FROM employees WHERE id = ?').get(employeeId);
+  if (!employee) return back('Costureira não encontrada.', true);
+  const blocks = getEmployeeHourBlocks(employee);
+  const errors = [];
+  let changed = 0;
+  const touchedOps = new Set();
+  for (const b of blocks) {
+    if (!(`qty_${b.slot}` in form)) continue; // célula travada (validada) não é enviada
+    const qtyRaw = String(form[`qty_${b.slot}`] ?? '').trim();
+    const opNumber = normalizeOpNumberInput(form[`op_${b.slot}`] || '');
+    const reason = String(form[`reason_${b.slot}`] || '').trim().slice(0, 200);
+    const existing = db.prepare('SELECT * FROM hourly_productions WHERE employee_id = ? AND production_date = ? AND hour_slot = ? AND is_reversed = 0').get(employeeId, productionDate, b.slot);
+    const zero = db.prepare('SELECT * FROM hourly_zero_hours WHERE employee_id = ? AND production_date = ? AND hour_slot = ? AND is_reversed = 0').get(employeeId, productionDate, b.slot);
+    if (existing && existing.is_validated) continue;
+    const removeExisting = () => {
+      if (existing) { db.prepare("UPDATE hourly_productions SET is_reversed = 1, reversed_at = CURRENT_TIMESTAMP, reversed_reason = 'Alterado no quadro por hora', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(existing.id); touchedOps.add(existing.op_id); }
+    };
+    const removeZero = () => { if (zero) db.prepare('UPDATE hourly_zero_hours SET is_reversed = 1 WHERE id = ?').run(zero.id); };
+    if (qtyRaw === '') {
+      if (existing || zero) { removeExisting(); removeZero(); changed += 1; }
+      continue;
+    }
+    const qty = Number(qtyRaw);
+    if (!Number.isInteger(qty) || qty < 0) { errors.push(`${b.label}: quantidade inválida`); continue; }
+    if (qty === 0) {
+      if (!reason) { errors.push(`${b.label}: informe o motivo da hora zero`); continue; }
+      if (zero && zero.reason === reason && !existing) continue;
+      removeExisting();
+      if (zero) db.prepare('UPDATE hourly_zero_hours SET reason = ? WHERE id = ?').run(reason, zero.id);
+      else db.prepare('INSERT INTO hourly_zero_hours (employee_id, production_date, hour_slot, reason) VALUES (?, ?, ?, ?)').run(employeeId, productionDate, b.slot, reason);
+      changed += 1;
+      continue;
+    }
+    if (!opNumber) { errors.push(`${b.label}: informe a OP`); continue; }
+    const found = getOpByNumber(opNumber);
+    if (!found) { errors.push(`${b.label}: OP ${opNumber} não encontrada`); continue; }
+    const op = db.prepare('SELECT * FROM ops WHERE id = ?').get(found.id);
+    if (existing && existing.op_id === op.id && Number(existing.produced_quantity) === qty) { if (zero) removeZero(); continue; }
+    if (getCurrentCellTransfer(op.id)) { errors.push(`${b.label}: OP ${op.op_number} está em célula`); continue; }
+    const used = Number(db.prepare(`
+      SELECT
+        COALESCE((SELECT SUM(produced_quantity) FROM op_daily_productions WHERE op_id = ? AND is_reversed = 0), 0)
+        + COALESCE((SELECT SUM(produced_quantity) FROM hourly_productions WHERE op_id = ? AND is_reversed = 0 AND validated_daily_production_id IS NULL), 0)
+        + COALESCE((SELECT SUM(quantity) FROM op_problem_items WHERE op_id = ?), 0) AS n`).get(op.id, op.id, op.id).n || 0)
+      - (existing && existing.op_id === op.id ? Number(existing.produced_quantity || 0) : 0);
+    if (used + qty > Number(op.total_pieces || 0)) { errors.push(`${b.label}: OP ${op.op_number} passaria do total em ${used + qty - Number(op.total_pieces || 0)} peça(s)`); continue; }
+    const metrics = calculateProductionLaunchMetrics(op, qty, round3(Number(op.minutes_f21 || 0)), productionDate);
+    const snap = metrics.extraSnapshot;
+    removeZero();
+    if (existing) {
+      db.prepare(`UPDATE hourly_productions SET op_id = ?, produced_quantity = ?, used_minutes_f21 = ?, normal_minutes = ?, extra_minutes = ?, produced_minutes = ?,
+        extra_time_id = ?, extra_reason_snapshot = ?, extra_description_snapshot = ?, extra_effective_date_snapshot = ?, extra_minutes_per_piece_snapshot = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+        .run(op.id, qty, metrics.launchF21, metrics.normalMinutes, metrics.extraMinutes, metrics.totalMinutes, snap.extra_time_id, snap.extra_reason_snapshot, snap.extra_description_snapshot, snap.extra_effective_date_snapshot, snap.extra_minutes_per_piece_snapshot, existing.id);
+      touchedOps.add(existing.op_id);
+    } else {
+      db.prepare(`
+        INSERT INTO hourly_productions (
+          op_id, employee_id, production_date, hour_slot, produced_quantity, used_minutes_f21,
+          normal_minutes, extra_minutes, produced_minutes, extra_time_id,
+          extra_reason_snapshot, extra_description_snapshot, extra_effective_date_snapshot,
+          extra_minutes_per_piece_snapshot, notes, created_by_user_id, updated_at, counts_for_prize
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, CURRENT_TIMESTAMP, ?)`)
+        .run(op.id, employeeId, productionDate, b.slot, qty, metrics.launchF21, metrics.normalMinutes, metrics.extraMinutes, metrics.totalMinutes,
+          snap.extra_time_id, snap.extra_reason_snapshot, snap.extra_description_snapshot, snap.extra_effective_date_snapshot, snap.extra_minutes_per_piece_snapshot,
+          'Quadro por hora', resolveCountsForPrize({}, employee, productionDate, b.slot));
+    }
+    touchedOps.add(op.id);
+    changed += 1;
+  }
+  touchedOps.forEach(id => recalculateOpStatus(id));
+  const first = String(employee.full_name).split(' ')[0];
+  if (errors.length) return back(`${first}: ${changed} hora(s) salva(s). Não salvas: ${errors.join('; ')}.`, true);
+  back(changed ? `${first}: ${changed} hora(s) salva(s).` : `${first}: nada mudou.`);
+}
+// ===============================================================
+
 // ===================== TELA PARÂMETROS =====================
 const ABSENCE_TYPE_LABELS = { falta: 'Falta', atestado: 'Atestado', ferias: 'Férias', folga: 'Folga', afastamento: 'Afastamento', outro: 'Outro' };
 
@@ -12187,6 +12464,8 @@ const server = http.createServer(async (req, res) => {
         const allowed = (
           (req.method === 'GET' && pathname === '/') ||
           (req.method === 'GET' && pathname === '/productions/hourly') ||
+          (['GET', 'POST'].includes(req.method) && pathname === '/productions/hourly/quadro') ||
+          (req.method === 'GET' && pathname === '/api/op-preview') ||
           (req.method === 'POST' && pathname === '/productions/hourly') ||
           (req.method === 'POST' && pathname === '/productions/hourly/validate') ||
           (req.method === 'POST' && /^\/productions\/hourly\/(\d+\/fix|zero\/\d+\/delete)$/.test(pathname)) ||
@@ -12287,6 +12566,14 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && pathname === '/productions/hourly') {
         if (requireHourlyLauncherAccess(res, role)) return;
         return handleCreateHourlyProduction(await parseBody(req), res);
+      }
+      if (req.method === 'GET' && pathname === '/productions/hourly/quadro') {
+        if (requireHourlyLauncherAccess(res, role)) return;
+        return sendHtml(res, renderHourlyGridPage(query, query.error || '', query.notice || '', role));
+      }
+      if (req.method === 'POST' && pathname === '/productions/hourly/quadro') {
+        if (requireHourlyLauncherAccess(res, role)) return;
+        return handleSaveHourlyGrid(await parseBody(req), res, role);
       }
       if (req.method === 'POST' && pathname === '/productions/hourly/validate') {
         if (requireHourlyLauncherAccess(res, role)) return;
