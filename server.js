@@ -9301,7 +9301,10 @@ function renderHourlyGridPage(query = {}, error = '', notice = '', role = getReq
     return { emp, minutes, pieces, pct: base > 0 ? (minutes / base) * 100 : 0, hours: own.length + zeros.filter(z => z.employee_id === emp.id).length };
   }).sort((a, b) => b.pct - a.pct || a.emp.full_name.localeCompare(b.emp.full_name));
 
-  const grids = employees.map(emp => {
+  // Lista primeiro; ao clicar numa costureira abre só o quadro dela
+  const selectedId = Number(query.employee_id || 0);
+  const selected = employees.find(e => e.id === selectedId) || null;
+  const grids = (selected ? [selected] : []).map(emp => {
     const blocks = getEmployeeHourBlocks(emp);
     const lastOp = getLastHourlyOpForEmployee(emp.id, productionDate)?.op_number || '';
     let carryOp = '';
@@ -9337,7 +9340,7 @@ function renderHourlyGridPage(query = {}, error = '', notice = '', role = getReq
               <tr class="row-min"><th>Min</th>${cells.map(c => `<td data-min data-slot="${c.b.slot}">${c.row ? fmtNum(c.minutes, 1) : ''}</td>`).join('')}<td class="grid-total" data-total-min>${fmtNum(own.minutes, 1)}</td></tr>
             </tbody>
           </table></div>
-          <div class="actions grid-actions"><button class="btn" type="submit">Salvar ${escapeHtml(String(emp.full_name).split(' ')[0])}</button><span class="hint">0 = hora zero (informe o motivo). Apagar a quantidade remove a hora. Horas validadas ficam travadas.</span></div>
+          <div class="actions grid-actions"><button class="btn" type="submit">Salvar ${escapeHtml(String(emp.full_name).split(' ')[0])}</button><a class="btn secondary" href="/productions/hourly/quadro?production_date=${encodeURIComponent(productionDate)}">Voltar à lista</a><span class="hint">0 = hora zero (informe o motivo). Apagar a quantidade remove a hora. Horas validadas ficam travadas.</span></div>
         </form>
       </section>`;
   }).join('');
@@ -9347,13 +9350,15 @@ function renderHourlyGridPage(query = {}, error = '', notice = '', role = getReq
       <div><h2>Quadro por hora</h2><p>Uma grade por costureira com as horas da jornada dela. A OP vem da hora anterior; troque quando mudar de OP.</p></div>
       <form class="inline-form" method="get" action="/productions/hourly/quadro">
         <label>Data<input type="date" name="production_date" value="${escapeHtml(productionDate)}" ${launchDateAttrs(role)} onchange="this.form.submit()" />${launchDateHint(role)}</label>
+        ${selected ? `<input type="hidden" name="employee_id" value="${selected.id}" />` : ''}
       </form>
     </section>
-    <section class="panel section-gap">
+    ${selected ? '' : `<section class="panel section-gap">
+      <h3>Clique na costureira para lançar as horas dela</h3>
       ${summary.length ? `<div class="hourly-list-head"><span>#</span><span>Colaboradora</span><span>Andamento</span><span>%</span><span>Peças</span><span>Min</span><span>Horas</span><span></span></div>
-      <div class="hourly-list">${summary.map((s, i) => `<a class="hourly-row" href="#emp-${s.emp.id}"><span class="hourly-rank">${i + 1}</span><strong class="hourly-name">${escapeHtml(s.emp.full_name)}</strong><span class="hourly-bar"><span style="width:${Math.max(2, Math.min(s.pct, 100))}%;background:${s.pct >= target ? '#16a34a' : (s.pct >= 40 ? '#f59e0b' : '#ef4444')}"></span></span><strong class="hourly-pct ${pctClass(s.pct)}">${fmtNum(s.pct, 1)}%</strong><span>${s.pieces}</span><span>${fmtNum(s.minutes, 0)}</span><span>${s.hours}h</span><span></span></a>`).join('')}</div>` : '<p class="hint">Nenhuma costureira ativa (função "Costureira") para esta data.</p>'}
+      <div class="hourly-list">${summary.map((s, i) => `<a class="hourly-row" href="/productions/hourly/quadro?production_date=${encodeURIComponent(productionDate)}&employee_id=${s.emp.id}"><span class="hourly-rank">${i + 1}</span><strong class="hourly-name">${escapeHtml(s.emp.full_name)}</strong><span class="hourly-bar"><span style="width:${Math.max(2, Math.min(s.pct, 100))}%;background:${s.pct >= target ? '#16a34a' : (s.pct >= 40 ? '#f59e0b' : '#ef4444')}"></span></span><strong class="hourly-pct ${pctClass(s.pct)}">${fmtNum(s.pct, 1)}%</strong><span>${s.pieces}</span><span>${fmtNum(s.minutes, 0)}</span><span>${s.hours}h</span><span></span></a>`).join('')}</div>` : '<p class="hint">Nenhuma costureira ativa (função "Costureira") para esta data.</p>'}
       <p class="hint">% do dia = minutos ÷ ${fmtNum(base, 0)} min. % da hora = minutos ÷ minutos da hora (60, ou menos na última hora).</p>
-    </section>
+    </section>`}
     <datalist id="zero-reasons">${['Sem peça / aguardando OP', 'Máquina parada / manutenção', 'Falta de material / aviamento', 'Retrabalho / conserto', 'Ajudando outro setor', 'Treinamento', 'Problema de saúde no trabalho'].map(r => `<option value="${r}"></option>`).join('')}</datalist>
     ${grids}
     <script>
@@ -9430,7 +9435,8 @@ function renderHourlyGridPage(query = {}, error = '', notice = '', role = getReq
           });
           recalc();
         });
-        if (location.hash) { const el = document.querySelector(location.hash); if (el) el.scrollIntoView(); }
+        const firstEmpty = Array.from(document.querySelectorAll('[data-qty]')).find(q => !q.disabled && q.value.trim() === '');
+        if (firstEmpty) firstEmpty.focus();
       })();
     </script>`;
   return pageLayout({ title: 'Quadro por hora', content, notice, error, role });
@@ -9439,7 +9445,8 @@ function renderHourlyGridPage(query = {}, error = '', notice = '', role = getReq
 function handleSaveHourlyGrid(form, res, role) {
   const productionDate = String(form.production_date || '').trim();
   const employeeId = Number(form.employee_id || 0);
-  const back = (msg, isError) => redirect(res, buildRedirectWithFlash(`/productions/hourly/quadro?production_date=${encodeURIComponent(productionDate)}#emp-${employeeId}`, msg, isError));
+  // Sucesso volta para a lista (próxima costureira); erro volta para o quadro dela
+  const back = (msg, isError) => redirect(res, buildRedirectWithFlash(`/productions/hourly/quadro?production_date=${encodeURIComponent(productionDate)}${isError ? `&employee_id=${employeeId}` : ''}`, msg, isError));
   const dateError = checkLaunchDate(productionDate, role);
   if (dateError) return back(dateError, true);
   const employee = db.prepare('SELECT * FROM employees WHERE id = ?').get(employeeId);
