@@ -406,3 +406,5 @@ a.hourly-row:hover { background: #eef2ff; }
 .fin-line small { color: #94a3b8; font-size: 10px; }
 .fin-saldo { border-top: 1px dashed #cbd5e1; margin-top: 2px; padding-top: 2px; }
 @media (max-width: 900px) { .fin-cal { overflow-x: auto; grid-template-columns: repeat(7, minmax(110px, 1fr)); } }
+.fin-indirect { background: #f8fafc; }
+.fin-indirect td:first-child { color: #475569; }

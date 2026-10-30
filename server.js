@@ -9579,6 +9579,19 @@ function ensureFinanceTables(tenantDb) {
       charges_percent REAL,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+    CREATE TABLE IF NOT EXISTS indirect_staff (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      full_name TEXT NOT NULL,
+      job_role TEXT,
+      start_date TEXT,
+      end_date TEXT,
+      salary REAL NOT NULL DEFAULT 0,
+      benefits REAL NOT NULL DEFAULT 0,
+      fixed_bonus REAL NOT NULL DEFAULT 0,
+      charges_percent REAL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
     CREATE TABLE IF NOT EXISTS payroll_incidents (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       employee_id INTEGER NOT NULL REFERENCES employees(id),
@@ -9599,6 +9612,9 @@ function ensureFinanceTables(tenantDb) {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
   `);
+  // Prêmio fixo mensal (sem reflexo de encargos)
+  const cols = tenantDb.prepare('PRAGMA table_info(employee_costs)').all().map(c => c.name);
+  if (!cols.includes('fixed_bonus')) tenantDb.exec('ALTER TABLE employee_costs ADD COLUMN fixed_bonus REAL NOT NULL DEFAULT 0');
 }
 
 function finSetting(key) {
@@ -9707,18 +9723,39 @@ function getFinanceData(start, end) {
     const hourValue = Number(c.salary || 0) / monthlyHours;
     const overtimeValue = (ot.weighted / 60) * hourValue;
     // Calendário: custo fixo do dia (salário + encargos + benefícios ÷ dias úteis do período) nos dias úteis ativos dela
-    const dailyFixed = (Number(c.salary || 0) * (1 + chargePct) + Number(c.benefits || 0)) / periodBusinessDays;
+    const fixedBonus = Number(c.fixed_bonus || 0) * factor;
+    const dailyFixed = (Number(c.salary || 0) * (1 + chargePct) + Number(c.benefits || 0) + Number(c.fixed_bonus || 0)) / periodBusinessDays;
     if (dailyFixed > 0) for (const day of getEmployeeBusinessDaysInRange(emp, start, end)) dayOf(day).payroll += dailyFixed;
     if (ot.byDay) for (const [day, weighted] of ot.byDay) dayOf(day).overtimeCost += (weighted / 60) * hourValue;
     const prize = prizes.get(emp.id) || 0;
     const incident = incidentsByEmp.get(emp.id) || 0;
-    const cost = salary + chargesValue + benefits + overtimeValue + prize + incident;
+    const cost = salary + chargesValue + benefits + fixedBonus + overtimeValue + prize + incident;
     const revenue = rev?.revenue || 0;
     people.push({
       emp, group: scheduleNames.get(emp.work_schedule_id) || 'Sem jornada', activeDays, factor, hasSalary: Number(c.salary || 0) > 0,
-      salary, chargesValue, benefits, overtimeMinutes, overtimeSaturday: ot.saturday, overtimeSunday: ot.sunday, overtimeValue, prize, incident, cost,
+      salary, chargesValue, benefits, fixedBonus, overtimeMinutes, overtimeSaturday: ot.saturday, overtimeSunday: ot.sunday, overtimeValue, prize, incident, cost,
       minutes: rev?.minutes || 0, pieces: rev?.pieces || 0, revenue, result: revenue - cost,
       costPerMinute: (rev?.minutes || 0) > 0 ? cost / rev.minutes : null
+    });
+  }
+  // Funcionários de função indireta (sem produção): só custo de folha
+  for (const st of db.prepare('SELECT * FROM indirect_staff').all()) {
+    const fake = { start_date: st.start_date, termination_date: st.end_date, is_active: 1 };
+    const activeDaysList = getEmployeeBusinessDaysInRange(fake, start, end);
+    if (!activeDaysList.length) continue;
+    const factor = Math.min(activeDaysList.length / periodBusinessDays, 1);
+    const chargePct = st.charges_percent !== null && st.charges_percent !== undefined ? Number(st.charges_percent) / 100 : charges;
+    const salary = Number(st.salary || 0) * factor;
+    const chargesValue = salary * chargePct;
+    const benefits = Number(st.benefits || 0) * factor;
+    const fixedBonus = Number(st.fixed_bonus || 0) * factor;
+    const cost = salary + chargesValue + benefits + fixedBonus;
+    const dailyFixed = (Number(st.salary || 0) * (1 + chargePct) + Number(st.benefits || 0) + Number(st.fixed_bonus || 0)) / periodBusinessDays;
+    if (dailyFixed > 0) for (const day of activeDaysList) dayOf(day).payroll += dailyFixed;
+    people.push({
+      emp: { id: `ind-${st.id}`, full_name: st.full_name }, indirect: true, role: st.job_role || '', group: 'Indiretos', activeDays: activeDaysList.length, factor, hasSalary: Number(st.salary || 0) > 0,
+      salary, chargesValue, benefits, fixedBonus, overtimeMinutes: 0, overtimeSaturday: 0, overtimeSunday: 0, overtimeValue: 0, prize: 0, incident: 0, cost,
+      minutes: 0, pieces: 0, revenue: 0, result: -cost, costPerMinute: null
     });
   }
   const sum = (list, k) => list.reduce((a, x) => a + Number(x[k] || 0), 0);
@@ -9739,6 +9776,8 @@ function getFinanceData(start, end) {
       costPerMinute: minutes > 0 ? (payroll + expensesTotal) / minutes : null,
       revenuePerMinute: minutes > 0 ? revenue / minutes : null,
       missingSalary: people.filter(p => !p.hasSalary).length,
+      indirectCost: people.filter(p => p.indirect).reduce((a, p) => a + p.cost, 0),
+      directCost: people.filter(p => !p.indirect).reduce((a, p) => a + p.cost, 0),
       businessDays: periodBusinessDays
     }
   };
@@ -9795,7 +9834,7 @@ function renderFinancePage(query = {}, error = '', notice = '', role = 'adm') {
     ${t.missingSalary ? `<div class="alert error">${t.missingSalary} colaboradora(s) sem salário cadastrado — o custo da folha está incompleto. <a href="${link('colaboradoras')}">Cadastrar salários</a></div>` : ''}
     <div class="cards">
       <article class="card"><span>Receita do período</span><strong>${money(t.revenue)}</strong><small>${fmtNum(t.minutes, 0)} min · ${money(t.revenuePerMinute || 0)}/min</small></article>
-      <article class="card"><span>Folha de pagamento</span><strong>${money(t.payroll)}</strong><small>${pct(t.payrollShare)} da receita</small></article>
+      <article class="card"><span>Folha de pagamento</span><strong>${money(t.payroll)}</strong><small>${pct(t.payrollShare)} da receita · produção ${money(t.directCost)} · indiretos ${money(t.indirectCost)}</small></article>
       <article class="card"><span>Despesas gerais</span><strong>${money(t.expenses)}</strong><small>${data.expenses.length} lançamento(s)</small></article>
       <article class="card"><span>Resultado</span><strong class="${resCls(t.result)}">${money(t.result)}</strong><small>margem ${pct(t.margin)} · custo ${money(t.costPerMinute || 0)}/min</small></article>
     </div>
@@ -9867,25 +9906,54 @@ function renderFinancePage(query = {}, error = '', notice = '', role = 'adm') {
   const colaboradoras = `
     <section class="panel">
       <h3>Custo × receita por colaboradora</h3>
-      <p class="hint">Custo = salário + encargos (${fmtNum(finSetting('fin_charges_percent'), 1)}%) + benefícios + horas extras (+${fmtNum(finSetting('fin_overtime_percent'), 0)}% semana, +${fmtNum(finSetting('fin_overtime_saturday_percent'), 0)}% sábado, +${fmtNum(finSetting('fin_overtime_sunday_percent'), 0)}% domingo/feriado) + prêmio${finSetting('fin_include_prize') === 1 ? '' : ' (desligado)'} + incidentes, proporcional aos dias úteis ativa no período (${t.businessDays}). Receita = minutos dela × valor do minuto.</p>
+      <p class="hint">Prêmio fixo não tem encargos. Custo = salário + encargos (${fmtNum(finSetting('fin_charges_percent'), 1)}%) + benefícios + horas extras (+${fmtNum(finSetting('fin_overtime_percent'), 0)}% semana, +${fmtNum(finSetting('fin_overtime_saturday_percent'), 0)}% sábado, +${fmtNum(finSetting('fin_overtime_sunday_percent'), 0)}% domingo/feriado) + prêmio${finSetting('fin_include_prize') === 1 ? '' : ' (desligado)'} + incidentes, proporcional aos dias úteis ativa no período (${t.businessDays}). Receita = minutos dela × valor do minuto.</p>
       <div class="table-wrap"><table class="fin-table">
-        <thead><tr><th>Colaboradora</th><th>Grupo</th><th>Dias</th><th>Salário</th><th>Encargos</th><th>Benefícios</th><th>H. extra</th><th>Prêmio</th><th>Incidentes</th><th>Custo</th><th>Minutos</th><th>Receita</th><th>Resultado</th><th>Custo/min</th></tr></thead>
-        <tbody>${data.people.map(p => `<tr><td>${escapeHtml(p.emp.full_name)}${p.hasSalary ? '' : ' <span class="status-pill pending">sem salário</span>'}</td><td>${escapeHtml(p.group)}</td><td>${p.activeDays}</td><td>${money(p.salary)}</td><td>${money(p.chargesValue)}</td><td>${money(p.benefits)}</td><td>${money(p.overtimeValue)}${p.overtimeMinutes ? `<br><small class="hint">${fmtHoursMinutes(p.overtimeMinutes)}${p.overtimeSaturday ? ` · sáb ${fmtHoursMinutes(p.overtimeSaturday)}` : ''}${p.overtimeSunday ? ` · dom/fer ${fmtHoursMinutes(p.overtimeSunday)}` : ''}</small>` : ''}</td><td>${money(p.prize)}</td><td>${money(p.incident)}</td><td><strong>${money(p.cost)}</strong></td><td>${fmtNum(p.minutes, 0)}</td><td>${money(p.revenue)}</td><td class="${resCls(p.result)}"><strong>${money(p.result)}</strong></td><td>${p.costPerMinute === null ? '—' : money(p.costPerMinute)}</td></tr>`).join('') || '<tr><td colspan="14">Sem colaboradoras no período.</td></tr>'}</tbody>
-        <tfoot><tr><th colspan="9">Total</th><th>${money(t.payroll)}</th><th>${fmtNum(t.minutes, 0)}</th><th>${money(t.revenue)}</th><th class="${resCls(t.revenue - t.payroll)}">${money(t.revenue - t.payroll)}</th><th>${t.minutes ? money(t.payroll / t.minutes) : '—'}</th></tr></tfoot>
+        <thead><tr><th>Colaboradora</th><th>Grupo</th><th>Dias</th><th>Salário</th><th>Encargos</th><th>Benefícios</th><th>Prêmio fixo</th><th>H. extra</th><th>Prêmio prod.</th><th>Incidentes</th><th>Custo</th><th>Minutos</th><th>Receita</th><th>Resultado</th><th>Custo/min</th></tr></thead>
+        <tbody>${data.people.map(p => `<tr class="${p.indirect ? 'fin-indirect' : ''}"><td>${escapeHtml(p.emp.full_name)}${p.indirect ? ` <span class="status-pill">indireto${p.role ? ` · ${escapeHtml(p.role)}` : ''}</span>` : ''}${p.hasSalary ? '' : ' <span class="status-pill pending">sem salário</span>'}</td><td>${escapeHtml(p.group)}</td><td>${p.activeDays}</td><td>${money(p.salary)}</td><td>${money(p.chargesValue)}</td><td>${money(p.benefits)}</td><td>${money(p.fixedBonus)}</td><td>${money(p.overtimeValue)}${p.overtimeMinutes ? `<br><small class="hint">${fmtHoursMinutes(p.overtimeMinutes)}${p.overtimeSaturday ? ` · sáb ${fmtHoursMinutes(p.overtimeSaturday)}` : ''}${p.overtimeSunday ? ` · dom/fer ${fmtHoursMinutes(p.overtimeSunday)}` : ''}</small>` : ''}</td><td>${money(p.prize)}</td><td>${money(p.incident)}</td><td><strong>${money(p.cost)}</strong></td><td>${p.indirect ? '—' : fmtNum(p.minutes, 0)}</td><td>${p.indirect ? '—' : money(p.revenue)}</td><td class="${resCls(p.result)}"><strong>${money(p.result)}</strong></td><td>${p.costPerMinute === null ? '—' : money(p.costPerMinute)}</td></tr>`).join('') || '<tr><td colspan="15">Sem colaboradoras no período.</td></tr>'}</tbody>
+        <tfoot><tr><th colspan="10">Total</th><th>${money(t.payroll)}</th><th>${fmtNum(t.minutes, 0)}</th><th>${money(t.revenue)}</th><th class="${resCls(t.revenue - t.payroll)}">${money(t.revenue - t.payroll)}</th><th>${t.minutes ? money(t.payroll / t.minutes) : '—'}</th></tr></tfoot>
       </table></div>
     </section>
     <section class="panel section-gap">
-      <h3>Salários e benefícios</h3>
+      <h3>Salários, benefícios e prêmio fixo — produção</h3>
+      <p class="hint">Prêmio fixo = valor mensal pago além do salário, sem reflexo de encargos.</p>
       <form method="post" action="/custos/salarios">
         <input type="hidden" name="ref" value="${ref}" />
         <div class="table-wrap"><table class="fin-table">
-          <thead><tr><th>Colaboradora</th><th>Salário mensal (R$)</th><th>Benefícios mensais (R$)</th><th>Encargos % (vazio = padrão)</th></tr></thead>
-          <tbody>${db.prepare('SELECT e.id, e.full_name, e.termination_date, c.salary, c.benefits, c.charges_percent FROM employees e LEFT JOIN employee_costs c ON c.employee_id = e.id ORDER BY (e.termination_date IS NOT NULL), e.full_name').all()
+          <thead><tr><th>Colaboradora</th><th>Salário mensal (R$)</th><th>Benefícios mensais (R$)</th><th>Prêmio fixo mensal (R$)</th><th>Encargos % (vazio = padrão)</th></tr></thead>
+          <tbody>${db.prepare('SELECT e.id, e.full_name, e.termination_date, c.salary, c.benefits, c.fixed_bonus, c.charges_percent FROM employees e LEFT JOIN employee_costs c ON c.employee_id = e.id ORDER BY (e.termination_date IS NOT NULL), e.full_name').all()
             .filter(e => !e.termination_date || e.termination_date >= range.start)
-            .map(e => `<tr><td>${escapeHtml(e.full_name)}</td><td><input name="salary_${e.id}" inputmode="decimal" value="${e.salary ? fmtNum(e.salary, 2) : ''}" placeholder="0,00" /></td><td><input name="benefits_${e.id}" inputmode="decimal" value="${e.benefits ? fmtNum(e.benefits, 2) : ''}" placeholder="0,00" /></td><td><input name="charges_${e.id}" inputmode="decimal" value="${e.charges_percent ?? ''}" placeholder="${fmtNum(finSetting('fin_charges_percent'), 1)}" /></td></tr>`).join('')}</tbody>
+            .map(e => `<tr><td>${escapeHtml(e.full_name)}</td><td><input name="salary_${e.id}" inputmode="decimal" value="${e.salary ? fmtNum(e.salary, 2) : ''}" placeholder="0,00" /></td><td><input name="benefits_${e.id}" inputmode="decimal" value="${e.benefits ? fmtNum(e.benefits, 2) : ''}" placeholder="0,00" /></td><td><input name="bonus_${e.id}" inputmode="decimal" value="${e.fixed_bonus ? fmtNum(e.fixed_bonus, 2) : ''}" placeholder="0,00" title="Sem reflexo de encargos" /></td><td><input name="charges_${e.id}" inputmode="decimal" value="${e.charges_percent ?? ''}" placeholder="${fmtNum(finSetting('fin_charges_percent'), 1)}" /></td></tr>`).join('')}</tbody>
         </table></div>
         <div class="actions" style="margin-top:10px"><button class="btn" type="submit">Salvar salários</button></div>
       </form>
+    </section>
+    <section class="panel section-gap" id="indiretos">
+      <h3>Funcionários de função indireta</h3>
+      <p class="hint">Supervisão, administrativo, limpeza, revisão, expedição… Não têm produção apontada, mas o custo entra na folha da empresa (grupo "Indiretos"). Não aparecem nas telas de produção.</p>
+      <form class="form-grid" method="post" action="/custos/indiretos">
+        <input type="hidden" name="ref" value="${ref}" />
+        <label>Nome *<input name="full_name" required /></label>
+        <label>Função<input name="job_role" placeholder="Ex.: Supervisora" /></label>
+        <label>Admissão<input type="date" name="start_date" /></label>
+        <label>Salário (R$)<input name="salary" inputmode="decimal" placeholder="0,00" /></label>
+        <label>Benefícios (R$)<input name="benefits" inputmode="decimal" placeholder="0,00" /></label>
+        <label>Prêmio fixo (R$)<input name="fixed_bonus" inputmode="decimal" placeholder="0,00" /></label>
+        <label>Encargos % (vazio = padrão)<input name="charges_percent" inputmode="decimal" placeholder="${fmtNum(finSetting('fin_charges_percent'), 1)}" /></label>
+        <div class="actions" style="align-self:flex-end"><button class="btn" type="submit">Adicionar</button></div>
+      </form>
+      <div class="table-wrap"><table class="fin-table" style="margin-top:12px">
+        <thead><tr><th>Nome</th><th>Função</th><th>Admissão</th><th>Desligamento</th><th>Salário</th><th>Benefícios</th><th>Prêmio fixo</th><th>Encargos %</th><th></th></tr></thead>
+        <tbody>${db.prepare('SELECT * FROM indirect_staff ORDER BY (end_date IS NOT NULL AND end_date < ?), full_name').all(today()).map(st => { const f = `ind-form-${st.id}`; return `<tr>
+          <td><input form="${f}" name="full_name" value="${escapeHtml(st.full_name)}" required style="width:170px" /></td>
+          <td><input form="${f}" name="job_role" value="${escapeHtml(st.job_role || '')}" /></td>
+          <td><input form="${f}" type="date" name="start_date" value="${escapeHtml(st.start_date || '')}" style="width:130px" /></td>
+          <td><input form="${f}" type="date" name="end_date" value="${escapeHtml(st.end_date || '')}" style="width:130px" /></td>
+          <td><input form="${f}" name="salary" inputmode="decimal" value="${st.salary ? fmtNum(st.salary, 2) : ''}" /></td>
+          <td><input form="${f}" name="benefits" inputmode="decimal" value="${st.benefits ? fmtNum(st.benefits, 2) : ''}" /></td>
+          <td><input form="${f}" name="fixed_bonus" inputmode="decimal" value="${st.fixed_bonus ? fmtNum(st.fixed_bonus, 2) : ''}" /></td>
+          <td><input form="${f}" name="charges_percent" inputmode="decimal" value="${st.charges_percent ?? ''}" placeholder="${fmtNum(finSetting('fin_charges_percent'), 1)}" style="width:70px" /></td>
+          <td><form id="${f}" method="post" action="/custos/indiretos/${st.id}"><input type="hidden" name="ref" value="${ref}" /><button class="btn secondary" type="submit">Salvar</button></form></td></tr>`; }).join('') || '<tr><td colspan="9">Nenhum funcionário indireto cadastrado.</td></tr>'}</tbody>
+      </table></div>
     </section>`;
 
   const employeesForSelect = db.prepare('SELECT id, full_name FROM employees WHERE termination_date IS NULL OR termination_date >= ? ORDER BY full_name').all(range.start);
@@ -9975,8 +10043,8 @@ function handleFinancePost(pathname, form, res) {
     return go('config', 'Configuração salva.');
   }
   if (pathname === '/custos/salarios') {
-    const upsert = db.prepare(`INSERT INTO employee_costs (employee_id, salary, benefits, charges_percent, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-      ON CONFLICT(employee_id) DO UPDATE SET salary = excluded.salary, benefits = excluded.benefits, charges_percent = excluded.charges_percent, updated_at = CURRENT_TIMESTAMP`);
+    const upsert = db.prepare(`INSERT INTO employee_costs (employee_id, salary, benefits, fixed_bonus, charges_percent, updated_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(employee_id) DO UPDATE SET salary = excluded.salary, benefits = excluded.benefits, fixed_bonus = excluded.fixed_bonus, charges_percent = excluded.charges_percent, updated_at = CURRENT_TIMESTAMP`);
     let n = 0;
     for (const key of Object.keys(form)) {
       const m = key.match(/^salary_(\d+)$/);
@@ -9984,13 +10052,33 @@ function handleFinancePost(pathname, form, res) {
       const id = Number(m[1]);
       const salary = parseMoney(form[`salary_${id}`]);
       const benefits = parseMoney(form[`benefits_${id}`]);
+      const bonus = parseMoney(form[`bonus_${id}`]);
       const chargesRaw = String(form[`charges_${id}`] ?? '').trim();
       const charges = chargesRaw === '' ? null : parseMoney(chargesRaw);
-      if (![salary, benefits].every(v => Number.isFinite(v) && v >= 0) || (charges !== null && !(charges >= 0))) return go('colaboradoras', 'Valor inválido em salários.', true);
-      upsert.run(id, salary, benefits, charges);
+      if (![salary, benefits, bonus].every(v => Number.isFinite(v) && v >= 0) || (charges !== null && !(charges >= 0))) return go('colaboradoras', 'Valor inválido em salários.', true);
+      upsert.run(id, salary, benefits, bonus, charges);
       n += 1;
     }
     return go('colaboradoras', `Salários salvos (${n}).`);
+  }
+  if (pathname === '/custos/indiretos' || /^\/custos\/indiretos\/\d+$/.test(pathname)) {
+    const name = String(form.full_name || '').trim().slice(0, 120);
+    const vals = ['salary', 'benefits', 'fixed_bonus'].map(k => parseMoney(form[k]));
+    const chargesRaw = String(form.charges_percent ?? '').trim();
+    const chargesVal = chargesRaw === '' ? null : parseMoney(chargesRaw);
+    const okDate = d => !d || /^\d{4}-\d{2}-\d{2}$/.test(d);
+    const startD = String(form.start_date || '').trim() || null;
+    const endD = String(form.end_date || '').trim() || null;
+    if (!name || !vals.every(v => Number.isFinite(v) && v >= 0) || (chargesVal !== null && !(chargesVal >= 0)) || !okDate(startD) || !okDate(endD)) return redirect(res, `/custos?tab=colaboradoras&ref=${ref}&error=${encodeURIComponent('Confira nome, valores e datas do funcionário indireto.')}#indiretos`);
+    const id = Number((pathname.match(/(\d+)$/) || [])[1] || 0);
+    if (id) {
+      db.prepare('UPDATE indirect_staff SET full_name = ?, job_role = ?, start_date = ?, end_date = ?, salary = ?, benefits = ?, fixed_bonus = ?, charges_percent = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+        .run(name, String(form.job_role || '').trim() || null, startD, endD, vals[0], vals[1], vals[2], chargesVal, id);
+    } else {
+      db.prepare('INSERT INTO indirect_staff (full_name, job_role, start_date, end_date, salary, benefits, fixed_bonus, charges_percent) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(name, String(form.job_role || '').trim() || null, startD, endD, vals[0], vals[1], vals[2], chargesVal);
+    }
+    return redirect(res, `/custos?tab=colaboradoras&ref=${ref}&notice=${encodeURIComponent(id ? 'Funcionário indireto atualizado.' : 'Funcionário indireto adicionado.')}#indiretos`);
   }
   if (pathname === '/custos/despesas') {
     const amount = parseMoney(form.amount);
