@@ -2278,7 +2278,7 @@ function renderRoleSwitcher(role) {
 const NAV_GROUPS = [
   { key: 'producao', label: 'Produção', hrefs: ['/', '/acompanhamento/diario', '/productions/hourly', '/productions/hourly/quadro', '/productions/new', '/productions/extra', '/ops/new', '/ops', '/labels/entry', '/op-extra-times'] },
   { key: 'expedicao', label: 'Expedição', hrefs: ['/shipments/new', '/shipments', '/labels/shipment'] },
-  { key: 'financeiro', label: 'Financeiro', hrefs: ['/billing-reconciliation', '/closures', '/ausencias/importar', '/premios/producao', '/cells/report', '/cells/closures'] },
+  { key: 'financeiro', label: 'Financeiro', hrefs: ['/custos', '/billing-reconciliation', '/closures', '/ausencias/importar', '/premios/producao', '/cells/report', '/cells/closures'] },
   { key: 'pessoas', label: 'Pessoas', hrefs: ['/employees'] },
   { key: 'config', label: 'Configurações', hrefs: ['/cadastros', '/parametros', '/admin/access', '/estornos'] }
 ];
@@ -2355,6 +2355,7 @@ function pageLayout({ title, content, notice = '', error = '', role = 'adm' }) {
     navItems.push({ href: '/cadastros', label: 'Cadastros', icon: '⚙️', active: title.startsWith('Cadastros') });
   }
   if (isAdminRole(role)) {
+    navItems.push({ href: '/custos', label: 'Custos e receitas', icon: '📈', active: title === 'Custos e receitas' });
     navItems.push({ href: '/parametros', label: 'Parâmetros', icon: '🎛️', active: title === 'Parâmetros' });
     navItems.push({ href: '/admin/access', label: 'Acessos', icon: '🔐', active: title.startsWith('Usuários e acessos') });
     navItems.push({ href: '/estornos', label: 'Estornos', icon: '↩️', active: title.startsWith('Estornos') });
@@ -9553,6 +9554,422 @@ function handleSaveHourlyGrid(form, res, role) {
 }
 // ===============================================================
 
+// ===================== CUSTOS E RECEITAS (só administrador) =====================
+// Receita = minutos produzidos (lançamentos) × valor do minuto por tipo de serviço (produção / mostruário).
+// Custo da folha por colaboradora = salário + encargos + benefícios + horas extras + prêmio + incidentes de folha,
+// proporcional aos dias úteis em que ela esteve ativa no período. Despesas gerais lançadas à parte.
+const FIN_DEFAULTS = {
+  fin_rate_producao: '0',
+  fin_rate_mostruario: '0',
+  fin_charges_percent: '0',
+  fin_overtime_percent: '50',
+  fin_monthly_hours: '220',
+  fin_include_prize: '1'
+};
+const FIN_EXPENSE_CATEGORIES = ['Aluguel', 'Energia', 'Água', 'Internet / telefone', 'Manutenção de máquinas', 'Aviamentos / materiais', 'Transporte / frete', 'Impostos', 'Contabilidade', 'Pró-labore', 'Outros'];
+
+function ensureFinanceTables(tenantDb) {
+  tenantDb.exec(`
+    CREATE TABLE IF NOT EXISTS employee_costs (
+      employee_id INTEGER PRIMARY KEY REFERENCES employees(id),
+      salary REAL NOT NULL DEFAULT 0,
+      benefits REAL NOT NULL DEFAULT 0,
+      charges_percent REAL,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS payroll_incidents (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER NOT NULL REFERENCES employees(id),
+      incident_date TEXT NOT NULL,
+      description TEXT NOT NULL,
+      amount REAL NOT NULL,
+      is_deleted INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS company_expenses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      expense_date TEXT NOT NULL,
+      category TEXT NOT NULL,
+      description TEXT,
+      amount REAL NOT NULL,
+      is_recurring INTEGER NOT NULL DEFAULT 0,
+      is_deleted INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+}
+
+function finSetting(key) {
+  const row = db.prepare('SELECT value FROM app_settings WHERE key = ?').get(key);
+  const n = Number(String(row?.value ?? FIN_DEFAULTS[key] ?? '0').replace(',', '.'));
+  return Number.isFinite(n) ? n : 0;
+}
+
+function finRate(opType) { return opType === 'mostruario' ? finSetting('fin_rate_mostruario') : finSetting('fin_rate_producao'); }
+
+function parseMoney(value) {
+  const t = String(value ?? '').trim().replace(/R\$\s?/i, '').replace(/\s/g, '');
+  if (!t) return 0;
+  const normalized = t.includes(',') ? t.replace(/\./g, '').replace(',', '.') : t;
+  const n = Number(normalized);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+function getFinanceData(start, end) {
+  ensureFinanceTables(getActiveDb());
+  const rateProd = finSetting('fin_rate_producao');
+  const rateMost = finSetting('fin_rate_mostruario');
+  // Receita por dia e tipo (todos os lançamentos válidos, inclusive os que não contam para prêmio)
+  const prodRows = db.prepare(`
+    SELECT p.production_date AS day, p.employee_id, o.op_type, SUM(p.produced_minutes) AS minutes, SUM(p.produced_quantity) AS pieces
+    FROM op_daily_productions p JOIN ops o ON o.id = p.op_id
+    WHERE p.is_reversed = 0 AND COALESCE(o.is_reversed, 0) = 0
+      AND COALESCE(o.lifecycle_type, 'normal') NOT IN ('nao_industrializada', 'devolvida_sem_producao')
+      AND p.production_date BETWEEN ? AND ?
+    GROUP BY p.production_date, p.employee_id, o.op_type`).all(start, end);
+  const days = new Map();
+  const byEmployeeRevenue = new Map();
+  const byType = { producao: { minutes: 0, revenue: 0 }, mostruario: { minutes: 0, revenue: 0 } };
+  for (const r of prodRows) {
+    const type = r.op_type === 'mostruario' ? 'mostruario' : 'producao';
+    const revenue = Number(r.minutes || 0) * (type === 'mostruario' ? rateMost : rateProd);
+    if (!days.has(r.day)) days.set(r.day, { day: r.day, minutes: 0, revenue: 0, expenses: 0 });
+    const d = days.get(r.day);
+    d.minutes += Number(r.minutes || 0); d.revenue += revenue;
+    byType[type].minutes += Number(r.minutes || 0); byType[type].revenue += revenue;
+    const e = byEmployeeRevenue.get(r.employee_id) || { minutes: 0, revenue: 0, pieces: 0 };
+    e.minutes += Number(r.minutes || 0); e.revenue += revenue; e.pieces += Number(r.pieces || 0);
+    byEmployeeRevenue.set(r.employee_id, e);
+  }
+  // Despesas gerais: as do período + recorrentes (uma vez por período, a partir do mês em que foram criadas)
+  const expenses = db.prepare('SELECT * FROM company_expenses WHERE is_deleted = 0 AND ((is_recurring = 0 AND expense_date BETWEEN ? AND ?) OR (is_recurring = 1 AND expense_date <= ?)) ORDER BY expense_date, id').all(start, end, end);
+  let expensesTotal = 0;
+  const expensesByCategory = new Map();
+  for (const x of expenses) {
+    expensesTotal += Number(x.amount || 0);
+    expensesByCategory.set(x.category, (expensesByCategory.get(x.category) || 0) + Number(x.amount || 0));
+    const day = x.is_recurring ? (x.expense_date >= start ? x.expense_date : start) : x.expense_date;
+    if (!days.has(day)) days.set(day, { day, minutes: 0, revenue: 0, expenses: 0 });
+    days.get(day).expenses += Number(x.amount || 0);
+  }
+  // Folha por colaboradora
+  const charges = finSetting('fin_charges_percent') / 100;
+  const overtimePct = finSetting('fin_overtime_percent') / 100;
+  const monthlyHours = finSetting('fin_monthly_hours') || 220;
+  const includePrize = finSetting('fin_include_prize') === 1;
+  const periodBusinessDays = enumerateDates(start, end).filter(isBusinessDay).length || 1;
+  const costs = new Map(db.prepare('SELECT * FROM employee_costs').all().map(r => [r.employee_id, r]));
+  const prizes = new Map();
+  if (includePrize) {
+    try { getProductionPrizeData(start, 'custom', '', start, end).employeeSummaries.forEach(s => prizes.set(s.id, Number(s.total_prize || 0))); } catch (_) {}
+  }
+  const overtime = new Map(db.prepare(`SELECT employee_id, SUM(COALESCE(worked_minutes, 0)) AS worked FROM op_daily_productions WHERE launch_kind = 'hora_extra' AND is_reversed = 0 AND production_date BETWEEN ? AND ? GROUP BY employee_id`).all(start, end).map(r => [r.employee_id, Number(r.worked || 0)]));
+  const incidents = db.prepare('SELECT * FROM payroll_incidents WHERE is_deleted = 0 AND incident_date BETWEEN ? AND ? ORDER BY incident_date, id').all(start, end);
+  const incidentsByEmp = new Map();
+  incidents.forEach(i => incidentsByEmp.set(i.employee_id, (incidentsByEmp.get(i.employee_id) || 0) + Number(i.amount || 0)));
+  const scheduleNames = new Map(getWorkSchedules().map(w => [w.id, w.name]));
+  const employees = db.prepare('SELECT * FROM employees ORDER BY full_name').all();
+  const people = [];
+  for (const emp of employees) {
+    const activeDays = getEmployeeBusinessDaysInRange(emp, start, end).length;
+    const rev = byEmployeeRevenue.get(emp.id);
+    if (!activeDays && !rev) continue;
+    const c = costs.get(emp.id) || { salary: 0, benefits: 0, charges_percent: null };
+    const factor = Math.min(activeDays / periodBusinessDays, 1);
+    const salary = Number(c.salary || 0) * factor;
+    const chargePct = c.charges_percent !== null && c.charges_percent !== undefined ? Number(c.charges_percent) / 100 : charges;
+    const chargesValue = salary * chargePct;
+    const benefits = Number(c.benefits || 0) * factor;
+    const overtimeMinutes = overtime.get(emp.id) || 0;
+    const hourValue = Number(c.salary || 0) / monthlyHours;
+    const overtimeValue = (overtimeMinutes / 60) * hourValue * (1 + overtimePct);
+    const prize = prizes.get(emp.id) || 0;
+    const incident = incidentsByEmp.get(emp.id) || 0;
+    const cost = salary + chargesValue + benefits + overtimeValue + prize + incident;
+    const revenue = rev?.revenue || 0;
+    people.push({
+      emp, group: scheduleNames.get(emp.work_schedule_id) || 'Sem jornada', activeDays, factor, hasSalary: Number(c.salary || 0) > 0,
+      salary, chargesValue, benefits, overtimeMinutes, overtimeValue, prize, incident, cost,
+      minutes: rev?.minutes || 0, pieces: rev?.pieces || 0, revenue, result: revenue - cost,
+      costPerMinute: (rev?.minutes || 0) > 0 ? cost / rev.minutes : null
+    });
+  }
+  const sum = (list, k) => list.reduce((a, x) => a + Number(x[k] || 0), 0);
+  const groups = [...people.reduce((m, p) => { if (!m.has(p.group)) m.set(p.group, []); m.get(p.group).push(p); return m; }, new Map())]
+    .map(([name, list]) => ({ name, count: list.length, revenue: sum(list, 'revenue'), cost: sum(list, 'cost'), minutes: sum(list, 'minutes') }))
+    .map(g => ({ ...g, result: g.revenue - g.cost }));
+  const revenue = byType.producao.revenue + byType.mostruario.revenue;
+  const payroll = sum(people, 'cost');
+  const minutes = byType.producao.minutes + byType.mostruario.minutes;
+  return {
+    start, end, rateProd, rateMost, byType, days: [...days.values()].sort((a, b) => a.day.localeCompare(b.day)),
+    expenses, expensesTotal, expensesByCategory: [...expensesByCategory].sort((a, b) => b[1] - a[1]), incidents,
+    people: people.sort((a, b) => b.result - a.result), groups,
+    totals: {
+      revenue, payroll, expenses: expensesTotal, result: revenue - payroll - expensesTotal, minutes,
+      margin: revenue > 0 ? ((revenue - payroll - expensesTotal) / revenue) * 100 : null,
+      payrollShare: revenue > 0 ? (payroll / revenue) * 100 : null,
+      costPerMinute: minutes > 0 ? (payroll + expensesTotal) / minutes : null,
+      revenuePerMinute: minutes > 0 ? revenue / minutes : null,
+      missingSalary: people.filter(p => !p.hasSalary).length,
+      businessDays: periodBusinessDays
+    }
+  };
+}
+
+function getHourlyRevenueToday(day) {
+  const rows = db.prepare(`
+    SELECT hp.hour_slot, o.op_type, SUM(hp.produced_minutes) AS minutes
+    FROM hourly_productions hp JOIN ops o ON o.id = hp.op_id
+    WHERE hp.production_date = ? AND hp.is_reversed = 0
+    GROUP BY hp.hour_slot, o.op_type ORDER BY hp.hour_slot`).all(day);
+  const bySlot = new Map();
+  for (const r of rows) {
+    const v = bySlot.get(r.hour_slot) || { slot: r.hour_slot, minutes: 0, revenue: 0 };
+    v.minutes += Number(r.minutes || 0); v.revenue += Number(r.minutes || 0) * finRate(r.op_type);
+    bySlot.set(r.hour_slot, v);
+  }
+  return [...bySlot.values()];
+}
+
+function renderFinancePage(query = {}, error = '', notice = '', role = 'adm') {
+  ensureFinanceTables(getActiveDb());
+  const tab = ['resumo', 'calendario', 'colaboradoras', 'despesas', 'config'].includes(query.tab) ? query.tab : 'resumo';
+  const ref = /^\d{4}-\d{2}-\d{2}$/.test(String(query.ref || '')) ? query.ref : today();
+  const range = getPeriodRange('month', ref);
+  const prevRef = addDaysIso(range.start, -1);
+  const nextRef = addDaysIso(range.end, 1);
+  const data = getFinanceData(range.start, range.end);
+  const t = data.totals;
+  const money = v => fmtMoney(v);
+  const pct = v => v === null ? '—' : `${fmtNum(v, 1)}%`;
+  const resCls = v => (v >= 0 ? 'fin-pos' : 'fin-neg');
+  const link = (tb, extra = '') => `/custos?tab=${tb}&ref=${ref}${extra}`;
+  const noRates = !data.rateProd && !data.rateMost;
+  const tabs = [['resumo', 'Resumo'], ['calendario', 'Calendário'], ['colaboradoras', 'Colaboradoras'], ['despesas', 'Despesas e folha'], ['config', 'Configuração']];
+  const weeks = (() => {
+    const out = [];
+    let cursor = range.start;
+    while (cursor <= range.end) {
+      const w = getPeriodRange('week', cursor);
+      const s = cursor;
+      const e = w.end < range.end ? w.end : range.end;
+      const list = data.days.filter(d => d.day >= s && d.day <= e);
+      out.push({ s, e, revenue: list.reduce((a, d) => a + d.revenue, 0), minutes: list.reduce((a, d) => a + d.minutes, 0), expenses: list.reduce((a, d) => a + d.expenses, 0) });
+      cursor = addDaysIso(e, 1);
+    }
+    return out;
+  })();
+  const workedDays = data.days.filter(d => d.revenue > 0).length;
+
+  const resumo = `
+    ${noRates ? `<div class="alert error">Informe o valor do minuto (produção e mostruário) em <a href="${link('config')}">Configuração</a> para calcular a receita.</div>` : ''}
+    ${t.missingSalary ? `<div class="alert error">${t.missingSalary} colaboradora(s) sem salário cadastrado — o custo da folha está incompleto. <a href="${link('colaboradoras')}">Cadastrar salários</a></div>` : ''}
+    <div class="cards">
+      <article class="card"><span>Receita do período</span><strong>${money(t.revenue)}</strong><small>${fmtNum(t.minutes, 0)} min · ${money(t.revenuePerMinute || 0)}/min</small></article>
+      <article class="card"><span>Folha de pagamento</span><strong>${money(t.payroll)}</strong><small>${pct(t.payrollShare)} da receita</small></article>
+      <article class="card"><span>Despesas gerais</span><strong>${money(t.expenses)}</strong><small>${data.expenses.length} lançamento(s)</small></article>
+      <article class="card"><span>Resultado</span><strong class="${resCls(t.result)}">${money(t.result)}</strong><small>margem ${pct(t.margin)} · custo ${money(t.costPerMinute || 0)}/min</small></article>
+    </div>
+    <div class="two-columns">
+      <section class="panel">
+        <h3>Receita por tipo de serviço</h3>
+        <table><thead><tr><th>Tipo</th><th>Valor/min</th><th>Minutos</th><th>Receita</th></tr></thead><tbody>
+          <tr><td>Produção</td><td>${money(data.rateProd)}</td><td>${fmtNum(data.byType.producao.minutes, 0)}</td><td>${money(data.byType.producao.revenue)}</td></tr>
+          <tr><td>Mostruário</td><td>${money(data.rateMost)}</td><td>${fmtNum(data.byType.mostruario.minutes, 0)}</td><td>${money(data.byType.mostruario.revenue)}</td></tr>
+        </tbody></table>
+        <h3 style="margin-top:14px">Receita média</h3>
+        <table><tbody>
+          <tr><td>Por dia trabalhado (${workedDays} dia(s))</td><td>${money(workedDays ? t.revenue / workedDays : 0)}</td></tr>
+          <tr><td>Por semana</td><td>${money(weeks.length ? t.revenue / weeks.length : 0)}</td></tr>
+          <tr><td>No período (mês)</td><td><strong>${money(t.revenue)}</strong></td></tr>
+        </tbody></table>
+      </section>
+      <section class="panel">
+        <h3>Resultado por grupo (jornada)</h3>
+        <table><thead><tr><th>Grupo</th><th>Pessoas</th><th>Receita</th><th>Custo folha</th><th>Resultado</th></tr></thead><tbody>
+          ${data.groups.map(g => `<tr><td>${escapeHtml(g.name)}</td><td>${g.count}</td><td>${money(g.revenue)}</td><td>${money(g.cost)}</td><td class="${resCls(g.result)}">${money(g.result)}</td></tr>`).join('') || '<tr><td colspan="5">Sem dados.</td></tr>'}
+        </tbody></table>
+        <h3 style="margin-top:14px">Semanas</h3>
+        <table><thead><tr><th>Semana</th><th>Minutos</th><th>Receita</th><th>Despesas</th></tr></thead><tbody>
+          ${weeks.map(w => `<tr><td>${formatDatePtBr(w.s)} a ${formatDatePtBr(w.e)}</td><td>${fmtNum(w.minutes, 0)}</td><td>${money(w.revenue)}</td><td>${money(w.expenses)}</td></tr>`).join('')}
+        </tbody></table>
+      </section>
+    </div>
+    <section class="panel section-gap">
+      <h3>Receita por hora — hoje (${formatDatePtBr(today())})</h3>
+      ${(() => { const h = getHourlyRevenueToday(today()); const max = Math.max(1, ...h.map(x => x.revenue)); return h.length ? `<div class="fin-hours">${h.map(x => `<div class="fin-hour"><span class="fin-hour-bar" style="height:${Math.max(4, (x.revenue / max) * 100)}%"></span><strong>${money(x.revenue)}</strong><small>${escapeHtml(x.slot)}</small></div>`).join('')}</div><p class="hint">Total até agora: ${money(h.reduce((a, x) => a + x.revenue, 0))} · vem dos lançamentos por hora.</p>` : '<p class="hint">Sem lançamentos por hora hoje.</p>'; })()}
+    </section>`;
+
+  const calendario = (() => {
+    const first = new Date(`${range.start}T00:00:00Z`);
+    const lead = (first.getUTCDay() + 6) % 7;
+    const cells = [];
+    for (let i = 0; i < lead; i++) cells.push('<div class="fin-cal-cell is-empty"></div>');
+    const byDay = new Map(data.days.map(d => [d.day, d]));
+    for (const day of enumerateDates(range.start, range.end)) {
+      const d = byDay.get(day) || { revenue: 0, expenses: 0, minutes: 0 };
+      const isToday = day === today();
+      cells.push(`<div class="fin-cal-cell ${isBusinessDay(day) ? '' : 'is-off'} ${isToday ? 'is-today' : ''}"><span class="fin-cal-day">${day.slice(8)}/${day.slice(5, 7)}</span>${d.revenue ? `<strong class="fin-pos">+${money(d.revenue)}</strong>` : ''}${d.expenses ? `<strong class="fin-neg">−${money(d.expenses)}</strong>` : ''}${d.minutes ? `<small>${fmtNum(d.minutes, 0)} min</small>` : ''}</div>`);
+    }
+    return `<section class="panel">
+      <h3>Calendário de faturamento e despesas</h3>
+      <p class="hint">Verde = receita do dia (minutos produzidos × valor do minuto). Vermelho = despesas gerais lançadas na data (recorrentes aparecem no 1º dia do período). A folha está no Resumo e em Colaboradoras.</p>
+      <div class="fin-cal">${['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'].map(w => `<div class="fin-cal-head">${w}</div>`).join('')}${cells.join('')}</div>
+      <table style="margin-top:12px"><thead><tr><th>Semana</th><th>Minutos</th><th>Receita</th><th>Despesas</th><th>Saldo</th></tr></thead><tbody>
+        ${weeks.map(w => `<tr><td>${formatDatePtBr(w.s)} a ${formatDatePtBr(w.e)}</td><td>${fmtNum(w.minutes, 0)}</td><td>${money(w.revenue)}</td><td>${money(w.expenses)}</td><td class="${resCls(w.revenue - w.expenses)}">${money(w.revenue - w.expenses)}</td></tr>`).join('')}
+        <tr><th>Período</th><th>${fmtNum(t.minutes, 0)}</th><th>${money(t.revenue)}</th><th>${money(t.expenses)}</th><th class="${resCls(t.revenue - t.expenses)}">${money(t.revenue - t.expenses)}</th></tr>
+      </tbody></table>
+    </section>`;
+  })();
+
+  const colaboradoras = `
+    <section class="panel">
+      <h3>Custo × receita por colaboradora</h3>
+      <p class="hint">Custo = salário + encargos (${fmtNum(finSetting('fin_charges_percent'), 1)}%) + benefícios + horas extras (+${fmtNum(finSetting('fin_overtime_percent'), 0)}%) + prêmio${finSetting('fin_include_prize') === 1 ? '' : ' (desligado)'} + incidentes, proporcional aos dias úteis ativa no período (${t.businessDays}). Receita = minutos dela × valor do minuto.</p>
+      <div class="table-wrap"><table class="fin-table">
+        <thead><tr><th>Colaboradora</th><th>Grupo</th><th>Dias</th><th>Salário</th><th>Encargos</th><th>Benefícios</th><th>H. extra</th><th>Prêmio</th><th>Incidentes</th><th>Custo</th><th>Minutos</th><th>Receita</th><th>Resultado</th><th>Custo/min</th></tr></thead>
+        <tbody>${data.people.map(p => `<tr><td>${escapeHtml(p.emp.full_name)}${p.hasSalary ? '' : ' <span class="status-pill pending">sem salário</span>'}</td><td>${escapeHtml(p.group)}</td><td>${p.activeDays}</td><td>${money(p.salary)}</td><td>${money(p.chargesValue)}</td><td>${money(p.benefits)}</td><td>${money(p.overtimeValue)}${p.overtimeMinutes ? `<br><small class="hint">${fmtHoursMinutes(p.overtimeMinutes)}</small>` : ''}</td><td>${money(p.prize)}</td><td>${money(p.incident)}</td><td><strong>${money(p.cost)}</strong></td><td>${fmtNum(p.minutes, 0)}</td><td>${money(p.revenue)}</td><td class="${resCls(p.result)}"><strong>${money(p.result)}</strong></td><td>${p.costPerMinute === null ? '—' : money(p.costPerMinute)}</td></tr>`).join('') || '<tr><td colspan="14">Sem colaboradoras no período.</td></tr>'}</tbody>
+        <tfoot><tr><th colspan="9">Total</th><th>${money(t.payroll)}</th><th>${fmtNum(t.minutes, 0)}</th><th>${money(t.revenue)}</th><th class="${resCls(t.revenue - t.payroll)}">${money(t.revenue - t.payroll)}</th><th>${t.minutes ? money(t.payroll / t.minutes) : '—'}</th></tr></tfoot>
+      </table></div>
+    </section>
+    <section class="panel section-gap">
+      <h3>Salários e benefícios</h3>
+      <form method="post" action="/custos/salarios">
+        <input type="hidden" name="ref" value="${ref}" />
+        <div class="table-wrap"><table class="fin-table">
+          <thead><tr><th>Colaboradora</th><th>Salário mensal (R$)</th><th>Benefícios mensais (R$)</th><th>Encargos % (vazio = padrão)</th></tr></thead>
+          <tbody>${db.prepare('SELECT e.id, e.full_name, e.termination_date, c.salary, c.benefits, c.charges_percent FROM employees e LEFT JOIN employee_costs c ON c.employee_id = e.id ORDER BY (e.termination_date IS NOT NULL), e.full_name').all()
+            .filter(e => !e.termination_date || e.termination_date >= range.start)
+            .map(e => `<tr><td>${escapeHtml(e.full_name)}</td><td><input name="salary_${e.id}" inputmode="decimal" value="${e.salary ? fmtNum(e.salary, 2) : ''}" placeholder="0,00" /></td><td><input name="benefits_${e.id}" inputmode="decimal" value="${e.benefits ? fmtNum(e.benefits, 2) : ''}" placeholder="0,00" /></td><td><input name="charges_${e.id}" inputmode="decimal" value="${e.charges_percent ?? ''}" placeholder="${fmtNum(finSetting('fin_charges_percent'), 1)}" /></td></tr>`).join('')}</tbody>
+        </table></div>
+        <div class="actions" style="margin-top:10px"><button class="btn" type="submit">Salvar salários</button></div>
+      </form>
+    </section>`;
+
+  const employeesForSelect = db.prepare('SELECT id, full_name FROM employees WHERE termination_date IS NULL OR termination_date >= ? ORDER BY full_name').all(range.start);
+  const despesas = `
+    <div class="two-columns">
+      <section class="panel">
+        <h3>Nova despesa</h3>
+        <form class="form-grid" method="post" action="/custos/despesas">
+          <input type="hidden" name="ref" value="${ref}" />
+          <label>Data<input type="date" name="expense_date" required value="${today()}" /></label>
+          <label>Categoria<input name="category" list="fin-cats" required placeholder="Ex.: Energia" /><datalist id="fin-cats">${FIN_EXPENSE_CATEGORIES.map(c => `<option value="${c}"></option>`).join('')}</datalist></label>
+          <label>Valor (R$)<input name="amount" required inputmode="decimal" placeholder="0,00" /></label>
+          <label class="full">Descrição<input name="description" placeholder="Opcional" /></label>
+          <label class="checkbox-line full"><input type="checkbox" name="is_recurring" value="1" /> Repete todo mês (ex.: aluguel)</label>
+          <div class="full actions"><button class="btn" type="submit">Lançar despesa</button></div>
+        </form>
+      </section>
+      <section class="panel">
+        <h3>Incidente de folha</h3>
+        <p class="hint">Adicionais, descontos, rescisão, 13º, férias pagas, adiantamento etc. Valor positivo = custo a mais; negativo = desconto.</p>
+        <form class="form-grid" method="post" action="/custos/incidentes">
+          <input type="hidden" name="ref" value="${ref}" />
+          <label>Colaboradora<select name="employee_id" required><option value="">Selecione</option>${employeesForSelect.map(e => `<option value="${e.id}">${escapeHtml(e.full_name)}</option>`).join('')}</select></label>
+          <label>Data<input type="date" name="incident_date" required value="${today()}" /></label>
+          <label>Valor (R$)<input name="amount" required inputmode="decimal" placeholder="Ex.: 150,00 ou -80,00" /></label>
+          <label class="full">Descrição<input name="description" required placeholder="Ex.: adicional noturno, desconto de falta" /></label>
+          <div class="full actions"><button class="btn" type="submit">Lançar incidente</button></div>
+        </form>
+      </section>
+    </div>
+    <div class="two-columns">
+      <section class="panel">
+        <h3>Despesas do período</h3>
+        <table><thead><tr><th>Data</th><th>Categoria</th><th>Descrição</th><th>Valor</th><th></th></tr></thead><tbody>
+          ${data.expenses.map(x => `<tr><td>${formatDatePtBr(x.expense_date)}${x.is_recurring ? ' <span class="status-pill ok">mensal</span>' : ''}</td><td>${escapeHtml(x.category)}</td><td>${escapeHtml(x.description || '-')}</td><td>${money(x.amount)}</td><td><form method="post" action="/custos/despesas/${x.id}/excluir" onsubmit="return confirm('Excluir esta despesa${x.is_recurring ? ' (deixa de repetir nos próximos meses)' : ''}?')"><input type="hidden" name="ref" value="${ref}" /><button class="btn secondary" type="submit">Excluir</button></form></td></tr>`).join('') || '<tr><td colspan="5">Nenhuma despesa no período.</td></tr>'}
+        </tbody><tfoot><tr><th colspan="3">Total</th><th>${money(t.expenses)}</th><th></th></tr></tfoot></table>
+        ${data.expensesByCategory.length ? `<p class="hint">${data.expensesByCategory.map(([c, v]) => `${escapeHtml(c)}: ${money(v)}`).join(' · ')}</p>` : ''}
+      </section>
+      <section class="panel">
+        <h3>Incidentes de folha do período</h3>
+        <table><thead><tr><th>Data</th><th>Colaboradora</th><th>Descrição</th><th>Valor</th><th></th></tr></thead><tbody>
+          ${data.incidents.map(i => `<tr><td>${formatDatePtBr(i.incident_date)}</td><td>${escapeHtml(employeesForSelect.find(e => e.id === i.employee_id)?.full_name || db.prepare('SELECT full_name FROM employees WHERE id = ?').get(i.employee_id)?.full_name || '-')}</td><td>${escapeHtml(i.description)}</td><td class="${i.amount < 0 ? 'fin-pos' : ''}">${money(i.amount)}</td><td><form method="post" action="/custos/incidentes/${i.id}/excluir" onsubmit="return confirm('Excluir este incidente?')"><input type="hidden" name="ref" value="${ref}" /><button class="btn secondary" type="submit">Excluir</button></form></td></tr>`).join('') || '<tr><td colspan="5">Nenhum incidente no período.</td></tr>'}
+        </tbody></table>
+      </section>
+    </div>`;
+
+  const config = `
+    <section class="panel">
+      <h3>Configuração de custos e receitas</h3>
+      <form class="form-grid" method="post" action="/custos/config">
+        <input type="hidden" name="ref" value="${ref}" />
+        <label>Valor do minuto — Produção (R$)<input name="fin_rate_producao" inputmode="decimal" value="${fmtNum(finSetting('fin_rate_producao'), 4)}" /></label>
+        <label>Valor do minuto — Mostruário (R$)<input name="fin_rate_mostruario" inputmode="decimal" value="${fmtNum(finSetting('fin_rate_mostruario'), 4)}" /></label>
+        <label>Encargos sobre salário (%)<input name="fin_charges_percent" inputmode="decimal" value="${fmtNum(finSetting('fin_charges_percent'), 2)}" /><small class="hint">INSS, FGTS, provisão de férias/13º etc. Pode ser ajustado por pessoa.</small></label>
+        <label>Adicional de hora extra (%)<input name="fin_overtime_percent" inputmode="decimal" value="${fmtNum(finSetting('fin_overtime_percent'), 0)}" /></label>
+        <label>Horas mensais (divisor do valor-hora)<input name="fin_monthly_hours" inputmode="decimal" value="${fmtNum(finSetting('fin_monthly_hours'), 0)}" /></label>
+        <label class="checkbox-line"><input type="checkbox" name="fin_include_prize" value="1" ${finSetting('fin_include_prize') === 1 ? 'checked' : ''} /> Somar o prêmio de produção no custo da folha</label>
+        <div class="full actions"><button class="btn" type="submit">Salvar configuração</button></div>
+      </form>
+      <p class="hint">Receita = minutos produzidos nos lançamentos (rápido, por hora validado e hora extra) × valor do minuto do tipo da OP. OPs devolvidas sem produção não entram. Horas extras usam o tempo trabalhado lançado em Hora extra.</p>
+    </section>`;
+
+  const content = `
+    <section class="page-header">
+      <div><h2>Custos e receitas</h2><p>Período ${formatDatePtBr(range.start)} a ${formatDatePtBr(range.end)} (mês operacional).</p></div>
+      <div class="header-actions"><a class="btn secondary" href="/custos?tab=${tab}&ref=${prevRef}">◀ Anterior</a><a class="btn secondary" href="/custos?tab=${tab}">Atual</a><a class="btn secondary" href="/custos?tab=${tab}&ref=${nextRef}">Próximo ▶</a></div>
+    </section>
+    <nav class="fin-tabs">${tabs.map(([k, l]) => `<a class="${k === tab ? 'active' : ''}" href="${link(k)}">${l}</a>`).join('')}</nav>
+    ${{ resumo, calendario, colaboradoras, despesas, config }[tab]}`;
+  return pageLayout({ title: 'Custos e receitas', content, notice: notice || query.notice || '', error: error || query.error || '', role });
+}
+
+function handleFinancePost(pathname, form, res) {
+  ensureFinanceTables(getActiveDb());
+  const ref = /^\d{4}-\d{2}-\d{2}$/.test(String(form.ref || '')) ? form.ref : today();
+  const go = (tab, msg, isError) => redirect(res, `/custos?tab=${tab}&ref=${ref}&${isError ? 'error' : 'notice'}=${encodeURIComponent(msg)}`);
+  if (pathname === '/custos/config') {
+    const keys = ['fin_rate_producao', 'fin_rate_mostruario', 'fin_charges_percent', 'fin_overtime_percent', 'fin_monthly_hours'];
+    for (const k of keys) {
+      const n = parseMoney(form[k]);
+      if (!Number.isFinite(n) || n < 0) return go('config', 'Valor inválido na configuração.', true);
+      setAlertSetting(k, n);
+    }
+    setAlertSetting('fin_include_prize', form.fin_include_prize === '1' ? '1' : '0');
+    return go('config', 'Configuração salva.');
+  }
+  if (pathname === '/custos/salarios') {
+    const upsert = db.prepare(`INSERT INTO employee_costs (employee_id, salary, benefits, charges_percent, updated_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(employee_id) DO UPDATE SET salary = excluded.salary, benefits = excluded.benefits, charges_percent = excluded.charges_percent, updated_at = CURRENT_TIMESTAMP`);
+    let n = 0;
+    for (const key of Object.keys(form)) {
+      const m = key.match(/^salary_(\d+)$/);
+      if (!m) continue;
+      const id = Number(m[1]);
+      const salary = parseMoney(form[`salary_${id}`]);
+      const benefits = parseMoney(form[`benefits_${id}`]);
+      const chargesRaw = String(form[`charges_${id}`] ?? '').trim();
+      const charges = chargesRaw === '' ? null : parseMoney(chargesRaw);
+      if (![salary, benefits].every(v => Number.isFinite(v) && v >= 0) || (charges !== null && !(charges >= 0))) return go('colaboradoras', 'Valor inválido em salários.', true);
+      upsert.run(id, salary, benefits, charges);
+      n += 1;
+    }
+    return go('colaboradoras', `Salários salvos (${n}).`);
+  }
+  if (pathname === '/custos/despesas') {
+    const amount = parseMoney(form.amount);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(form.expense_date || '')) || !String(form.category || '').trim() || !(amount > 0)) return go('despesas', 'Preencha data, categoria e valor.', true);
+    db.prepare('INSERT INTO company_expenses (expense_date, category, description, amount, is_recurring) VALUES (?, ?, ?, ?, ?)')
+      .run(form.expense_date, String(form.category).trim().slice(0, 60), String(form.description || '').trim().slice(0, 200) || null, amount, form.is_recurring === '1' ? 1 : 0);
+    return go('despesas', 'Despesa lançada.');
+  }
+  if (pathname === '/custos/incidentes') {
+    const amount = parseMoney(form.amount);
+    if (!Number(form.employee_id) || !/^\d{4}-\d{2}-\d{2}$/.test(String(form.incident_date || '')) || !String(form.description || '').trim() || !Number.isFinite(amount) || amount === 0) return go('despesas', 'Preencha colaboradora, data, valor e descrição.', true);
+    db.prepare('INSERT INTO payroll_incidents (employee_id, incident_date, description, amount) VALUES (?, ?, ?, ?)').run(Number(form.employee_id), form.incident_date, String(form.description).trim().slice(0, 200), amount);
+    return go('despesas', 'Incidente de folha lançado.');
+  }
+  let m = pathname.match(/^\/custos\/despesas\/(\d+)\/excluir$/);
+  if (m) { db.prepare('UPDATE company_expenses SET is_deleted = 1 WHERE id = ?').run(Number(m[1])); return go('despesas', 'Despesa excluída.'); }
+  m = pathname.match(/^\/custos\/incidentes\/(\d+)\/excluir$/);
+  if (m) { db.prepare('UPDATE payroll_incidents SET is_deleted = 1 WHERE id = ?').run(Number(m[1])); return go('despesas', 'Incidente excluído.'); }
+  return go('resumo', 'Ação não encontrada.', true);
+}
+// ===============================================================
+
 // ===================== TELA PARÂMETROS =====================
 const ABSENCE_TYPE_LABELS = { falta: 'Falta', atestado: 'Atestado', ferias: 'Férias', folga: 'Folga', afastamento: 'Afastamento', outro: 'Outro' };
 
@@ -12643,6 +13060,11 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && pathname === '/shipments') return handleCreateShipment(await parseBody(req), res);
 
       if (req.method === 'GET' && pathname === '/closures') return sendHtml(res, renderMonthlyClosurePage(query, role));
+      if (pathname === '/custos' || pathname.startsWith('/custos/')) {
+        if (requireAdmin(req, res, role)) return;
+        if (req.method === 'GET' && pathname === '/custos') return sendHtml(res, renderFinancePage(query, '', '', role));
+        if (req.method === 'POST') return handleFinancePost(pathname, await parseBody(req), res);
+      }
       if (req.method === 'GET' && pathname === '/ausencias/importar') return isAdminRole(role) ? sendHtml(res, renderAbsenceImportUpload(role)) : requireAdmin(req, res, role);
       if (req.method === 'POST' && pathname === '/ausencias/importar') return handleAbsenceImport(req, res, role);
       if (req.method === 'GET' && pathname === '/closures/export') return sendHtml(res, renderClosureExportPage(query, role));

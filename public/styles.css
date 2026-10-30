@@ -380,3 +380,23 @@ a.hourly-row:hover { background: #eef2ff; }
 .company-now .mini-card small { display: block; color: #607089; font-size: 12px; margin-top: 4px; }
 .company-now-main strong { font-size: 30px !important; }
 @media (max-width: 900px) { .company-now { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+/* Custos e receitas */
+.fin-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
+.fin-tabs a { padding: 8px 14px; border-radius: 999px; background: #e8eefc; color: #1e3a8a; text-decoration: none; font-weight: 600; font-size: 13px; }
+.fin-tabs a.active { background: #1e3a8a; color: #fff; }
+.fin-pos { color: #15803d; }
+.fin-neg { color: #b91c1c; }
+.fin-table input { width: 110px; padding: 4px 6px; }
+.fin-table td, .fin-table th { white-space: nowrap; font-size: 12px; }
+.fin-cal { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+.fin-cal-head { font-size: 11px; color: #607089; text-transform: uppercase; text-align: center; }
+.fin-cal-cell { min-height: 74px; border: 1px solid #e2e8f0; border-radius: 10px; padding: 6px; display: flex; flex-direction: column; gap: 2px; font-size: 12px; background: #fff; }
+.fin-cal-cell.is-off { background: #f8fafc; }
+.fin-cal-cell.is-empty { border: none; background: transparent; }
+.fin-cal-cell.is-today { border-color: #2563eb; box-shadow: 0 0 0 1px #2563eb; }
+.fin-cal-day { font-weight: 700; color: #334155; }
+.fin-cal-cell small { color: #64748b; }
+.fin-hours { display: flex; gap: 8px; align-items: flex-end; height: 160px; padding-top: 10px; }
+.fin-hour { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; gap: 4px; font-size: 11px; }
+.fin-hour-bar { width: 70%; background: #22c55e; border-radius: 6px 6px 0 0; display: block; }
+@media (max-width: 700px) { .fin-cal-cell { min-height: 56px; font-size: 10px; } .fin-cal-cell strong { font-size: 10px; } }
