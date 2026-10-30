@@ -9623,21 +9623,24 @@ function getFinanceData(start, end) {
   const rateMost = finSetting('fin_rate_mostruario');
   // Receita por dia e tipo (todos os lançamentos válidos, inclusive os que não contam para prêmio)
   const prodRows = db.prepare(`
-    SELECT p.production_date AS day, p.employee_id, o.op_type, SUM(p.produced_minutes) AS minutes, SUM(p.produced_quantity) AS pieces
+    SELECT p.production_date AS day, p.employee_id, o.op_type, (COALESCE(p.launch_kind, '') = 'hora_extra') AS is_extra,
+      SUM(p.produced_minutes) AS minutes, SUM(p.produced_quantity) AS pieces
     FROM op_daily_productions p JOIN ops o ON o.id = p.op_id
     WHERE p.is_reversed = 0 AND COALESCE(o.is_reversed, 0) = 0
       AND COALESCE(o.lifecycle_type, 'normal') NOT IN ('nao_industrializada', 'devolvida_sem_producao')
       AND p.production_date BETWEEN ? AND ?
-    GROUP BY p.production_date, p.employee_id, o.op_type`).all(start, end);
+    GROUP BY p.production_date, p.employee_id, o.op_type, is_extra`).all(start, end);
   const days = new Map();
+  const newDay = day => ({ day, minutes: 0, revenue: 0, revenueExtra: 0, minutesExtra: 0, payroll: 0, overtimeCost: 0, expenses: 0 });
+  const dayOf = day => { if (!days.has(day)) days.set(day, newDay(day)); return days.get(day); };
   const byEmployeeRevenue = new Map();
   const byType = { producao: { minutes: 0, revenue: 0 }, mostruario: { minutes: 0, revenue: 0 } };
   for (const r of prodRows) {
     const type = r.op_type === 'mostruario' ? 'mostruario' : 'producao';
     const revenue = Number(r.minutes || 0) * (type === 'mostruario' ? rateMost : rateProd);
-    if (!days.has(r.day)) days.set(r.day, { day: r.day, minutes: 0, revenue: 0, expenses: 0 });
-    const d = days.get(r.day);
-    d.minutes += Number(r.minutes || 0); d.revenue += revenue;
+    const d = dayOf(r.day);
+    if (r.is_extra) { d.minutesExtra += Number(r.minutes || 0); d.revenueExtra += revenue; }
+    else { d.minutes += Number(r.minutes || 0); d.revenue += revenue; }
     byType[type].minutes += Number(r.minutes || 0); byType[type].revenue += revenue;
     const e = byEmployeeRevenue.get(r.employee_id) || { minutes: 0, revenue: 0, pieces: 0 };
     e.minutes += Number(r.minutes || 0); e.revenue += revenue; e.pieces += Number(r.pieces || 0);
@@ -9651,8 +9654,7 @@ function getFinanceData(start, end) {
     expensesTotal += Number(x.amount || 0);
     expensesByCategory.set(x.category, (expensesByCategory.get(x.category) || 0) + Number(x.amount || 0));
     const day = x.is_recurring ? (x.expense_date >= start ? x.expense_date : start) : x.expense_date;
-    if (!days.has(day)) days.set(day, { day, minutes: 0, revenue: 0, expenses: 0 });
-    days.get(day).expenses += Number(x.amount || 0);
+    dayOf(day).expenses += Number(x.amount || 0);
   }
   // Folha por colaboradora
   const charges = finSetting('fin_charges_percent') / 100;
@@ -9679,6 +9681,8 @@ function getFinanceData(start, end) {
     const wd = new Date(`${r.production_date}T12:00:00Z`).getUTCDay();
     o.worked += w;
     o.weighted += w * (1 + overtimeRate(r.production_date));
+    o.byDay = o.byDay || new Map();
+    o.byDay.set(r.production_date, (o.byDay.get(r.production_date) || 0) + w * (1 + overtimeRate(r.production_date)));
     if (wd === 6) o.saturday += w; else if (wd === 0 || getHolidayDateSet().has(r.production_date)) o.sunday += w;
     overtime.set(r.employee_id, o);
   }
@@ -9702,6 +9706,10 @@ function getFinanceData(start, end) {
     const overtimeMinutes = ot.worked;
     const hourValue = Number(c.salary || 0) / monthlyHours;
     const overtimeValue = (ot.weighted / 60) * hourValue;
+    // Calendário: custo fixo do dia (salário + encargos + benefícios ÷ dias úteis do período) nos dias úteis ativos dela
+    const dailyFixed = (Number(c.salary || 0) * (1 + chargePct) + Number(c.benefits || 0)) / periodBusinessDays;
+    if (dailyFixed > 0) for (const day of getEmployeeBusinessDaysInRange(emp, start, end)) dayOf(day).payroll += dailyFixed;
+    if (ot.byDay) for (const [day, weighted] of ot.byDay) dayOf(day).overtimeCost += (weighted / 60) * hourValue;
     const prize = prizes.get(emp.id) || 0;
     const incident = incidentsByEmp.get(emp.id) || 0;
     const cost = salary + chargesValue + benefits + overtimeValue + prize + incident;
@@ -9774,7 +9782,8 @@ function renderFinancePage(query = {}, error = '', notice = '', role = 'adm') {
       const s = cursor;
       const e = w.end < range.end ? w.end : range.end;
       const list = data.days.filter(d => d.day >= s && d.day <= e);
-      out.push({ s, e, revenue: list.reduce((a, d) => a + d.revenue, 0), minutes: list.reduce((a, d) => a + d.minutes, 0), expenses: list.reduce((a, d) => a + d.expenses, 0) });
+      const sumK = k => list.reduce((a, d) => a + Number(d[k] || 0), 0);
+      out.push({ s, e, revenue: sumK('revenue'), revenueExtra: sumK('revenueExtra'), minutes: sumK('minutes') + sumK('minutesExtra'), payroll: sumK('payroll'), overtimeCost: sumK('overtimeCost'), expenses: sumK('expenses') });
       cursor = addDaysIso(e, 1);
     }
     return out;
@@ -9827,18 +9836,31 @@ function renderFinancePage(query = {}, error = '', notice = '', role = 'adm') {
     for (let i = 0; i < lead; i++) cells.push('<div class="fin-cal-cell is-empty"></div>');
     const byDay = new Map(data.days.map(d => [d.day, d]));
     for (const day of enumerateDates(range.start, range.end)) {
-      const d = byDay.get(day) || { revenue: 0, expenses: 0, minutes: 0 };
+      const d = byDay.get(day) || { revenue: 0, revenueExtra: 0, payroll: 0, overtimeCost: 0, expenses: 0, minutes: 0, minutesExtra: 0 };
       const isToday = day === today();
-      cells.push(`<div class="fin-cal-cell ${isBusinessDay(day) ? '' : 'is-off'} ${isToday ? 'is-today' : ''}"><span class="fin-cal-day">${day.slice(8)}/${day.slice(5, 7)}</span>${d.revenue ? `<strong class="fin-pos">+${money(d.revenue)}</strong>` : ''}${d.expenses ? `<strong class="fin-neg">−${money(d.expenses)}</strong>` : ''}${d.minutes ? `<small>${fmtNum(d.minutes, 0)} min</small>` : ''}</div>`);
+      const saldo = d.revenue + d.revenueExtra - d.payroll - d.overtimeCost - d.expenses;
+      const has = d.revenue || d.revenueExtra || d.payroll || d.overtimeCost || d.expenses;
+      const hourCost = d.payroll / (baseMinutesDay() / 60);
+      cells.push(`<div class="fin-cal-cell ${isBusinessDay(day) ? '' : 'is-off'} ${isToday ? 'is-today' : ''}">
+        <span class="fin-cal-day">${day.slice(8)}/${day.slice(5, 7)}</span>
+        ${d.revenue ? `<span class="fin-line fin-pos">Receita <b>${money(d.revenue)}</b></span>` : ''}
+        ${d.revenueExtra ? `<span class="fin-line fin-pos">Rec. extra <b>${money(d.revenueExtra)}</b></span>` : ''}
+        ${d.payroll ? `<span class="fin-line fin-neg" title="Custo por hora da equipe: ${money(hourCost)}">Folha <b>${money(d.payroll)}</b> <small>${money(hourCost)}/h</small></span>` : ''}
+        ${d.overtimeCost ? `<span class="fin-line fin-neg">Custo extra <b>${money(d.overtimeCost)}</b></span>` : ''}
+        ${d.expenses ? `<span class="fin-line fin-neg">Despesas <b>${money(d.expenses)}</b></span>` : ''}
+        ${has ? `<span class="fin-line fin-saldo ${resCls(saldo)}">Saldo <b>${money(saldo)}</b></span>` : ''}
+        ${d.minutes || d.minutesExtra ? `<small>${fmtNum(d.minutes + d.minutesExtra, 0)} min</small>` : ''}
+      </div>`);
     }
     return `<section class="panel">
       <h3>Calendário de faturamento e despesas</h3>
-      <p class="hint">Verde = receita do dia (minutos produzidos × valor do minuto). Vermelho = despesas gerais lançadas na data (recorrentes aparecem no 1º dia do período). A folha está no Resumo e em Colaboradoras.</p>
+      <p class="hint">Receita = minutos do dia × valor do minuto · Rec. extra = receita das horas extras · Folha = salário + encargos + benefícios das colaboradoras ativas ÷ dias úteis do período (e o custo por hora da equipe) · Custo extra = horas extras do dia com adicional · Despesas = despesas gerais (recorrentes no 1º dia). Prêmio e incidentes de folha entram só no total do período.</p>
       <div class="fin-cal">${['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'].map(w => `<div class="fin-cal-head">${w}</div>`).join('')}${cells.join('')}</div>
-      <table style="margin-top:12px"><thead><tr><th>Semana</th><th>Minutos</th><th>Receita</th><th>Despesas</th><th>Saldo</th></tr></thead><tbody>
-        ${weeks.map(w => `<tr><td>${formatDatePtBr(w.s)} a ${formatDatePtBr(w.e)}</td><td>${fmtNum(w.minutes, 0)}</td><td>${money(w.revenue)}</td><td>${money(w.expenses)}</td><td class="${resCls(w.revenue - w.expenses)}">${money(w.revenue - w.expenses)}</td></tr>`).join('')}
-        <tr><th>Período</th><th>${fmtNum(t.minutes, 0)}</th><th>${money(t.revenue)}</th><th>${money(t.expenses)}</th><th class="${resCls(t.revenue - t.expenses)}">${money(t.revenue - t.expenses)}</th></tr>
-      </tbody></table>
+      <div class="table-wrap"><table style="margin-top:12px"><thead><tr><th>Semana</th><th>Minutos</th><th>Receita</th><th>Rec. extra</th><th>Folha</th><th>Custo extra</th><th>Despesas</th><th>Saldo</th></tr></thead><tbody>
+        ${weeks.map(w => { const sd = w.revenue + w.revenueExtra - w.payroll - w.overtimeCost - w.expenses; return `<tr><td>${formatDatePtBr(w.s)} a ${formatDatePtBr(w.e)}</td><td>${fmtNum(w.minutes, 0)}</td><td>${money(w.revenue)}</td><td>${money(w.revenueExtra)}</td><td>${money(w.payroll)}</td><td>${money(w.overtimeCost)}</td><td>${money(w.expenses)}</td><td class="${resCls(sd)}">${money(sd)}</td></tr>`; }).join('')}
+        ${(() => { const k = key => weeks.reduce((a, w) => a + w[key], 0); const sd = k('revenue') + k('revenueExtra') - k('payroll') - k('overtimeCost') - k('expenses'); return `<tr><th>Período</th><th>${fmtNum(k('minutes'), 0)}</th><th>${money(k('revenue'))}</th><th>${money(k('revenueExtra'))}</th><th>${money(k('payroll'))}</th><th>${money(k('overtimeCost'))}</th><th>${money(k('expenses'))}</th><th class="${resCls(sd)}">${money(sd)}</th></tr>`; })()}
+      </tbody></table></div>
+      <p class="hint">O saldo do calendário não inclui prêmio nem incidentes de folha; o Resultado do Resumo inclui.</p>
     </section>`;
   })();
 

@@ -400,3 +400,9 @@ a.hourly-row:hover { background: #eef2ff; }
 .fin-hour { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; gap: 4px; font-size: 11px; }
 .fin-hour-bar { width: 70%; background: #22c55e; border-radius: 6px 6px 0 0; display: block; }
 @media (max-width: 700px) { .fin-cal-cell { min-height: 56px; font-size: 10px; } .fin-cal-cell strong { font-size: 10px; } }
+.fin-cal-cell { min-height: 110px; }
+.fin-line { display: flex; justify-content: space-between; gap: 4px; font-size: 11px; line-height: 1.3; }
+.fin-line b { font-weight: 700; white-space: nowrap; }
+.fin-line small { color: #94a3b8; font-size: 10px; }
+.fin-saldo { border-top: 1px dashed #cbd5e1; margin-top: 2px; padding-top: 2px; }
+@media (max-width: 900px) { .fin-cal { overflow-x: auto; grid-template-columns: repeat(7, minmax(110px, 1fr)); } }
