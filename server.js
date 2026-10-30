@@ -9563,6 +9563,8 @@ const FIN_DEFAULTS = {
   fin_rate_mostruario: '0',
   fin_charges_percent: '0',
   fin_overtime_percent: '50',
+  fin_overtime_saturday_percent: '70',
+  fin_overtime_sunday_percent: '100',
   fin_monthly_hours: '220',
   fin_include_prize: '1'
 };
@@ -9654,7 +9656,13 @@ function getFinanceData(start, end) {
   }
   // Folha por colaboradora
   const charges = finSetting('fin_charges_percent') / 100;
-  const overtimePct = finSetting('fin_overtime_percent') / 100;
+  // Adicional de hora extra pelo dia: semana, sábado, domingo/feriado
+  const overtimeRate = day => {
+    const wd = new Date(`${day}T12:00:00Z`).getUTCDay();
+    if (wd === 0 || getHolidayDateSet().has(day)) return finSetting('fin_overtime_sunday_percent') / 100;
+    if (wd === 6) return finSetting('fin_overtime_saturday_percent') / 100;
+    return finSetting('fin_overtime_percent') / 100;
+  };
   const monthlyHours = finSetting('fin_monthly_hours') || 220;
   const includePrize = finSetting('fin_include_prize') === 1;
   const periodBusinessDays = enumerateDates(start, end).filter(isBusinessDay).length || 1;
@@ -9663,7 +9671,17 @@ function getFinanceData(start, end) {
   if (includePrize) {
     try { getProductionPrizeData(start, 'custom', '', start, end).employeeSummaries.forEach(s => prizes.set(s.id, Number(s.total_prize || 0))); } catch (_) {}
   }
-  const overtime = new Map(db.prepare(`SELECT employee_id, SUM(COALESCE(worked_minutes, 0)) AS worked FROM op_daily_productions WHERE launch_kind = 'hora_extra' AND is_reversed = 0 AND production_date BETWEEN ? AND ? GROUP BY employee_id`).all(start, end).map(r => [r.employee_id, Number(r.worked || 0)]));
+  // Horas extras: minutos trabalhados e minutos "com adicional" (minutos × (1 + adicional do dia))
+  const overtime = new Map();
+  for (const r of db.prepare(`SELECT employee_id, production_date, SUM(COALESCE(worked_minutes, 0)) AS worked FROM op_daily_productions WHERE launch_kind = 'hora_extra' AND is_reversed = 0 AND production_date BETWEEN ? AND ? GROUP BY employee_id, production_date`).all(start, end)) {
+    const o = overtime.get(r.employee_id) || { worked: 0, weighted: 0, saturday: 0, sunday: 0 };
+    const w = Number(r.worked || 0);
+    const wd = new Date(`${r.production_date}T12:00:00Z`).getUTCDay();
+    o.worked += w;
+    o.weighted += w * (1 + overtimeRate(r.production_date));
+    if (wd === 6) o.saturday += w; else if (wd === 0 || getHolidayDateSet().has(r.production_date)) o.sunday += w;
+    overtime.set(r.employee_id, o);
+  }
   const incidents = db.prepare('SELECT * FROM payroll_incidents WHERE is_deleted = 0 AND incident_date BETWEEN ? AND ? ORDER BY incident_date, id').all(start, end);
   const incidentsByEmp = new Map();
   incidents.forEach(i => incidentsByEmp.set(i.employee_id, (incidentsByEmp.get(i.employee_id) || 0) + Number(i.amount || 0)));
@@ -9680,16 +9698,17 @@ function getFinanceData(start, end) {
     const chargePct = c.charges_percent !== null && c.charges_percent !== undefined ? Number(c.charges_percent) / 100 : charges;
     const chargesValue = salary * chargePct;
     const benefits = Number(c.benefits || 0) * factor;
-    const overtimeMinutes = overtime.get(emp.id) || 0;
+    const ot = overtime.get(emp.id) || { worked: 0, weighted: 0, saturday: 0, sunday: 0 };
+    const overtimeMinutes = ot.worked;
     const hourValue = Number(c.salary || 0) / monthlyHours;
-    const overtimeValue = (overtimeMinutes / 60) * hourValue * (1 + overtimePct);
+    const overtimeValue = (ot.weighted / 60) * hourValue;
     const prize = prizes.get(emp.id) || 0;
     const incident = incidentsByEmp.get(emp.id) || 0;
     const cost = salary + chargesValue + benefits + overtimeValue + prize + incident;
     const revenue = rev?.revenue || 0;
     people.push({
       emp, group: scheduleNames.get(emp.work_schedule_id) || 'Sem jornada', activeDays, factor, hasSalary: Number(c.salary || 0) > 0,
-      salary, chargesValue, benefits, overtimeMinutes, overtimeValue, prize, incident, cost,
+      salary, chargesValue, benefits, overtimeMinutes, overtimeSaturday: ot.saturday, overtimeSunday: ot.sunday, overtimeValue, prize, incident, cost,
       minutes: rev?.minutes || 0, pieces: rev?.pieces || 0, revenue, result: revenue - cost,
       costPerMinute: (rev?.minutes || 0) > 0 ? cost / rev.minutes : null
     });
@@ -9826,10 +9845,10 @@ function renderFinancePage(query = {}, error = '', notice = '', role = 'adm') {
   const colaboradoras = `
     <section class="panel">
       <h3>Custo × receita por colaboradora</h3>
-      <p class="hint">Custo = salário + encargos (${fmtNum(finSetting('fin_charges_percent'), 1)}%) + benefícios + horas extras (+${fmtNum(finSetting('fin_overtime_percent'), 0)}%) + prêmio${finSetting('fin_include_prize') === 1 ? '' : ' (desligado)'} + incidentes, proporcional aos dias úteis ativa no período (${t.businessDays}). Receita = minutos dela × valor do minuto.</p>
+      <p class="hint">Custo = salário + encargos (${fmtNum(finSetting('fin_charges_percent'), 1)}%) + benefícios + horas extras (+${fmtNum(finSetting('fin_overtime_percent'), 0)}% semana, +${fmtNum(finSetting('fin_overtime_saturday_percent'), 0)}% sábado, +${fmtNum(finSetting('fin_overtime_sunday_percent'), 0)}% domingo/feriado) + prêmio${finSetting('fin_include_prize') === 1 ? '' : ' (desligado)'} + incidentes, proporcional aos dias úteis ativa no período (${t.businessDays}). Receita = minutos dela × valor do minuto.</p>
       <div class="table-wrap"><table class="fin-table">
         <thead><tr><th>Colaboradora</th><th>Grupo</th><th>Dias</th><th>Salário</th><th>Encargos</th><th>Benefícios</th><th>H. extra</th><th>Prêmio</th><th>Incidentes</th><th>Custo</th><th>Minutos</th><th>Receita</th><th>Resultado</th><th>Custo/min</th></tr></thead>
-        <tbody>${data.people.map(p => `<tr><td>${escapeHtml(p.emp.full_name)}${p.hasSalary ? '' : ' <span class="status-pill pending">sem salário</span>'}</td><td>${escapeHtml(p.group)}</td><td>${p.activeDays}</td><td>${money(p.salary)}</td><td>${money(p.chargesValue)}</td><td>${money(p.benefits)}</td><td>${money(p.overtimeValue)}${p.overtimeMinutes ? `<br><small class="hint">${fmtHoursMinutes(p.overtimeMinutes)}</small>` : ''}</td><td>${money(p.prize)}</td><td>${money(p.incident)}</td><td><strong>${money(p.cost)}</strong></td><td>${fmtNum(p.minutes, 0)}</td><td>${money(p.revenue)}</td><td class="${resCls(p.result)}"><strong>${money(p.result)}</strong></td><td>${p.costPerMinute === null ? '—' : money(p.costPerMinute)}</td></tr>`).join('') || '<tr><td colspan="14">Sem colaboradoras no período.</td></tr>'}</tbody>
+        <tbody>${data.people.map(p => `<tr><td>${escapeHtml(p.emp.full_name)}${p.hasSalary ? '' : ' <span class="status-pill pending">sem salário</span>'}</td><td>${escapeHtml(p.group)}</td><td>${p.activeDays}</td><td>${money(p.salary)}</td><td>${money(p.chargesValue)}</td><td>${money(p.benefits)}</td><td>${money(p.overtimeValue)}${p.overtimeMinutes ? `<br><small class="hint">${fmtHoursMinutes(p.overtimeMinutes)}${p.overtimeSaturday ? ` · sáb ${fmtHoursMinutes(p.overtimeSaturday)}` : ''}${p.overtimeSunday ? ` · dom/fer ${fmtHoursMinutes(p.overtimeSunday)}` : ''}</small>` : ''}</td><td>${money(p.prize)}</td><td>${money(p.incident)}</td><td><strong>${money(p.cost)}</strong></td><td>${fmtNum(p.minutes, 0)}</td><td>${money(p.revenue)}</td><td class="${resCls(p.result)}"><strong>${money(p.result)}</strong></td><td>${p.costPerMinute === null ? '—' : money(p.costPerMinute)}</td></tr>`).join('') || '<tr><td colspan="14">Sem colaboradoras no período.</td></tr>'}</tbody>
         <tfoot><tr><th colspan="9">Total</th><th>${money(t.payroll)}</th><th>${fmtNum(t.minutes, 0)}</th><th>${money(t.revenue)}</th><th class="${resCls(t.revenue - t.payroll)}">${money(t.revenue - t.payroll)}</th><th>${t.minutes ? money(t.payroll / t.minutes) : '—'}</th></tr></tfoot>
       </table></div>
     </section>
@@ -9899,7 +9918,9 @@ function renderFinancePage(query = {}, error = '', notice = '', role = 'adm') {
         <label>Valor do minuto — Produção (R$)<input name="fin_rate_producao" inputmode="decimal" value="${fmtNum(finSetting('fin_rate_producao'), 4)}" /></label>
         <label>Valor do minuto — Mostruário (R$)<input name="fin_rate_mostruario" inputmode="decimal" value="${fmtNum(finSetting('fin_rate_mostruario'), 4)}" /></label>
         <label>Encargos sobre salário (%)<input name="fin_charges_percent" inputmode="decimal" value="${fmtNum(finSetting('fin_charges_percent'), 2)}" /><small class="hint">INSS, FGTS, provisão de férias/13º etc. Pode ser ajustado por pessoa.</small></label>
-        <label>Adicional de hora extra (%)<input name="fin_overtime_percent" inputmode="decimal" value="${fmtNum(finSetting('fin_overtime_percent'), 0)}" /></label>
+        <label>Hora extra — dias de semana (%)<input name="fin_overtime_percent" inputmode="decimal" value="${fmtNum(finSetting('fin_overtime_percent'), 0)}" /></label>
+        <label>Hora extra — sábado (%)<input name="fin_overtime_saturday_percent" inputmode="decimal" value="${fmtNum(finSetting('fin_overtime_saturday_percent'), 0)}" /></label>
+        <label>Hora extra — domingo e feriado (%)<input name="fin_overtime_sunday_percent" inputmode="decimal" value="${fmtNum(finSetting('fin_overtime_sunday_percent'), 0)}" /></label>
         <label>Horas mensais (divisor do valor-hora)<input name="fin_monthly_hours" inputmode="decimal" value="${fmtNum(finSetting('fin_monthly_hours'), 0)}" /></label>
         <label class="checkbox-line"><input type="checkbox" name="fin_include_prize" value="1" ${finSetting('fin_include_prize') === 1 ? 'checked' : ''} /> Somar o prêmio de produção no custo da folha</label>
         <div class="full actions"><button class="btn" type="submit">Salvar configuração</button></div>
@@ -9922,7 +9943,7 @@ function handleFinancePost(pathname, form, res) {
   const ref = /^\d{4}-\d{2}-\d{2}$/.test(String(form.ref || '')) ? form.ref : today();
   const go = (tab, msg, isError) => redirect(res, `/custos?tab=${tab}&ref=${ref}&${isError ? 'error' : 'notice'}=${encodeURIComponent(msg)}`);
   if (pathname === '/custos/config') {
-    const keys = ['fin_rate_producao', 'fin_rate_mostruario', 'fin_charges_percent', 'fin_overtime_percent', 'fin_monthly_hours'];
+    const keys = ['fin_rate_producao', 'fin_rate_mostruario', 'fin_charges_percent', 'fin_overtime_percent', 'fin_overtime_saturday_percent', 'fin_overtime_sunday_percent', 'fin_monthly_hours'];
     for (const k of keys) {
       const n = parseMoney(form[k]);
       if (!Number.isFinite(n) || n < 0) return go('config', 'Valor inválido na configuração.', true);
