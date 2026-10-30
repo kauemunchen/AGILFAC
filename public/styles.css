@@ -373,3 +373,6 @@ a.hourly-row:hover { background: #eef2ff; }
 .hour-grid .grid-now-note { text-align: left; color: #475569; font-size: 12px; background: #f8fafc; }
 .hour-grid .row-now th { background: #eef2ff; }
 .hourly-list-head > span:nth-child(8), a.hourly-row > strong:last-child { text-align: right; }
+.hour-grid .row-pct th, .hour-grid .row-pct td, .hour-grid .row-now th, .hour-grid .row-now td { border-top: 2px solid #94a3b8; }
+.hour-grid .row-now td, .hour-grid .row-now th { border-top-width: 1px; }
+.hour-grid .row-pct td { font-weight: 700; }
