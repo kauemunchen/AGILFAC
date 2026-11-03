@@ -618,3 +618,4 @@ body.kb-selecting .kb-col header::after { content:'tudo'; font-size:11px; color:
 .timeline li.is-occ .tl-text { color:#92400e; } .timeline li.is-ship .tl-text { color:#991b1b; font-weight:600; }
 .tl-due { margin:0 0 8px; }
 .op-timeline details summary { cursor:pointer; color:#1f4fd1; font-weight:600; margin-top:6px; }
+.pager { display:flex; align-items:center; justify-content:center; gap:12px; padding:12px 0 2px; flex-wrap:wrap; font-size:14px; color:#475569; }

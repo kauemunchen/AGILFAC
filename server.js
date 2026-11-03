@@ -246,6 +246,38 @@ function getTenantDbForCompany(company) {
 function bootstrapTenantDatabase(tenantDb) {
   tenantDb.exec(fs.readFileSync(SCHEMA_PATH, 'utf8'));
   migrateDatabase(tenantDb);
+  ensureTenantIndexes(tenantDb);
+}
+
+// Índices para as consultas mais usadas (listas, dashboard, acompanhamento). Criados uma vez; não mudam dados.
+function tenantIndexList() { return [
+  'CREATE INDEX IF NOT EXISTS idx_ops_rev_status ON ops (is_reversed, status_color)',
+  'CREATE INDEX IF NOT EXISTS idx_ops_number ON ops (op_number)',
+  'CREATE INDEX IF NOT EXISTS idx_ops_barcode ON ops (barcode)',
+  'CREATE INDEX IF NOT EXISTS idx_ops_delivery ON ops (delivery_date)',
+  'CREATE INDEX IF NOT EXISTS idx_ops_shipped ON ops (shipped_at)',
+  'CREATE INDEX IF NOT EXISTS idx_odp_op ON op_daily_productions (op_id, is_reversed)',
+  'CREATE INDEX IF NOT EXISTS idx_odp_date ON op_daily_productions (production_date, is_reversed)',
+  'CREATE INDEX IF NOT EXISTS idx_odp_emp_date ON op_daily_productions (employee_id, production_date)',
+  'CREATE INDEX IF NOT EXISTS idx_hp_date ON hourly_productions (production_date, is_reversed)',
+  'CREATE INDEX IF NOT EXISTS idx_hp_op ON hourly_productions (op_id, is_reversed)',
+  'CREATE INDEX IF NOT EXISTS idx_hzh_date ON hourly_zero_hours (production_date, is_reversed)',
+  'CREATE INDEX IF NOT EXISTS idx_oct_op ON op_cell_transfers (op_id)',
+  'CREATE INDEX IF NOT EXISTS idx_oct_cell ON op_cell_transfers (cell_id)',
+  'CREATE INDEX IF NOT EXISTS idx_occ_op ON op_occurrences (op_id, is_concluded)',
+  'CREATE INDEX IF NOT EXISTS idx_opi_op ON op_problem_items (op_id)',
+  'CREATE INDEX IF NOT EXISTS idx_si_op ON shipment_items (op_id)',
+  'CREATE INDEX IF NOT EXISTS idx_si_ship ON shipment_items (shipment_id)',
+  'CREATE INDEX IF NOT EXISTS idx_ship_date ON shipments (shipment_date)',
+  'CREATE INDEX IF NOT EXISTS idx_obh_op ON op_billing_history (op_id)',
+  'CREATE INDEX IF NOT EXISTS idx_oet_op ON op_extra_times (op_id)',
+  'CREATE INDEX IF NOT EXISTS idx_emp_panel ON employees (panel_token)'
+]; }
+function ensureTenantIndexes(tenantDb) {
+  for (const sql of tenantIndexList()) {
+    try { tenantDb.exec(sql); } catch (error) { console.error('Índice não criado:', sql.split(' ON ')[0], error.message); }
+  }
+  try { tenantDb.exec('PRAGMA optimize'); } catch (_) {}
 }
 
 function getLegacyCompanyName() {
@@ -2123,6 +2155,7 @@ function getParams() {
 
 function invalidateParams() {
   paramsCache.delete(getActiveDb());
+  holidayCache.delete(getActiveDb());
 }
 
 function numParam(key) {
@@ -2206,7 +2239,18 @@ function getCompanyName() {
   return getAppSetting('company_name', DEFAULT_COMPANY_NAME) || DEFAULT_COMPANY_NAME;
 }
 
+// Feriados são lidos muitas vezes por tela (cada dia útil testado): guarda por 10 s por empresa
+const holidayCache = new WeakMap();
 function getHolidayDateSet() {
+  const key = getActiveDb();
+  const hit = holidayCache.get(key);
+  if (hit && Date.now() - hit.at < 10000) return hit.value;
+  const value = buildHolidaySetFromSettings();
+  holidayCache.set(key, { at: Date.now(), value });
+  return value;
+}
+
+function buildHolidaySetFromSettings() {
   return buildHolidaySet(
     getAppSetting('holiday_dates', ''),
     getAppSetting('holiday_recurring_mmdd', ''),
@@ -5050,6 +5094,15 @@ function getOpList(filters = {}) {
     where.push('o.status_color = ?');
     params.push(filters.status);
   }
+  if (Array.isArray(filters.statusIn) && filters.statusIn.length) {
+    where.push(`o.status_color IN (${filters.statusIn.map(() => '?').join(',')})`);
+    params.push(...filters.statusIn);
+  }
+  if (filters.onlyNotShipped) where.push('o.shipped_at IS NULL');
+  if (filters.shippedSince) {
+    where.push('(o.shipped_at IS NULL OR o.shipped_at >= ?)');
+    params.push(filters.shippedSince);
+  }
   if (filters.opType) {
     where.push('o.op_type = ?');
     params.push(filters.opType);
@@ -5094,6 +5147,7 @@ function getOpList(filters = {}) {
   sql += filters.deadline === 'atrasadas' || filters.deadline === 'vencem3' || filters.sort === 'entrega'
     ? " GROUP BY o.id ORDER BY CASE WHEN o.delivery_date IS NULL OR o.delivery_date = '' THEN 1 ELSE 0 END, o.delivery_date ASC, o.entry_date DESC"
     : ' GROUP BY o.id ORDER BY o.entry_date DESC, o.created_at DESC';
+  if (filters.limit) { sql += ' LIMIT ? OFFSET ?'; params.push(Number(filters.limit), Number(filters.offset || 0)); }
   return db.prepare(sql).all(...params).map(op => ({ ...op, ...calculateOpShipmentMinutes(op) }));
 }
 
@@ -6192,8 +6246,18 @@ function addBusinessDays(fromIso, count) {
   return iso(cursor);
 }
 
+const queueForecastCache = new Map();
 function getQueueForecast() {
-  const open = getOpList({}).filter(op => ['verde', 'amarelo', 'rosa'].includes(op.status_color) && !op.shipped_at && !isReturnedWithoutProductionLifecycle(op.lifecycle_type));
+  const ck = getRequestAuth()?.company?.slug || '';
+  const hit = queueForecastCache.get(ck);
+  if (hit && Date.now() - hit.at < 30000) return hit.value;
+  const value = computeQueueForecast();
+  queueForecastCache.set(ck, { at: Date.now(), value });
+  return value;
+}
+
+function computeQueueForecast() {
+  const open = getOpList({ statusIn: ['verde', 'amarelo', 'rosa'], onlyNotShipped: true }).filter(op => ['verde', 'amarelo', 'rosa'].includes(op.status_color) && !op.shipped_at && !isReturnedWithoutProductionLifecycle(op.lifecycle_type));
   const queueMinutes = round2(open.reduce((sum, op) => sum + Math.max(Number(op.remaining_quantity || 0), 0) * Number(op.minutes_f21 || 0), 0));
   const queuePieces = open.reduce((sum, op) => sum + Math.max(Number(op.remaining_quantity || 0), 0), 0);
   const days = [];
@@ -12783,7 +12847,15 @@ function renderOpListPage(query = {}, role = 'adm') {
     sort: query.sort || ''
   };
   const view = query.view === 'quadro' ? 'quadro' : 'lista';
-  const rows = getOpList(view === 'quadro' ? { ...filters, status: '' } : filters);
+  const PAGE = 100;
+  const page = Math.max(1, Number.parseInt(query.page, 10) || 1);
+  const rows = view === 'quadro'
+    ? getOpList({ ...filters, status: '', shippedSince: addDaysIso(today(), -31) })
+    : getOpList({ ...filters, limit: PAGE + 1, offset: (page - 1) * PAGE });
+  const hasNext = view !== 'quadro' && rows.length > PAGE;
+  if (hasNext) rows.length = PAGE;
+  const pageLink = n => `/ops?${new URLSearchParams(Object.fromEntries(Object.entries({ ...query, page: String(n) }).filter(([k]) => !['notice', 'error', 'undo'].includes(k)))).toString()}`;
+  const pager = view === 'quadro' || (page === 1 && !hasNext) ? '' : `<nav class="pager">${page > 1 ? `<a class="btn secondary" href="${pageLink(page - 1)}">← Anterior</a>` : ''}<span>Página ${page} · OPs ${(page - 1) * PAGE + 1}–${(page - 1) * PAGE + rows.length}</span>${hasNext ? `<a class="btn secondary" href="${pageLink(page + 1)}">Próxima →</a>` : ''}</nav>`;
   const deadlineCounts = db.prepare(`
     SELECT
       SUM(CASE WHEN delivery_date IS NOT NULL AND delivery_date <> '' AND delivery_date < ? THEN 1 ELSE 0 END) AS late,
@@ -12864,6 +12936,7 @@ function renderOpListPage(query = {}, role = 'adm') {
           ${rows.map(op => `<tr><td>${escapeHtml(op.op_number)}</td><td>${escapeHtml(op.product_name)}</td><td>${escapeHtml(op.op_type)}</td><td>${escapeHtml(op.brand || '-')}</td><td>${escapeHtml(op.collection_name || '-')}</td><td>${op.total_pieces}</td><td>${op.produced_quantity}</td><td>${op.remaining_quantity}</td><td>${deliveryBadge(op)}</td><td>${escapeHtml(nowPt(op.shipped_at))}</td><td>${statusBadge(op.status_color)} ${lifecycleBadge(op.lifecycle_type)}</td>${isLancadorRole(role) ? '' : `<td>${billingStatusLabel(op)}</td>`}<td><a href="/ops/${op.id}">Detalhar</a></td></tr>`).join('') || '<tr><td colspan="13">Nenhuma OP encontrada.</td></tr>'}
         </tbody>
       </table>
+      ${pager}
     </section>`}
   `;
   return pageLayout({ title: 'OPs', content, notice: query.notice || '', error: query.error || '', role });
