@@ -1540,6 +1540,7 @@ function redirect(res, location) {
     const m = location.match(/^\/ops\/\d+\?((?:notice|error)=.*)$/);
     if (m) location = `${res._kanbanReturn}${res._kanbanReturn.includes('?') ? '&' : '?'}${m[1]}`;
   }
+  if (res._undo && typeof location === 'string' && /[?&]notice=/.test(location)) location += `&undo=${res._undo}`;
   res.writeHead(302, { Location: location });
   res.end();
 }
@@ -1641,6 +1642,7 @@ function isLancadorAllowed(method, pathname) {
   if (method === 'POST' && /^\/productions\/hourly\/(\d+\/fix|zero\/\d+\/delete)$/.test(pathname)) return true;
   if (method === 'POST' && /^\/ops\/\d+\/(occurrences|problem-items|cell\/send|cell\/return)$/.test(pathname)) return true;
   if (method === 'POST' && /^\/ops\/\d+\/occurrences\/\d+\/conclude$/.test(pathname)) return true;
+  if (method === 'POST' && pathname === '/ops/lote') return true;
   return false;
 }
 
@@ -1680,7 +1682,7 @@ function renderLoginPage(values = {}, error = '', notice = '') {
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Login - AgilFac</title>
-    <link rel="stylesheet" href="/public/styles.css" />
+    <link rel="stylesheet" href="/public/styles.css?v=${ASSET_VERSION}" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <meta name="theme-color" content="#0f172a" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -1795,7 +1797,7 @@ function renderSuperAdminLoginPage(values = {}, error = '', notice = '') {
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Superadmin - AgilFac</title>
-    <link rel="stylesheet" href="/public/styles.css" />
+    <link rel="stylesheet" href="/public/styles.css?v=${ASSET_VERSION}" />
   </head>
   <body>
     <main class="content" style="max-width:520px;margin:48px auto;">
@@ -1868,7 +1870,7 @@ function renderSuperAdminPanel(query = {}, values = {}, error = '', notice = '')
       `).join('')}</tbody></table></div>` : '<p class="hint">Nenhuma empresa cadastrada.</p>'}
     </section>
   `;
-  const top = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>Superadmin - AgilFac</title><link rel="stylesheet" href="/public/styles.css" /></head><body><div class="layout"><aside class="sidebar"><h1>Superadmin</h1><nav><a href="/superadmin" class="active">Empresas</a></nav><div class="sidebar-note"><strong>Painel estrutural</strong><p>Use este ambiente para criar novas empresas e provisionar bases isoladas.</p><form method="post" action="/superadmin/logout" style="margin-top:12px;"><button class="btn secondary" type="submit">Sair</button></form></div></aside><main class="content">${notice ? `<div class="alert success">${escapeHtml(notice)}</div>` : ''}${error ? `<div class="alert error">${escapeHtml(error)}</div>` : ''}${content}</main></div></body></html>`;
+  const top = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>Superadmin - AgilFac</title><link rel="stylesheet" href="/public/styles.css?v=${ASSET_VERSION}" /></head><body><div class="layout"><aside class="sidebar"><h1>Superadmin</h1><nav><a href="/superadmin" class="active">Empresas</a></nav><div class="sidebar-note"><strong>Painel estrutural</strong><p>Use este ambiente para criar novas empresas e provisionar bases isoladas.</p><form method="post" action="/superadmin/logout" style="margin-top:12px;"><button class="btn secondary" type="submit">Sair</button></form></div></aside><main class="content">${notice ? `<div class="alert success">${escapeHtml(notice)}</div>` : ''}${error ? `<div class="alert error">${escapeHtml(error)}</div>` : ''}${content}</main></div></body></html>`;
   return top;
 }
 
@@ -2382,6 +2384,7 @@ function renderBottomBar(navItems, role) {
   return `<nav class="bottom-bar">${items.map(i => `<a href="${i.href}" class="${i.active ? 'active' : ''}"><span>${i.icon}</span><small>${escapeHtml(i.label.replace('Consulta OP', 'OPs').replace('Etiq. entrada', 'Etiquetas'))}</small></a>`).join('')}<button type="button" data-open-menu><span>☰</span><small>Menu</small></button></nav>`;
 }
 
+const ASSET_VERSION = String(Date.now()).slice(-8);
 function pageLayout({ title, content, notice = '', error = '', role = 'adm' }) {
   const navItems = getNavItems(title, role);
   if (LAUNCH_TITLES.has(title)) content = renderLaunchTabs(title, role) + content;
@@ -2392,7 +2395,7 @@ function pageLayout({ title, content, notice = '', error = '', role = 'adm' }) {
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>${escapeHtml(title)} - AgilFac</title>
-    <link rel="stylesheet" href="/public/styles.css" />
+    <link rel="stylesheet" href="/public/styles.css?v=${ASSET_VERSION}" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <meta name="theme-color" content="#0f172a" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -2401,7 +2404,7 @@ function pageLayout({ title, content, notice = '', error = '', role = 'adm' }) {
     <link rel="apple-touch-icon" href="/public/icons/apple-touch-icon.png" />
     <script>if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));</script>
   </head>
-  <body class="app-body">
+  <body class="app-body" data-role="${escapeHtml(role)}">
     <div class="layout app-layout">
       <aside class="sidebar app-sidebar" id="app-sidebar">
         <div class="sidebar-head"><div class="sidebar-brand">AgilFac</div><button type="button" class="sidebar-pin" id="sidebar-mini" title="Recolher/expandir menu">⇤</button></div>
@@ -2449,6 +2452,7 @@ function pageLayout({ title, content, notice = '', error = '', role = 'adm' }) {
         document.addEventListener('click', e => { document.querySelectorAll('.notice-bell[open]').forEach(d => { if (!d.contains(e.target)) d.removeAttribute('open'); }); });
       })();
     </script>
+    <script src="/public/agil.js?v=${ASSET_VERSION}" defer></script>
   </body>
   </html>`;
 }
@@ -5396,7 +5400,7 @@ function handleCreateProduction(form, res) {
     message += ` Faltam ${remainingPieces} peça(s) para concluir a OP.`;
   }
 
-  db.prepare(`
+  const dailyIns = db.prepare(`
     INSERT INTO op_daily_productions (
       op_id, employee_id, production_date, produced_quantity, used_minutes_f21, normal_minutes, extra_minutes, produced_minutes,
       extra_time_id, extra_reason_snapshot, extra_description_snapshot, extra_effective_date_snapshot, extra_minutes_per_piece_snapshot,
@@ -5418,6 +5422,7 @@ function handleCreateProduction(form, res) {
     metrics.extraSnapshot.extra_minutes_per_piece_snapshot,
     resolveCountsForPrize(form, employee, productionDate)
   );
+  registerUndo(res, 'daily', { id: Number(dailyIns.lastInsertRowid), opId }, `${producedQuantity} peça(s) lançadas`);
 
   recalculateOpStatus(opId);
   redirectQuery.set('notice', message);
@@ -5428,7 +5433,8 @@ function handleOpenOccurrence(opId, form, res) {
   if (!form.description) {
     return redirect(res, `/ops/${opId}?error=${encodeURIComponent('Descreva a ocorrência.')}`);
   }
-  db.prepare('INSERT INTO op_occurrences (op_id, description) VALUES (?, ?)').run(opId, form.description.trim());
+  const occIns = db.prepare('INSERT INTO op_occurrences (op_id, description) VALUES (?, ?)').run(opId, form.description.trim());
+  registerUndo(res, 'occurrence_open', { id: Number(occIns.lastInsertRowid), opId }, 'ocorrência registrada');
   recalculateOpStatus(opId);
   redirect(res, `/ops/${opId}?notice=${encodeURIComponent('Ocorrência registrada. Status da OP alterado para amarelo, se ainda não estava concluída.')}`);
 }
@@ -5461,10 +5467,11 @@ function handleCreateOpProblemItem(opId, form, res) {
     return redirect(res, `/ops/${opId}?error=${encodeURIComponent(`Registro bloqueado: a OP ultrapassaria o limite em ${excess} peça(s).`)}`);
   }
 
-  db.prepare(`
+  const probIns = db.prepare(`
     INSERT INTO op_problem_items (op_id, problem_date, quantity, reason, notes)
     VALUES (?, ?, ?, ?, ?)
   `).run(opId, problemDate, quantity, reason, notes || null);
+  registerUndo(res, 'problem', { id: Number(probIns.lastInsertRowid), opId }, `${quantity} peça(s) com problema`);
 
   recalculateOpStatus(opId);
   redirect(res, `/ops/${opId}?notice=${encodeURIComponent('Peça com problema registrada com sucesso.')}`);
@@ -5719,6 +5726,121 @@ function renderBillingReconciliationPage(values = {}, error = '', result = null,
   return pageLayout({ title: 'Conciliação de cobrança', content, error, notice: result?.processed?.length ? `${result.processed.length} OP(s) marcadas como cobradas.` : '', role });
 }
 
+// ===================== DESFAZER (10 segundos) =====================
+// Cada ação registra como voltar atrás. O botão aparece por 10 s; o servidor aceita até 30 s, do mesmo usuário.
+const undoStore = new Map();
+function registerUndo(res, kind, data, label) {
+  const auth = getRequestAuth();
+  if (!auth?.user) return;
+  const token = crypto.randomBytes(9).toString('hex');
+  const now = Date.now();
+  for (const [k, v] of undoStore) if (now - v.at > 120000) undoStore.delete(k);
+  undoStore.set(token, { company: auth.company?.slug, user: auth.user.id, kind, data, label, at: now });
+  res._undo = token;
+}
+
+const UNDO_ACTIONS = {
+  hourly: d => { const r = db.prepare("UPDATE hourly_productions SET is_reversed = 1, reversed_at = CURRENT_TIMESTAMP, reversed_reason = 'Desfeito pelo usuário', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND is_reversed = 0 AND COALESCE(is_validated, 0) = 0").run(d.id); return { ok: r.changes > 0, opId: d.opId }; },
+  daily: d => { const r = db.prepare("UPDATE op_daily_productions SET is_reversed = 1, reversed_at = CURRENT_TIMESTAMP, reversed_reason = 'Desfeito pelo usuário' WHERE id = ? AND is_reversed = 0").run(d.id); return { ok: r.changes > 0, opId: d.opId }; },
+  occurrence_open: d => { const r = db.prepare('DELETE FROM op_occurrences WHERE id = ? AND is_concluded = 0').run(d.id); return { ok: r.changes > 0, opId: d.opId }; },
+  occurrence_conclude: d => { const r = db.prepare('UPDATE op_occurrences SET is_concluded = 0, concluded_at = NULL, conclusion_reason = NULL WHERE id = ? AND is_concluded = 1').run(d.id); return { ok: r.changes > 0, opId: d.opId }; },
+  problem: d => { const r = db.prepare('DELETE FROM op_problem_items WHERE id = ?').run(d.id); return { ok: r.changes > 0, opId: d.opId }; },
+  cell_send: d => { const r = db.prepare('DELETE FROM op_cell_transfers WHERE id = ? AND COALESCE(quantity_returned, 0) = 0').run(d.id); return { ok: r.changes > 0, opId: d.opId }; },
+  batch: d => {
+    let ok = false;
+    const ops = new Set();
+    for (const it of [...d.items].reverse()) { const r = UNDO_ACTIONS[it.kind](it.data); if (r.ok) { ok = true; ops.add(r.opId); } }
+    ops.forEach(id => recalculateOpStatus(id));
+    return { ok, opId: null };
+  },
+  cell_return: d => { const r = db.prepare('UPDATE op_cell_transfers SET quantity_returned = ?, returned_at = ?, return_notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND quantity_returned = ?').run(d.prev.quantity_returned, d.prev.returned_at, d.prev.return_notes, d.id, d.next); return { ok: r.changes > 0, opId: d.opId }; }
+};
+
+function handleUndo(form, res) {
+  const token = String(form.token || '');
+  const item = undoStore.get(token);
+  const auth = getRequestAuth();
+  if (!item || item.company !== auth?.company?.slug || item.user !== auth?.user?.id) return sendJson(res, { ok: false, message: 'Não dá mais para desfazer. Use Estornos.' }, 410);
+  if (Date.now() - item.at > 30000) { undoStore.delete(token); return sendJson(res, { ok: false, message: 'Tempo para desfazer acabou. Use Estornos.' }, 410); }
+  undoStore.delete(token);
+  let result;
+  try {
+    db.exec('BEGIN');
+    result = UNDO_ACTIONS[item.kind](item.data);
+    if (result.ok && result.opId) recalculateOpStatus(result.opId);
+    db.exec('COMMIT');
+  } catch (error) {
+    try { db.exec('ROLLBACK'); } catch {}
+    return sendJson(res, { ok: false, message: `Falha ao desfazer: ${error.message}` }, 500);
+  }
+  if (!result.ok) return sendJson(res, { ok: false, message: 'O registro já foi alterado e não pode ser desfeito aqui. Use Estornos.' }, 409);
+  try { logAuditEntry(item.kind, item.data.id, 'desfazer', `Desfeito em até 10 s: ${item.label}`, JSON.stringify(item.data)); } catch (_) {}
+  noticeCache.clear();
+  return sendJson(res, { ok: true, message: `Desfeito: ${item.label}` });
+}
+// ===============================================================
+
+// Ações em lote no quadro de OPs
+function handleOpBatch(form, res, role) {
+  kanbanBody(res, form);
+  const back = (msg, isError = false) => redirect(res, `/ops/0?${isError ? 'error' : 'notice'}=${encodeURIComponent(msg)}`);
+  if (!res._kanbanReturn) res._kanbanReturn = '/ops?view=quadro';
+  const ids = normalizeIds(form.op_ids).slice(0, 200);
+  const action = String(form.action || '');
+  if (!ids.length) return back('Selecione pelo menos uma OP.', true);
+  if (['cell_send', 'cell_return'].includes(action) && !userCanManageCells(role)) return back('Seu perfil não pode movimentar célula.', true);
+  const done = [], skipped = [], undo = [];
+  const cell = action === 'cell_send' ? db.prepare('SELECT * FROM sewing_cells WHERE id = ? AND is_active = 1').get(Number(form.cell_id)) : null;
+  if (action === 'cell_send' && !cell) return back('Selecione uma célula ativa.', true);
+  const text = String(form.text || '').trim().slice(0, 500);
+  if (['occurrence_open', 'occurrence_conclude'].includes(action) && !text) return back(action === 'occurrence_open' ? 'Descreva a ocorrência.' : 'Informe a justificativa.', true);
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(String(form.date || '')) ? form.date : today();
+  try {
+    db.exec('BEGIN');
+    for (const id of ids) {
+      const detail = getOpDetail(id);
+      if (!detail) continue;
+      const { op, openCellTransfers, cellBalance, occurrences } = detail;
+      const name = op.op_number;
+      if (op.shipped_at && action !== 'occurrence_conclude') { skipped.push(`${name} (embarcada)`); continue; }
+      if (action === 'cell_send') {
+        const free = Math.max(Number(op.remaining_quantity || 0) - Number(cellBalance.total_open || 0), 0);
+        if (free <= 0) { skipped.push(`${name} (sem saldo livre)`); continue; }
+        const r = db.prepare(`INSERT INTO op_cell_transfers (op_id, cell_id, quantity_sent, quantity_returned, sent_at, sent_notes, created_by_user_id, created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`).run(op.id, cell.id, free, date, 'Envio em lote pelo quadro');
+        undo.push({ kind: 'cell_send', data: { id: Number(r.lastInsertRowid), opId: op.id } });
+      } else if (action === 'cell_return') {
+        if (!openCellTransfers.length) { skipped.push(`${name} (nada em célula)`); continue; }
+        for (const t of openCellTransfers) {
+          const next = Number(t.quantity_sent || 0);
+          db.prepare('UPDATE op_cell_transfers SET quantity_returned = ?, returned_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(next, date, t.id);
+          undo.push({ kind: 'cell_return', data: { id: t.id, opId: op.id, next, prev: { quantity_returned: Number(t.quantity_returned || 0), returned_at: t.returned_at || null, return_notes: t.return_notes || null } } });
+        }
+      } else if (action === 'occurrence_open') {
+        const r = db.prepare('INSERT INTO op_occurrences (op_id, description) VALUES (?, ?)').run(op.id, text);
+        undo.push({ kind: 'occurrence_open', data: { id: Number(r.lastInsertRowid), opId: op.id } });
+      } else if (action === 'occurrence_conclude') {
+        const open = occurrences.filter(o => !o.is_concluded);
+        if (!open.length) { skipped.push(`${name} (sem ocorrência aberta)`); continue; }
+        for (const o of open) {
+          db.prepare('UPDATE op_occurrences SET is_concluded = 1, concluded_at = CURRENT_TIMESTAMP, conclusion_reason = ? WHERE id = ?').run(text, o.id);
+          undo.push({ kind: 'occurrence_conclude', data: { id: o.id, opId: op.id } });
+        }
+      } else { db.exec('ROLLBACK'); return back('Ação inválida.', true); }
+      recalculateOpStatus(op.id);
+      done.push(name);
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    try { db.exec('ROLLBACK'); } catch {}
+    return back(`Falha na ação em lote: ${error.message}`, true);
+  }
+  const labels = { cell_send: `enviada(s) para ${cell?.name || ''}`, cell_return: 'com retorno da célula', occurrence_open: 'com ocorrência aberta', occurrence_conclude: 'com ocorrência concluída' };
+  if (undo.length) registerUndo(res, 'batch', { id: 0, items: undo }, `${done.length} OP(s) ${labels[action]}`);
+  noticeCache.clear();
+  const msg = `${done.length} OP(s) ${labels[action]}.${skipped.length ? ` Não alteradas: ${skipped.join(', ')}.` : ''}`;
+  return back(msg, !done.length);
+}
+
 function handleConcludeOccurrence(opId, occurrenceId, form, res) {
   if (!form.conclusion_reason) {
     return redirect(res, `/ops/${opId}?error=${encodeURIComponent('Informe a justificativa de conclusão da ocorrência.')}`);
@@ -5730,6 +5852,7 @@ function handleConcludeOccurrence(opId, occurrenceId, form, res) {
         conclusion_reason = ?
     WHERE id = ? AND op_id = ?
   `).run(form.conclusion_reason.trim(), occurrenceId, opId);
+  registerUndo(res, 'occurrence_conclude', { id: occurrenceId, opId }, 'ocorrência concluída');
   recalculateOpStatus(opId);
   redirect(res, `/ops/${opId}?notice=${encodeURIComponent('Ocorrência concluída.')}`);
 }
@@ -9602,6 +9725,8 @@ function renderHourlyGridPage(query = {}, error = '', notice = '', role = getReq
     // Primeira hora sem OP: usa a última OP do dia (ou fica em branco)
     if (cells.length && !cells[0].op) cells[0].op = lastOp;
     const own = summary.find(s => s.emp.id === emp.id);
+    const idx = employees.findIndex(e => e.id === emp.id);
+    const nextEmp = employees[idx + 1] || null;
     return `
       <section class="panel grid-card" id="emp-${emp.id}">
         <div class="grid-card-head">
@@ -9609,7 +9734,7 @@ function renderHourlyGridPage(query = {}, error = '', notice = '', role = getReq
           <span class="hint">${escapeHtml(emp.work_schedule_id ? (getWorkSchedules().find(w => w.id === emp.work_schedule_id)?.name || '') : 'Sem jornada (07:00–16:48)')}</span>
           <span class="grid-head-pcts"><span>Até agora <strong class="${own.nowPct === null ? '' : pctClass(own.nowPct)}" data-now-pct>${own.nowPct === null ? '—' : `${fmtNum(own.nowPct, 1)}%`}</strong></span><span>Dia <strong class="${pctClass(own.pct)}" data-day-pct>${fmtNum(own.pct, 1)}%</strong></span></span>
         </div>
-        <form method="post" action="/productions/hourly/quadro" data-grid-form>
+        <form method="post" action="/productions/hourly/quadro" data-grid-form data-autosave>
           <input type="hidden" name="production_date" value="${escapeHtml(productionDate)}" />
           <input type="hidden" name="employee_id" value="${emp.id}" />
           <div class="table-wrap"><table class="hour-grid">
@@ -9623,7 +9748,7 @@ function renderHourlyGridPage(query = {}, error = '', notice = '', role = getReq
               <tr class="row-now"><th>Até agora</th><td colspan="${cells.length}" class="grid-now-note" data-now-note>${own.nowPct === null ? 'Sem horas lançadas' : `${fmtNum(own.minutes, 1)} min em ${own.elapsedBase} min lançados`}</td><td class="grid-total ${own.nowPct === null ? '' : pctClass(own.nowPct)}" data-total-now>${own.nowPct === null ? '—' : `${fmtNum(own.nowPct, 1)}%`}</td></tr>
             </tbody>
           </table></div>
-          <div class="actions grid-actions"><button class="btn" type="submit">Salvar ${escapeHtml(String(emp.full_name).split(' ')[0])}</button><a class="btn secondary" href="/productions/hourly/quadro?production_date=${encodeURIComponent(productionDate)}">Voltar à lista</a><span class="hint">0 = hora zero (informe o motivo). Apagar a quantidade remove a hora. Horas validadas ficam travadas.</span></div>
+          <div class="actions grid-actions">${nextEmp ? `<a class="btn" data-next-emp href="/productions/hourly/quadro?production_date=${encodeURIComponent(productionDate)}&employee_id=${nextEmp.id}">Próxima: ${escapeHtml(String(nextEmp.full_name).split(' ')[0])} →</a>` : ''}<a class="btn secondary" href="/productions/hourly/quadro?production_date=${encodeURIComponent(productionDate)}">Voltar à lista</a><button class="btn secondary" type="submit">Salvar tudo</button><span class="grid-save-status" data-save-status></span><span class="hint">Salva sozinho a cada hora (✓). 0 = hora zero (informe o motivo). Apagar a quantidade remove a hora. Horas validadas ficam travadas.</span></div>
         </form>
       </section>`;
   }).join('');
@@ -9725,7 +9850,7 @@ function renderHourlyGridPage(query = {}, error = '', notice = '', role = getReq
               e.preventDefault();
               if (q.value.trim() === '0') { const r = form.querySelector('[data-reason][data-slot="' + q.dataset.slot + '"]'); if (r) { r.hidden = false; r.focus(); return; } }
               const next = qtys.slice(i + 1).find(x => !x.disabled);
-              if (next) next.focus(); else form.querySelector('button[type=submit]').focus();
+              if (next) next.focus(); else (form.querySelector('[data-next-emp]') || form.querySelector('button[type=submit]')).focus();
             });
           });
           form.querySelectorAll('[data-reason]').forEach(r => r.addEventListener('keydown', e => {
@@ -9735,6 +9860,36 @@ function renderHourlyGridPage(query = {}, error = '', notice = '', role = getReq
             const next = qtys.slice(i + 1).find(x => !x.disabled);
             if (next) next.focus(); else form.querySelector('button[type=submit]').focus();
           }));
+          // Salvamento automático por hora
+          const statusEl = form.querySelector('[data-save-status]');
+          const saveSlot = async slot => {
+            const i = qtys.findIndex(q => q.dataset.slot === slot);
+            const q = qtys[i];
+            if (!q || q.disabled) return;
+            const reason = form.querySelector('[data-reason][data-slot="' + slot + '"]');
+            const v = q.value.trim();
+            if (v === '0' && !(reason && reason.value.trim())) return; // espera o motivo
+            if (q.dataset.saved === v + '|' + ops[i].value.trim() + '|' + (reason ? reason.value.trim() : '')) return;
+            const body = new URLSearchParams({ ajax: '1', production_date: form.production_date.value, employee_id: form.employee_id.value });
+            body.set('qty_' + slot, v); body.set('op_' + slot, ops[i].value.trim()); if (reason) body.set('reason_' + slot, reason.value.trim());
+            const td = q.parentElement;
+            td.classList.remove('is-saved', 'is-error'); td.classList.add('is-saving');
+            statusEl.textContent = 'Salvando…'; statusEl.className = 'grid-save-status';
+            try {
+              const r = await fetch(form.action, { method: 'POST', body, credentials: 'same-origin', headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+              if (r.redirected || !(r.headers.get('content-type') || '').includes('json')) throw new Error('Sessão expirada. Recarregue a página.');
+              const d = await r.json();
+              td.classList.remove('is-saving');
+              if (d.ok) { td.classList.add('is-saved'); td.title = 'Salvo'; q.dataset.saved = v + '|' + ops[i].value.trim() + '|' + (reason ? reason.value.trim() : ''); statusEl.textContent = '✓ ' + d.message; statusEl.className = 'grid-save-status ok'; }
+              else { td.classList.add('is-error'); td.title = d.message; statusEl.textContent = d.message; statusEl.className = 'grid-save-status err'; }
+            } catch (err) {
+              if (window.AgilOffline && navigator.onLine === false) { window.AgilOffline.queue(form.action, body.toString(), 'Quadro hora ' + slot); td.classList.remove('is-saving'); td.classList.add('is-queued'); statusEl.textContent = 'Sem internet: guardado para enviar.'; return; }
+              td.classList.remove('is-saving'); td.classList.add('is-error'); statusEl.textContent = err.message || 'Falha ao salvar.'; statusEl.className = 'grid-save-status err';
+            }
+          };
+          qtys.forEach((q, i) => { q.dataset.saved = q.value.trim() + '|' + ops[i].value.trim() + '|' + ((form.querySelector('[data-reason][data-slot="' + q.dataset.slot + '"]') || {}).value || '').trim(); q.addEventListener('change', () => saveSlot(q.dataset.slot)); });
+          ops.forEach((op, i) => op.addEventListener('change', () => { if (qtys[i].value.trim() !== '') saveSlot(qtys[i].dataset.slot); }));
+          form.querySelectorAll('[data-reason]').forEach(r => r.addEventListener('change', () => saveSlot(r.dataset.slot)));
           form.addEventListener('submit', e => {
             const missing = qtys.find(q => q.value.trim() === '0' && !form.querySelector('[data-reason][data-slot="' + q.dataset.slot + '"]').value.trim());
             if (missing) { e.preventDefault(); const r = form.querySelector('[data-reason][data-slot="' + missing.dataset.slot + '"]'); reasonRow.hidden = false; r.hidden = false; r.focus(); r.classList.add('is-invalid'); }
@@ -9752,7 +9907,10 @@ function handleSaveHourlyGrid(form, res, role) {
   const productionDate = String(form.production_date || '').trim();
   const employeeId = Number(form.employee_id || 0);
   // Sucesso volta para a lista (próxima costureira); erro volta para o quadro dela
-  const back = (msg, isError) => redirect(res, buildRedirectWithFlash(`/productions/hourly/quadro?production_date=${encodeURIComponent(productionDate)}${isError ? `&employee_id=${employeeId}` : ''}`, msg, isError));
+  const ajax = form.ajax === '1';
+  const back = (msg, isError) => ajax
+    ? sendJson(res, { ok: !isError, message: msg }, 200)
+    : redirect(res, buildRedirectWithFlash(`/productions/hourly/quadro?production_date=${encodeURIComponent(productionDate)}${isError ? `&employee_id=${employeeId}` : ''}`, msg, isError));
   const dateError = checkLaunchDate(productionDate, role);
   if (dateError) return back(dateError, true);
   const employee = db.prepare('SELECT * FROM employees WHERE id = ?').get(employeeId);
@@ -10827,8 +10985,9 @@ function handleSendOpToCell(opId, form, res, role) {
     return redirect(res, `/ops/${opId}?error=${encodeURIComponent(`Quantidade acima do saldo disponível. Restam ${availableToSend} peça(s) liberadas para novo envio.`)}`);
   }
 
-  db.prepare(`INSERT INTO op_cell_transfers (op_id, cell_id, quantity_sent, quantity_returned, sent_at, sent_notes, created_by_user_id, created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`).run(Number(opId), Number(form.cell_id), quantityToSend, form.sent_at || today(), String(form.sent_notes || '').trim() || null);
+  const cellIns = db.prepare(`INSERT INTO op_cell_transfers (op_id, cell_id, quantity_sent, quantity_returned, sent_at, sent_notes, created_by_user_id, created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`).run(Number(opId), Number(form.cell_id), quantityToSend, form.sent_at || today(), String(form.sent_notes || '').trim() || null);
   recalculateOpStatus(opId);
+  registerUndo(res, 'cell_send', { id: Number(cellIns.lastInsertRowid), opId: Number(opId) }, `envio para ${cell.name}`);
   redirect(res, `/ops/${opId}?notice=${encodeURIComponent(`${quantityToSend} peça(s) enviadas para a célula ${cell.name}.`)}`);
 }
 
@@ -10863,6 +11022,7 @@ function handleReturnOpFromCell(opId, form, res, role) {
         updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `).run(nextReturned, fullyReturned ? 1 : 0, form.returned_at || today(), mergedNotes, active.id);
+  registerUndo(res, 'cell_return', { id: active.id, opId: Number(opId), next: nextReturned, prev: { quantity_returned: Number(active.quantity_returned || 0), returned_at: active.returned_at || null, return_notes: active.return_notes || null } }, `retorno da ${active.cell_name}`);
   recalculateOpStatus(opId);
   redirect(res, `/ops/${opId}?notice=${encodeURIComponent(`Retorno de ${returnQuantity} peça(s) da célula ${active.cell_name} registrado.`)}`);
 }
@@ -11527,7 +11687,7 @@ function handleCreateHourlyProduction(form, res) {
   }
 
   const metrics = calculateProductionLaunchMetrics(op, producedQuantity, round3(Number(op.minutes_f21 || 0)), productionDate);
-  db.prepare(`
+  const hourlyIns = db.prepare(`
     INSERT INTO hourly_productions (
       op_id, employee_id, production_date, hour_slot, produced_quantity, used_minutes_f21,
       normal_minutes, extra_minutes, produced_minutes, extra_time_id,
@@ -11552,6 +11712,7 @@ function handleCreateHourlyProduction(form, res) {
     notes,
     resolveCountsForPrize(form, employee, productionDate, hourSlot)
   );
+  registerUndo(res, 'hourly', { id: Number(hourlyIns.lastInsertRowid), opId: op.id }, `hora ${hourSlot} de ${String(employee.full_name).split(' ')[0]}`);
 
   redirectQuery.set('notice', `Lançamento da hora ${hourSlot} salvo para ${employee.full_name}.`);
   redirect(res, `/productions/hourly?${redirectQuery.toString()}`);
@@ -12220,7 +12381,7 @@ function kanbanBody(res, body) {
   const target = String(body?.return_to || '');
   if (/^\/ops\?[^\s]*$/.test(target) && !target.includes('//')) {
     const u = new URL(target, 'http://x');
-    u.searchParams.delete('notice'); u.searchParams.delete('error');
+    ['notice', 'error', 'undo'].forEach(k => u.searchParams.delete(k));
     res._kanbanReturn = `${u.pathname}?${u.searchParams.toString()}`;
   }
   return body;
@@ -12329,9 +12490,24 @@ function renderOpKanban(rows) {
     <button class="btn" type="submit">Localizar</button>
     <span class="kb-find-msg" id="kb-find-msg"></span>
   </form>
-  <p class="hint kb-help">Arraste a OP para outra coluna, toque em ⇄ ou digite o número acima para registrar a movimentação.</p>
+  <div class="kb-tools"><p class="hint kb-help">Arraste a OP para outra coluna, toque em ⇄ ou digite o número acima. Para várias de uma vez, use <b>Selecionar</b>.</p><button type="button" class="btn secondary" id="kb-select-toggle">☑ Selecionar</button></div>
   <div class="kanban">${cols}</div>
   <div class="kb-menu" id="kb-menu" hidden><strong class="kb-menu-title"></strong>${opts}</div>
+  <div class="kb-batch" id="kb-batch" hidden>
+    <strong><span id="kb-batch-count">0</span> OP(s)</strong>
+    <button type="button" data-batch="cell_send">🧵 Enviar p/ célula</button>
+    <button type="button" data-batch="cell_return">↩ Retornar da célula</button>
+    <button type="button" data-batch="occurrence_open">⚠ Abrir ocorrência</button>
+    <button type="button" data-batch="occurrence_conclude">✔ Concluir ocorrências</button>
+    <button type="button" data-batch="ship">🚚 Embarcar</button>
+    <button type="button" data-batch="clear" class="kb-batch-clear">Limpar</button>
+  </div>
+  <template id="kb-batch-forms">
+    <section data-form="cell_send"><label>Célula<select name="cell_id" required><option value="">Selecione</option>${getCellList().map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('')}</select></label><label>Data de envio<input type="date" name="date" value="${today()}" required /></label><p class="hint">Cada OP vai com todo o saldo livre.</p></section>
+    <section data-form="cell_return"><label>Data do retorno<input type="date" name="date" value="${today()}" required /></label><p class="hint">Retorna tudo o que está aberto em célula de cada OP.</p></section>
+    <section data-form="occurrence_open"><label class="full">Descreva a ocorrência<textarea name="text" rows="3" required></textarea></label></section>
+    <section data-form="occurrence_conclude"><label class="full">Justificativa de conclusão<input name="text" required /></label><p class="hint">Conclui todas as ocorrências abertas das OPs selecionadas.</p></section>
+  </template>
   <dialog class="mv-dialog" id="mv-dialog"><div id="mv-content"><p class="hint">Carregando…</p></div></dialog>
   <script>
   (() => {
@@ -12351,6 +12527,57 @@ function renderOpKanban(rows) {
       } catch (e) { box.innerHTML = '<p style="padding:16px">Falha ao carregar. Tente de novo.</p>'; }
     }
     dlg.addEventListener('click', e => { if (e.target === dlg || e.target.closest('[data-mv-close]')) dlg.close(); });
+    // Seleção para ações em lote
+    const selected = new Set();
+    const bar = document.getElementById('kb-batch');
+    const toggleBtn = document.getElementById('kb-select-toggle');
+    const paintSel = () => {
+      document.getElementById('kb-batch-count').textContent = selected.size;
+      bar.hidden = !document.body.classList.contains('kb-selecting');
+      document.querySelectorAll('.kb-card').forEach(c => c.classList.toggle('is-selected', selected.has(c.dataset.op)));
+    };
+    toggleBtn.addEventListener('click', () => {
+      const on = document.body.classList.toggle('kb-selecting');
+      toggleBtn.textContent = on ? '✕ Sair da seleção' : '☑ Selecionar';
+      if (!on) selected.clear();
+      paintSel();
+    });
+    document.querySelectorAll('.kb-col header').forEach(h => h.addEventListener('click', () => {
+      if (!document.body.classList.contains('kb-selecting')) return;
+      const cards = [...h.closest('.kb-col').querySelectorAll('.kb-card')].map(c => c.dataset.op);
+      const all = cards.every(id => selected.has(id));
+      cards.forEach(id => all ? selected.delete(id) : selected.add(id));
+      paintSel();
+    }));
+    document.addEventListener('click', e => {
+      if (!document.body.classList.contains('kb-selecting')) return;
+      const card = e.target.closest('.kb-card');
+      if (!card || e.target.closest('[data-kb-move]')) return;
+      e.preventDefault();
+      selected.has(card.dataset.op) ? selected.delete(card.dataset.op) : selected.add(card.dataset.op);
+      paintSel();
+    }, true);
+    const titles = { cell_send: 'Enviar para célula', cell_return: 'Retornar da célula', occurrence_open: 'Abrir ocorrência', occurrence_conclude: 'Concluir ocorrências' };
+    bar.addEventListener('click', e => {
+      const b = e.target.closest('[data-batch]');
+      if (!b) return;
+      const act = b.dataset.batch;
+      if (act === 'clear') { selected.clear(); return paintSel(); }
+      if (!selected.size) return;
+      if (act === 'ship') {
+        const blue = [...selected].filter(id => document.querySelector('.kb-card[data-op="' + id + '"]')?.dataset.status === 'azul');
+        if (!blue.length) { box.innerHTML = '<header class="mv-head"><strong>Embarcar</strong><button type="button" class="mv-close" data-mv-close>✕</button></header><div class="mv-body"><p class="mv-info">Nenhuma OP Finalizada na seleção. Só OPs da coluna Finalizada podem ser embarcadas.</p></div>'; return dlg.showModal(); }
+        location.href = '/shipments/new?' + blue.map(id => 'op_ids=' + id).join('&');
+        return;
+      }
+      const tpl = document.getElementById('kb-batch-forms').content.querySelector('[data-form="' + act + '"]');
+      const nums = [...selected].map(id => document.querySelector('.kb-card[data-op="' + id + '"]')?.dataset.num).filter(Boolean);
+      box.innerHTML = '<header class="mv-head"><div><strong>' + titles[act] + '</strong><br><span class="hint">' + selected.size + ' OP(s): ' + nums.slice(0, 12).join(', ') + (nums.length > 12 ? '…' : '') + '</span></div><button type="button" class="mv-close" data-mv-close>✕</button></header>'
+        + '<div class="mv-body"><form method="post" action="/ops/lote" class="stack-form"><input type="hidden" name="action" value="' + act + '" /><input type="hidden" name="return_to" value="' + back.replace(/"/g, '&quot;') + '" />'
+        + [...selected].map(id => '<input type="hidden" name="op_ids" value="' + id + '" />').join('') + tpl.innerHTML + '<button class="btn" type="submit">Confirmar para ' + selected.size + ' OP(s)</button></form></div>';
+      dlg.showModal();
+      box.querySelector('select, textarea, input:not([type=hidden])')?.focus();
+    });
     document.querySelectorAll('.kb-card[draggable=true]').forEach(card => {
       card.addEventListener('dragstart', e => { e.dataTransfer.setData('text/plain', card.dataset.op + '|' + card.dataset.status); e.dataTransfer.effectAllowed = 'move'; card.classList.add('is-dragging'); document.body.classList.add('kb-dragging'); });
       card.addEventListener('dragend', () => { card.classList.remove('is-dragging'); document.body.classList.remove('kb-dragging'); document.querySelectorAll('.kb-col.is-over').forEach(c => c.classList.remove('is-over')); });
@@ -13771,6 +13998,7 @@ const server = http.createServer(async (req, res) => {
 
       if (req.method === 'GET' && pathname === '/buscar') return handleGlobalSearch(query, res, role);
       if (req.method === 'GET' && pathname === '/tv') return sendTvHtml(res, renderTvPage());
+      if (req.method === 'POST' && pathname === '/desfazer') return handleUndo(await parseBody(req), res);
       if (req.method === 'GET' && pathname === '/api/op-preview') {
         const preview = getOpQuickPreview(query.op_number || '');
         return sendJson(res, preview ? { found: true, ...preview } : { found: false }, preview ? 200 : 404);
@@ -13994,6 +14222,7 @@ const server = http.createServer(async (req, res) => {
         const exact = found.filter(o => o.op_number === n);
         return sendJson(res, exact.length === 1 ? exact : found);
       }
+      if (req.method === 'POST' && pathname === '/ops/lote') return handleOpBatch(await parseBody(req), res, role);
       const opMoveMatch = pathname.match(/^\/ops\/(\d+)\/mover$/);
       if (req.method === 'GET' && opMoveMatch) {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
