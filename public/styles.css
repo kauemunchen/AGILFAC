@@ -609,3 +609,12 @@ body.kb-selecting .kb-col header::after { content:'tudo'; font-size:11px; color:
 .kb-batch button:hover { background:#334155; }
 .kb-batch .kb-batch-clear { margin-left:auto; background:none; color:#94a3b8; }
 @media (max-width: 900px) { .kb-batch { bottom:76px; } }
+.op-timeline h3 { margin-top:0; }
+.timeline { list-style:none; margin:0; padding:0 0 0 6px; border-left:2px solid #e2e8f0; }
+.timeline li { display:flex; gap:10px; padding:7px 0 7px 10px; position:relative; }
+.tl-icon { width:26px; flex:none; text-align:center; }
+.tl-when { display:block; font-size:12px; color:#64748b; }
+.tl-text { font-size:14px; }
+.timeline li.is-occ .tl-text { color:#92400e; } .timeline li.is-ship .tl-text { color:#991b1b; font-weight:600; }
+.tl-due { margin:0 0 8px; }
+.op-timeline details summary { cursor:pointer; color:#1f4fd1; font-weight:600; margin-top:6px; }

@@ -663,6 +663,7 @@ function migrateDatabase(tenantDb = db) {
   ensureColumn(tenantDb, 'employees', 'birth_date', 'TEXT');
   ensureColumn(tenantDb, 'employees', 'job_role', 'TEXT');
   ensureColumn(tenantDb, 'employees', 'phone', 'TEXT');
+  ensureColumn(tenantDb, 'employees', 'panel_token', 'TEXT');
   ensureColumn(tenantDb, 'employees', 'target_percent', 'REAL');
   ensureColumn(tenantDb, 'ops', 'collection_name', 'TEXT');
   ensureColumn(tenantDb, 'ops', 'delivery_date', 'TEXT');
@@ -4741,6 +4742,121 @@ function getEmployeeResultContext(employees) {
   return { range, cutoff, counted };
 }
 
+// ===================== PAINEL PESSOAL DA COSTUREIRA =====================
+// Link individual (sem login) com o resultado só dela: hoje hora a hora e o período. Sem ranking.
+function getEmployeePanelLink(employee, create = true) {
+  let token = employee.panel_token;
+  if (!token && create) {
+    token = crypto.randomBytes(16).toString('hex');
+    db.prepare('UPDATE employees SET panel_token = ? WHERE id = ?').run(token, employee.id);
+    employee.panel_token = token;
+  }
+  if (!token) return '';
+  const slug = String(getRequestAuth()?.company?.slug || '').toLowerCase();
+  return `${APP_BASE_URL}/eu/${slug}/${token}`;
+}
+
+function renderEmployeePanel(emp) {
+  const day = today();
+  const base = baseMinutesDay();
+  const targetPct = employeeTargetPercent(emp);
+  const goalMin = base * targetPct / 100;
+  const rows = db.prepare('SELECT hour_slot, produced_quantity, produced_minutes FROM hourly_productions WHERE employee_id = ? AND production_date = ? AND is_reversed = 0').all(emp.id, day);
+  const zeros = db.prepare('SELECT hour_slot, reason FROM hourly_zero_hours WHERE employee_id = ? AND production_date = ? AND is_reversed = 0').all(emp.id, day);
+  const blocks = getEmployeeHourBlocks(emp);
+  const nowMin = Number(BUSINESS_HOUR_FMT.format(new Date())) * 60 + new Date().getMinutes();
+  let minutes = 0, pieces = 0, elapsed = 0;
+  const hours = blocks.map(b => {
+    const own = rows.filter(r => r.hour_slot === b.slot);
+    const z = zeros.find(x => x.hour_slot === b.slot);
+    const m = own.reduce((a, r) => a + Number(r.produced_minutes || 0), 0);
+    const pc = own.reduce((a, r) => a + Number(r.produced_quantity || 0), 0);
+    const launched = own.length > 0 || Boolean(z);
+    if (launched) elapsed += b.minutes;
+    minutes += m; pieces += pc;
+    return { b, m, pc, z, launched, pct: launched ? (m / b.minutes) * 100 : null, current: timeToMinutes(b.slot) <= nowMin && nowMin < timeToMinutes(b.label) };
+  });
+  const dayPct = base > 0 ? (minutes / base) * 100 : 0;
+  const nowPct = elapsed > 0 ? (minutes / elapsed) * 100 : null;
+  const gap = Math.max(0, goalMin - minutes);
+  const progress = goalMin > 0 ? Math.min(100, (minutes / goalMin) * 100) : 0;
+  let period = null;
+  try {
+    const ctx = getEmployeeResultContext([emp]);
+    const pm = round2(ctx.counted.get(emp.id)?.minutes || 0);
+    const eff = calculateEmployeeEfficiency(emp, pm, ctx.range.start, ctx.range.end, ctx.cutoff);
+    if (eff.business_days) period = { ...ctx, minutes: pm, pct: Number(eff.efficiency_percent || 0), target: round2(eff.available_minutes * targetPct / 100) };
+  } catch (_) { period = null; }
+  const cls = p => p === null ? '' : (p >= targetPct ? 'good' : (p >= 40 ? 'mid' : 'bad'));
+  const first = String(emp.full_name || '').trim().split(/\s+/)[0] || '';
+  const name = first.charAt(0).toUpperCase() + first.slice(1).toLowerCase();
+  const pct = p => p === null ? '—' : `${fmtNum(p, 1)}%`;
+  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta http-equiv="refresh" content="120" /><meta name="robots" content="noindex" /><meta name="theme-color" content="#0f172a" />
+<title>Meu resultado · ${escapeHtml(name)}</title>
+<style>
+  :root { --bg:#f1f5f9; --card:#fff; --text:#0f172a; --muted:#64748b; --good:#16a34a; --mid:#d97706; --bad:#dc2626; --line:#e2e8f0; }
+  * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; padding:16px 16px 32px; max-width:520px; margin:0 auto; }
+  h1 { font-size:22px; margin:4px 0 2px; } .sub { color:var(--muted); font-size:14px; margin:0 0 14px; }
+  .card { background:var(--card); border-radius:16px; padding:16px; margin-bottom:12px; box-shadow:0 1px 3px rgba(15,23,42,.06); }
+  .big { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .k span { display:block; font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
+  .k strong { display:block; font-size:38px; line-height:1.1; font-variant-numeric:tabular-nums; }
+  .k small { display:block; }
+  .k small { color:var(--muted); font-size:13px; }
+  .good { color:var(--good); } .mid { color:var(--mid); } .bad { color:var(--bad); }
+  .bar { height:14px; background:#e2e8f0; border-radius:99px; overflow:hidden; margin:10px 0 6px; } .bar div { height:100%; background:linear-gradient(90deg,#3b82f6,#16a34a); }
+  .msg { font-size:15px; font-weight:600; margin:0; }
+  table { width:100%; border-collapse:collapse; font-size:15px; } td, th { padding:9px 4px; border-bottom:1px solid var(--line); text-align:right; } th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; } td:first-child, th:first-child { text-align:left; }
+  tr.now td { background:#eff6ff; font-weight:700; } tr.future td { color:#cbd5e1; }
+  h2 { font-size:14px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; margin:0 0 10px; }
+  footer { color:var(--muted); font-size:12px; text-align:center; margin-top:8px; }
+</style></head><body>
+  <h1>Olá, ${escapeHtml(name)}! 👋</h1>
+  <p class="sub">Seu resultado de hoje · ${escapeHtml(formatDatePtBr(day))}</p>
+  <section class="card">
+    <div class="big">
+      <div class="k"><span>Hoje até agora</span><strong class="${cls(nowPct)}">${pct(nowPct)}</strong><small>${fmtNum(minutes, 0)} min em ${fmtNum(elapsed, 0)} lançados</small></div>
+      <div class="k"><span>Resultado do dia</span><strong class="${cls(dayPct)}">${pct(dayPct)}</strong><small>${fmtNum(pieces, 0)} peças</small></div>
+    </div>
+    <div class="bar"><div style="width:${progress.toFixed(1)}%"></div></div>
+    <p class="msg">${gap > 0 ? `Faltam ${fmtNum(gap, 0)} min para a meta do dia (${fmtNum(goalMin, 0)} min = ${fmtPct(targetPct)}%).` : `Meta do dia batida! 🎉 (${fmtNum(goalMin, 0)} min)`}</p>
+  </section>
+  <section class="card">
+    <h2>Hora a hora</h2>
+    <table><thead><tr><th>Hora</th><th>Peças</th><th>Min</th><th>%</th></tr></thead><tbody>
+      ${hours.map(h => `<tr class="${h.current ? 'now' : ''}${!h.launched && timeToMinutes(h.b.label) > nowMin && !h.current ? ' future' : ''}"><td>${escapeHtml(h.b.from)}–${escapeHtml(h.b.label)}</td><td>${h.launched ? (h.z && !h.pc ? '0' : fmtNum(h.pc, 0)) : '—'}</td><td>${h.launched ? fmtNum(h.m, 0) : '—'}</td><td class="${cls(h.pct)}">${h.z && !h.pc ? `<small>${escapeHtml(h.z.reason)}</small>` : pct(h.pct)}</td></tr>`).join('')}
+    </tbody></table>
+  </section>
+  ${period ? `<section class="card">
+    <h2>Período · ${escapeHtml(formatDatePtBr(period.range.start))} a ${escapeHtml(formatDatePtBr(period.cutoff))}</h2>
+    <div class="big">
+      <div class="k"><span>Eficiência</span><strong class="${cls(period.pct)}">${pct(period.pct)}</strong><small>meta ${fmtPct(targetPct)}%</small></div>
+      <div class="k"><span>Minutos</span><strong>${fmtNum(period.minutes, 0)}</strong><small>${period.minutes >= period.target ? 'meta do período atingida ✅' : `faltam ${fmtNum(period.target - period.minutes, 0)} min`}</small></div>
+    </div>
+  </section>` : ''}
+  <footer>Atualiza sozinho a cada 2 minutos · ${escapeHtml(getCompanyName() || 'AgilFac')}</footer>
+</body></html>`;
+}
+
+function handleEmployeePanel(res, pathname) {
+  const m = pathname.match(/^\/eu\/([a-z0-9-]+)\/([a-f0-9]{32})\/?$/i);
+  const deny = () => { res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('Link inválido. Peça um novo link para a gestão.'); };
+  if (!m) return deny();
+  const company = masterDb.prepare('SELECT * FROM companies WHERE LOWER(slug) = ? AND is_active = 1').get(m[1].toLowerCase());
+  if (!company) return deny();
+  let tenantDb;
+  try { tenantDb = getTenantDbForCompany(company); } catch (_) { return deny(); }
+  return requestContext.run({ tenantDb, auth: { company, user: null, role: 'painel' } }, () => {
+    const emp = db.prepare('SELECT * FROM employees WHERE panel_token = ?').get(m[2].toLowerCase());
+    if (!emp || emp.termination_date) return deny();
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex', 'Referrer-Policy': 'no-referrer' });
+    return res.end(renderEmployeePanel(emp));
+  });
+}
+// ===============================================================
+
 function buildEmployeeResultMessage(employee, context) {
   const { range, cutoff, counted } = context;
   const minutes = round2(counted.get(employee.id)?.minutes || 0);
@@ -4762,6 +4878,7 @@ function buildEmployeeResultMessage(employee, context) {
     '',
     `Lembrando: a sua meta por dia é de ${fmtNum(round2(baseMinutesDay() * targetPct / 100), Number.isInteger(round2(baseMinutesDay() * targetPct / 100)) ? 0 : 1)} minutos para ${fmtPct(targetPct)}%.`
   ];
+  try { const link = getEmployeePanelLink(employee); if (link) lines.push('', `Acompanhe seu resultado de hoje, hora a hora: ${link}`); } catch (_) {}
   return lines.join('\n');
 }
 
@@ -11425,7 +11542,7 @@ function renderEmployeeList(query = {}, values = {}, error = '', role = 'adm') {
               </tr>`;
             }
             const status = describeEmployeeStatus(emp);
-            return `<tr class="${status === 'Ativo' ? 'is-active' : 'is-inactive'}"><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td>${renderWhatsAppLink(emp.phone, status === 'Ativo' ? buildEmployeeResultMessage(emp, resultContext) : '')}</td><td>${escapeHtml(nowPt(emp.birth_date))}</td><td>${escapeHtml(nowPt(emp.start_date))}</td><td>${escapeHtml(nowPt(emp.termination_date))}</td><td><span class="status-tag ${status === 'Ativo' ? 'ok' : 'off'}">${escapeHtml(status)}</span></td><td>${escapeHtml(emp.job_role || '-')}</td><td>${escapeHtml(scheduleNames.get(emp.work_schedule_id) || 'Sem jornada')}</td><td title="Meta por dia: ${fmtNum(round2(baseMinutesDay() * employeeTargetRatio(emp)), 1)} min">${Number(emp.target_percent) > 0 ? `<strong>${fmtPct(emp.target_percent)}%</strong>` : `${tp()}% <small class="hint">padrão</small>`}</td><td>${escapeHtml(emp.notes || '-')}</td><td><a href="/employees?edit=${emp.id}">Editar</a></td></tr>`;
+            return `<tr class="${status === 'Ativo' ? 'is-active' : 'is-inactive'}"><td>${escapeHtml(emp.registration_code)}</td><td>${escapeHtml(emp.full_name)}</td><td>${renderWhatsAppLink(emp.phone, status === 'Ativo' ? buildEmployeeResultMessage(emp, resultContext) : '')}</td><td>${escapeHtml(nowPt(emp.birth_date))}</td><td>${escapeHtml(nowPt(emp.start_date))}</td><td>${escapeHtml(nowPt(emp.termination_date))}</td><td><span class="status-tag ${status === 'Ativo' ? 'ok' : 'off'}">${escapeHtml(status)}</span></td><td>${escapeHtml(emp.job_role || '-')}</td><td>${escapeHtml(scheduleNames.get(emp.work_schedule_id) || 'Sem jornada')}</td><td title="Meta por dia: ${fmtNum(round2(baseMinutesDay() * employeeTargetRatio(emp)), 1)} min">${Number(emp.target_percent) > 0 ? `<strong>${fmtPct(emp.target_percent)}%</strong>` : `${tp()}% <small class="hint">padrão</small>`}</td><td>${escapeHtml(emp.notes || '-')}</td><td><a href="/employees?edit=${emp.id}">Editar</a>${status === 'Ativo' ? ` · <a href="/employees/${emp.id}/painel">📱 Painel</a>` : ''}</td></tr>`;
           }).join('') || '<tr><td colspan="12">Nenhum colaborador cadastrado.</td></tr>'}
           ${PHONE_MASK_SCRIPT}
         </tbody>
@@ -12752,6 +12869,47 @@ function renderOpListPage(query = {}, role = 'adm') {
   return pageLayout({ title: 'OPs', content, notice: query.notice || '', error: query.error || '', role });
 }
 
+// Linha do tempo da OP: todos os eventos em ordem, do mais recente para o mais antigo
+function renderOpTimeline(detail) {
+  const { op, history, occurrences, problemHistory, shipmentHistory, extraTimes, billingHistory, cellTransfers } = detail;
+  const ev = [];
+  const key = v => { const t = String(v || ''); return /^\d{4}-\d{2}-\d{2}$/.test(t) ? `${t} 12:00:00` : t.replace('T', ' '); };
+  const add = (when, icon, text, cls = '') => { if (when) ev.push({ when, k: key(when), icon, text, cls }); };
+  add(op.created_at || op.entry_date, '📥', `OP cadastrada · ${fmtNum(op.total_pieces, 0)} peças`);
+  const byDay = new Map();
+  history.forEach(h => { const d = byDay.get(h.production_date) || { q: 0, names: new Set() }; d.q += Number(h.produced_quantity || 0); d.names.add(String(h.full_name || '').split(' ')[0]); byDay.set(h.production_date, d); });
+  try {
+    db.prepare('SELECT h.production_date, h.produced_quantity, e.full_name FROM hourly_productions h JOIN employees e ON e.id = h.employee_id WHERE h.op_id = ? AND h.is_reversed = 0 AND h.validated_daily_production_id IS NULL').all(op.id)
+      .forEach(h => { const d = byDay.get(h.production_date) || { q: 0, names: new Set() }; d.q += Number(h.produced_quantity || 0); d.names.add(String(h.full_name || '').split(' ')[0]); byDay.set(h.production_date, d); });
+  } catch (_) {}
+  byDay.forEach((d, day) => add(day, '🧵', `Produção: ${fmtNum(d.q, 0)} peça(s) · ${[...d.names].slice(0, 6).map(escapeHtml).join(', ')}${d.names.size > 6 ? '…' : ''}`));
+  cellTransfers.forEach(t => {
+    add(t.sent_at, '➡️', `Enviada para ${escapeHtml(t.cell_name)} · ${fmtNum(t.quantity_sent, 0)} pç`, 'is-cell');
+    if (Number(t.quantity_returned || 0) > 0) add(t.returned_at || t.updated_at, '↩️', `Retorno de ${escapeHtml(t.cell_name)} · ${fmtNum(t.quantity_returned, 0)} pç`, 'is-cell');
+  });
+  occurrences.forEach(o => {
+    add(o.opened_at, '⚠️', `Ocorrência: ${escapeHtml(o.description)}`, 'is-occ');
+    if (o.is_concluded) add(o.concluded_at, '✅', `Ocorrência concluída: ${escapeHtml(o.conclusion_reason || '-')}`);
+  });
+  problemHistory.forEach(p => add(p.created_at || p.problem_date, '🩹', `${fmtNum(p.quantity, 0)} peça(s) com problema · ${escapeHtml(p.reason || '')}`));
+  extraTimes.forEach(x => add(x.effective_date, '⏱️', `Tempo extra +${fmtNum(Number(x.extra_minutes_per_piece || 0), 3)} min/pç · ${escapeHtml(x.reason || '')}`));
+  shipmentHistory.forEach(sh => add(sh.shipment_date, '🚚', `Embarcada · embarque <a href="/shipments/${sh.shipment_id}">${escapeHtml(sh.shipment_number)}</a>`, 'is-ship'));
+  billingHistory.forEach(b => add(b.billed_at, '💵', `Cobrada${b.batch_reference ? ` · lote ${escapeHtml(b.batch_reference)}` : ''}`));
+  try {
+    db.prepare("SELECT action_type, reason, created_at FROM reversal_audit_log WHERE target_type IN ('op') AND target_id = ?").all(op.id)
+      .forEach(a => add(a.created_at, '🛠️', `${escapeHtml(a.action_type)}: ${escapeHtml(a.reason || '')}`));
+  } catch (_) {}
+  ev.sort((a, b) => b.k.localeCompare(a.k));
+  const item = e => `<li class="${e.cls}"><span class="tl-icon">${e.icon}</span><div><span class="tl-when">${escapeHtml(nowPt(e.when))}</span><span class="tl-text">${e.text}</span></div></li>`;
+  const head = ev.slice(0, 8), rest = ev.slice(8);
+  const due = op.delivery_date && !op.shipped_at ? `<p class="tl-due">📅 Entrega prevista: ${deliveryBadge(op)}</p>` : '';
+  return `<section class="panel op-timeline">
+    <h3>🕒 Linha do tempo</h3>${due}
+    <ol class="timeline">${head.map(item).join('') || '<li><div>Sem eventos.</div></li>'}</ol>
+    ${rest.length ? `<details><summary>Ver mais ${rest.length} evento(s)</summary><ol class="timeline">${rest.map(item).join('')}</ol></details>` : ''}
+  </section>`;
+}
+
 function renderOpDetailPage(id, query = {}, role = 'adm') {
   const detail = getOpDetail(Number(id));
   if (!detail) return pageLayout({ title: 'OP não encontrada', content: '<section class="panel"><p>OP não encontrada.</p></section>', error: 'Registro não localizado.', role });
@@ -12770,6 +12928,7 @@ function renderOpDetailPage(id, query = {}, role = 'adm') {
     </section>
 
 
+    ${renderOpTimeline(detail)}
     <div class="two-columns">
       <section class="panel">
         <h3>Dados da OP</h3>
@@ -13948,6 +14107,7 @@ const server = http.createServer(async (req, res) => {
     if (pathname.startsWith('/public/')) return serveStatic(pathname, res);
     if (pathname === '/api/v1' || pathname.startsWith('/api/v1/')) return handleReadApi(req, res, pathname, query);
     if (req.method === 'GET' && pathname.startsWith('/tv/') && pathname.length > 4) return handlePublicTv(req, res, pathname, query);
+    if (req.method === 'GET' && pathname.startsWith('/eu/')) return handleEmployeePanel(res, pathname);
     // T1.6 — app instalável (PWA): manifest e service worker na raiz para valer em todo o site
     if (req.method === 'GET' && pathname === '/manifest.webmanifest') return serveStatic('/public/manifest.webmanifest', res);
     if (req.method === 'GET' && pathname === '/sw.js') {
@@ -14102,6 +14262,28 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && opDeliveryMatch) return handleUpdateOpDeliveryDate(Number(opDeliveryMatch[1]), await parseBody(req), res, role);
 
       const employeeUpdateMatch = pathname.match(/^\/employees\/(\d+)$/);
+      const panelMatch = pathname.match(/^\/employees\/(\d+)\/painel$/);
+      if (panelMatch && ['GET', 'POST'].includes(req.method)) {
+        if (!isAdminRole(role) && role !== 'operacional') return requireAdmin(req, res, role);
+        const emp = db.prepare('SELECT * FROM employees WHERE id = ?').get(Number(panelMatch[1]));
+        if (!emp) return redirect(res, '/employees');
+        if (req.method === 'POST') { db.prepare('UPDATE employees SET panel_token = NULL WHERE id = ?').run(emp.id); emp.panel_token = null; }
+        const link = getEmployeePanelLink(emp);
+        const msg = `Olá, ${String(emp.full_name).split(' ')[0]}! Este é o seu link para acompanhar seu resultado de hoje, hora a hora: ${link}`;
+        const phone = String(emp.phone || '').replace(/\D/g, '');
+        return sendHtml(res, pageLayout({ title: 'Painel da colaboradora', role, notice: req.method === 'POST' ? 'Novo link gerado. O anterior parou de funcionar.' : '', content: `
+          <section class="page-header"><div><h2>📱 Painel de ${escapeHtml(emp.full_name)}</h2><p>Link pessoal, sem senha: mostra só o resultado dela (hoje hora a hora e o mês). Sem ranking.</p></div></section>
+          <section class="panel">
+            <p><input type="text" readonly value="${escapeHtml(link)}" style="width:100%;font-family:monospace" onclick="this.select()" /></p>
+            <div class="actions">
+              ${phone ? `<a class="btn" target="_blank" rel="noopener" href="https://wa.me/55${phone.replace(/^55/, '')}?text=${encodeURIComponent(msg)}">Enviar no WhatsApp</a>` : ''}
+              <button class="btn secondary" type="button" onclick="navigator.clipboard.writeText(${escapeHtml(JSON.stringify(link))});this.textContent='Copiado'">Copiar link</button>
+              <a class="btn secondary" href="${escapeHtml(link.replace(APP_BASE_URL, ''))}" target="_blank">Abrir painel</a>
+              <form method="post" action="/employees/${emp.id}/painel" style="display:inline" onsubmit="return confirm('Gerar novo link? O atual para de funcionar.')"><button class="btn secondary" type="submit">Gerar novo link</button></form>
+            </div>
+            <p class="hint">O link também vai no fim da mensagem de resultado do WhatsApp.</p>
+          </section>` }));
+      }
       if (req.method === 'POST' && employeeUpdateMatch) return handleUpdateEmployee(Number(employeeUpdateMatch[1]), await parseBody(req), res);
 
       const opExtraUpdateMatch = pathname.match(/^\/op-extra-times\/(\d+)$/);
