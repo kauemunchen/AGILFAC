@@ -408,3 +408,5 @@ a.hourly-row:hover { background: #eef2ff; }
 @media (max-width: 900px) { .fin-cal { overflow-x: auto; grid-template-columns: repeat(7, minmax(110px, 1fr)); } }
 .fin-indirect { background: #f8fafc; }
 .fin-indirect td:first-child { color: #475569; }
+.fin-mode { margin-top: 6px; display: inline-block; padding: 6px 12px; border-radius: 10px; background: #eef2ff; color: #1e3a8a; font-size: 13px; }
+.fin-mode a { margin-left: 8px; font-weight: 600; }

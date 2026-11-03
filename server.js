@@ -9705,7 +9705,13 @@ function parseMoney(value) {
   return Number.isFinite(n) ? n : NaN;
 }
 
-function getFinanceData(start, end) {
+function getFinanceData(start, end, opts = {}) {
+  // Mês em andamento: custo proporcional até costEnd (hoje), para comparar com a receita até agora
+  const costEnd = opts.costEnd && opts.costEnd < end ? opts.costEnd : end;
+  const partial = costEnd < end;
+  const periodBusinessDays = enumerateDates(start, end).filter(isBusinessDay).length || 1;
+  const elapsedBusinessDays = enumerateDates(start, costEnd).filter(isBusinessDay).length;
+  const costFraction = partial ? elapsedBusinessDays / periodBusinessDays : 1;
   ensureFinanceTables(getActiveDb());
   const rateProd = finSetting('fin_rate_producao');
   const rateMost = finSetting('fin_rate_mostruario');
@@ -9739,10 +9745,14 @@ function getFinanceData(start, end) {
   let expensesTotal = 0;
   const expensesByCategory = new Map();
   for (const x of expenses) {
-    expensesTotal += Number(x.amount || 0);
-    expensesByCategory.set(x.category, (expensesByCategory.get(x.category) || 0) + Number(x.amount || 0));
+    // Até hoje: despesa futura não entra; recorrente entra proporcional aos dias úteis passados
+    const counted = x.is_recurring ? Number(x.amount || 0) * costFraction : (x.expense_date <= costEnd ? Number(x.amount || 0) : 0);
+    x.counted_amount = counted;
+    if (!counted) continue;
+    expensesTotal += counted;
+    expensesByCategory.set(x.category, (expensesByCategory.get(x.category) || 0) + counted);
     const day = x.is_recurring ? (x.expense_date >= start ? x.expense_date : start) : x.expense_date;
-    dayOf(day).expenses += Number(x.amount || 0);
+    dayOf(day).expenses += counted;
   }
   // Folha por colaboradora
   const charges = finSetting('fin_charges_percent') / 100;
@@ -9750,7 +9760,6 @@ function getFinanceData(start, end) {
   const overtimeRate = finOvertimeRate;
   const monthlyHours = finSetting('fin_monthly_hours') || 220;
   const includePrize = finSetting('fin_include_prize') === 1;
-  const periodBusinessDays = enumerateDates(start, end).filter(isBusinessDay).length || 1;
   const costs = new Map(db.prepare('SELECT * FROM employee_costs').all().map(r => [r.employee_id, r]));
   const prizes = new Map();
   if (includePrize) {
@@ -9776,7 +9785,7 @@ function getFinanceData(start, end) {
   const employees = db.prepare('SELECT * FROM employees ORDER BY full_name').all();
   const people = [];
   for (const emp of employees) {
-    const activeDays = getEmployeeBusinessDaysInRange(emp, start, end).length;
+    const activeDays = getEmployeeBusinessDaysInRange(emp, start, costEnd).length;
     const rev = byEmployeeRevenue.get(emp.id);
     if (!activeDays && !rev) continue;
     const c = costs.get(emp.id) || { salary: 0, benefits: 0, charges_percent: null };
@@ -9792,7 +9801,7 @@ function getFinanceData(start, end) {
     // Calendário: custo fixo do dia (salário + encargos + benefícios ÷ dias úteis do período) nos dias úteis ativos dela
     const fixedBonus = Number(c.fixed_bonus || 0) * factor;
     const dailyFixed = (Number(c.salary || 0) * (1 + chargePct) + Number(c.benefits || 0) + Number(c.fixed_bonus || 0)) / periodBusinessDays;
-    if (dailyFixed > 0) for (const day of getEmployeeBusinessDaysInRange(emp, start, end)) dayOf(day).payroll += dailyFixed;
+    if (dailyFixed > 0) for (const day of getEmployeeBusinessDaysInRange(emp, start, costEnd)) dayOf(day).payroll += dailyFixed;
     if (ot.byDay) for (const [day, weighted] of ot.byDay) dayOf(day).overtimeCost += (weighted / 60) * hourValue;
     const prize = prizes.get(emp.id) || 0;
     const incident = incidentsByEmp.get(emp.id) || 0;
@@ -9808,7 +9817,7 @@ function getFinanceData(start, end) {
   // Funcionários de função indireta (sem produção): só custo de folha
   for (const st of db.prepare('SELECT * FROM indirect_staff').all()) {
     const fake = { start_date: st.start_date, termination_date: st.end_date, is_active: 1 };
-    const activeDaysList = getEmployeeBusinessDaysInRange(fake, start, end);
+    const activeDaysList = getEmployeeBusinessDaysInRange(fake, start, costEnd);
     if (!activeDaysList.length) continue;
     const factor = Math.min(activeDaysList.length / periodBusinessDays, 1);
     const chargePct = st.charges_percent !== null && st.charges_percent !== undefined ? Number(st.charges_percent) / 100 : charges;
@@ -9857,7 +9866,10 @@ function getFinanceData(start, end) {
       missingSalary: people.filter(p => !p.hasSalary).length,
       indirectCost: people.filter(p => p.indirect).reduce((a, p) => a + p.cost, 0),
       directCost: people.filter(p => !p.indirect).reduce((a, p) => a + p.cost, 0),
-      businessDays: periodBusinessDays
+      businessDays: periodBusinessDays,
+      elapsedBusinessDays,
+      partial,
+      costEnd
     }
   };
 }
@@ -9884,12 +9896,14 @@ function renderFinancePage(query = {}, error = '', notice = '', role = 'adm') {
   const range = getPeriodRange('month', ref);
   const prevRef = addDaysIso(range.start, -1);
   const nextRef = addDaysIso(range.end, 1);
-  const data = getFinanceData(range.start, range.end);
+  const isCurrent = range.start <= today() && today() <= range.end;
+  const fullMonth = query.custo === 'mes' || !isCurrent;
+  const data = getFinanceData(range.start, range.end, { costEnd: fullMonth ? '' : today() });
   const t = data.totals;
   const money = v => fmtMoney(v);
   const pct = v => v === null ? '—' : `${fmtNum(v, 1)}%`;
   const resCls = v => (v >= 0 ? 'fin-pos' : 'fin-neg');
-  const link = (tb, extra = '') => `/custos?tab=${tb}&ref=${ref}${extra}`;
+  const link = (tb, extra = '') => `/custos?tab=${tb}&ref=${ref}${query.custo === 'mes' ? '&custo=mes' : ''}${extra}`;
   const noRates = !data.rateProd && !data.rateMost;
   const tabs = [['resumo', 'Resumo'], ['calendario', 'Calendário'], ['colaboradoras', 'Colaboradoras'], ['despesas', 'Despesas e folha'], ['config', 'Configuração']];
   const weeks = (() => {
@@ -10067,7 +10081,7 @@ function renderFinancePage(query = {}, error = '', notice = '', role = 'adm') {
       <section class="panel">
         <h3>Despesas do período</h3>
         <table><thead><tr><th>Data</th><th>Categoria</th><th>Descrição</th><th>Valor</th><th></th></tr></thead><tbody>
-          ${data.expenses.map(x => `<tr><td>${formatDatePtBr(x.expense_date)}${x.is_recurring ? ' <span class="status-pill ok">mensal</span>' : ''}</td><td>${escapeHtml(x.category)}</td><td>${escapeHtml(x.description || '-')}</td><td>${money(x.amount)}</td><td><form method="post" action="/custos/despesas/${x.id}/excluir" onsubmit="return confirm('Excluir esta despesa${x.is_recurring ? ' (deixa de repetir nos próximos meses)' : ''}?')"><input type="hidden" name="ref" value="${ref}" /><button class="btn secondary" type="submit">Excluir</button></form></td></tr>`).join('') || '<tr><td colspan="5">Nenhuma despesa no período.</td></tr>'}
+          ${data.expenses.map(x => `<tr><td>${formatDatePtBr(x.expense_date)}${x.is_recurring ? ' <span class="status-pill ok">mensal</span>' : ''}</td><td>${escapeHtml(x.category)}</td><td>${escapeHtml(x.description || '-')}</td><td>${money(x.amount)}${t.partial && Math.abs((x.counted_amount ?? x.amount) - x.amount) > 0.005 ? `<br><small class="hint">conta ${money(x.counted_amount || 0)} até hoje</small>` : ''}</td><td><form method="post" action="/custos/despesas/${x.id}/excluir" onsubmit="return confirm('Excluir esta despesa${x.is_recurring ? ' (deixa de repetir nos próximos meses)' : ''}?')"><input type="hidden" name="ref" value="${ref}" /><button class="btn secondary" type="submit">Excluir</button></form></td></tr>`).join('') || '<tr><td colspan="5">Nenhuma despesa no período.</td></tr>'}
         </tbody><tfoot><tr><th colspan="3">Total</th><th>${money(t.expenses)}</th><th></th></tr></tfoot></table>
         ${data.expensesByCategory.length ? `<p class="hint">${data.expensesByCategory.map(([c, v]) => `${escapeHtml(c)}: ${money(v)}`).join(' · ')}</p>` : ''}
       </section>
@@ -10099,7 +10113,11 @@ function renderFinancePage(query = {}, error = '', notice = '', role = 'adm') {
 
   const content = `
     <section class="page-header">
-      <div><h2>Custos e receitas</h2><p>Período ${formatDatePtBr(range.start)} a ${formatDatePtBr(range.end)} (mês operacional).</p></div>
+      <div><h2>Custos e receitas</h2><p>Período ${formatDatePtBr(range.start)} a ${formatDatePtBr(range.end)} (mês operacional).</p>
+        ${isCurrent ? `<div class="fin-mode">${fullMonth
+          ? `Custos do <strong>mês cheio</strong> (${t.businessDays} dias úteis). <a href="/custos?tab=${tab}&ref=${ref}">Ver custo até hoje</a>`
+          : `Custos <strong>até hoje</strong>: ${t.elapsedBusinessDays} de ${t.businessDays} dias úteis, para comparar com a receita até agora. <a href="/custos?tab=${tab}&ref=${ref}&custo=mes">Ver mês cheio</a>`}</div>` : ''}
+      </div>
       <div class="header-actions"><a class="btn secondary" href="/custos?tab=${tab}&ref=${prevRef}">◀ Anterior</a><a class="btn secondary" href="/custos?tab=${tab}">Atual</a><a class="btn secondary" href="/custos?tab=${tab}&ref=${nextRef}">Próximo ▶</a></div>
     </section>
     <nav class="fin-tabs">${tabs.map(([k, l]) => `<a class="${k === tab ? 'active' : ''}" href="${link(k)}">${l}</a>`).join('')}</nav>
