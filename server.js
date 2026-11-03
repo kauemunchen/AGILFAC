@@ -1637,7 +1637,7 @@ function isLancadorAllowed(method, pathname) {
   if (['GET', 'POST'].includes(method) && pathname === '/productions/hourly/quadro') return true;
   if (method === 'GET' && ['/productions/new', '/productions/hourly', '/ops', '/labels/entry', '/api/op-preview', '/conta/senha'].includes(pathname)) return true;
   if (method === 'POST' && ['/productions', '/productions/hourly', '/productions/hourly/validate', '/conta/senha', '/logout'].includes(pathname)) return true;
-  if (method === 'GET' && /^\/ops\/\d+(\/mover)?$/.test(pathname)) return true;
+  if (method === 'GET' && (/^\/ops\/\d+(\/mover)?$/.test(pathname) || pathname === '/ops/localizar')) return true;
   if (method === 'POST' && /^\/productions\/hourly\/(\d+\/fix|zero\/\d+\/delete)$/.test(pathname)) return true;
   if (method === 'POST' && /^\/ops\/\d+\/(occurrences|problem-items|cell\/send|cell\/return)$/.test(pathname)) return true;
   if (method === 'POST' && /^\/ops\/\d+\/occurrences\/\d+\/conclude$/.test(pathname)) return true;
@@ -12303,7 +12303,7 @@ function renderOpKanban(rows) {
     const shown = items.slice(0, OP_KANBAN_LIMIT);
     const cards = shown.map(op => {
       const late = op.status_color !== 'vermelho' && op.delivery_date && op.delivery_date < today() && isOpOpenForDelivery(op);
-      return `<a class="kb-card${late ? ' is-late' : ''}" href="/ops/${op.id}" draggable="${col.status === 'vermelho' ? 'false' : 'true'}" data-op="${op.id}" data-status="${col.status}">
+      return `<a class="kb-card${late ? ' is-late' : ''}" href="/ops/${op.id}" draggable="${col.status === 'vermelho' ? 'false' : 'true'}" data-op="${op.id}" data-status="${col.status}" data-num="${escapeHtml(op.op_number)}">
         <div class="kb-top"><strong>OP ${escapeHtml(op.op_number)}</strong>${op.op_type === 'mostruario' ? '<span class="kb-type">mostruário</span>' : ''}${col.status === 'vermelho' ? '' : '<button type="button" class="kb-move" data-kb-move title="Mover OP">⇄</button>'}</div>
         <div class="kb-prod">${escapeHtml(op.product_name || '')}</div>
         <div class="kb-meta">${escapeHtml(op.brand || 'Sem marca')}${op.active_cell_name ? ` · 🧵 ${escapeHtml(op.active_cell_name)}` : ''}</div>
@@ -12323,9 +12323,15 @@ function renderOpKanban(rows) {
     </section>`;
   }).join('');
   const opts = OP_KANBAN_COLUMNS.map(c => `<button type="button" data-kb-to="${c.status}"><span class="kb-dot" style="background:var(--kb-${c.status})"></span>${c.title}</button>`).join('');
-  return `<p class="hint kb-help">Arraste a OP para outra coluna (ou toque em ⇄) para registrar a movimentação.</p>
+  return `<form class="kb-find" id="kb-find" autocomplete="off">
+    <label for="kb-find-input">Movimentar OP</label>
+    <input id="kb-find-input" name="n" inputmode="numeric" placeholder="Digite ou bipe o número da OP e tecle Enter" />
+    <button class="btn" type="submit">Localizar</button>
+    <span class="kb-find-msg" id="kb-find-msg"></span>
+  </form>
+  <p class="hint kb-help">Arraste a OP para outra coluna, toque em ⇄ ou digite o número acima para registrar a movimentação.</p>
   <div class="kanban">${cols}</div>
-  <div class="kb-menu" id="kb-menu" hidden>${opts}</div>
+  <div class="kb-menu" id="kb-menu" hidden><strong class="kb-menu-title"></strong>${opts}</div>
   <dialog class="mv-dialog" id="mv-dialog"><div id="mv-content"><p class="hint">Carregando…</p></div></dialog>
   <script>
   (() => {
@@ -12358,18 +12364,53 @@ function renderOpKanban(rows) {
         if (opId && from !== col.dataset.col) openMove(opId, col.dataset.col);
       });
     });
+    function showMenu(target, anchor) {
+      menuCard = target;
+      const r = anchor.getBoundingClientRect();
+      menu.hidden = false;
+      menu.querySelectorAll('[data-kb-to]').forEach(b => { b.hidden = b.dataset.kbTo === target.dataset.status || target.dataset.status === 'vermelho'; });
+      menu.querySelector('.kb-menu-title').textContent = target.dataset.status === 'vermelho' ? 'OP ' + (target.dataset.num || '') + ' já embarcada' : 'Mover OP ' + (target.dataset.num || '') + ' para:';
+      menu.style.top = (window.scrollY + r.bottom + 4) + 'px';
+      menu.style.left = Math.max(8, Math.min(window.scrollX + r.right - 210, window.scrollX + document.documentElement.clientWidth - 218)) + 'px';
+    }
+    const findForm = document.getElementById('kb-find');
+    const findInput = document.getElementById('kb-find-input');
+    const findMsg = document.getElementById('kb-find-msg');
+    findForm.addEventListener('submit', async e => {
+      e.preventDefault();
+      const n = findInput.value.trim();
+      if (!n) return;
+      findMsg.textContent = 'Buscando…';
+      document.querySelectorAll('.kb-card.is-found').forEach(c => c.classList.remove('is-found'));
+      let list = [];
+      try { list = await (await fetch('/ops/localizar?n=' + encodeURIComponent(n), { credentials: 'same-origin' })).json(); } catch (_) {}
+      if (!list.length) { findMsg.textContent = 'OP não encontrada.'; findInput.select(); return; }
+      if (list.length > 1) {
+        findMsg.innerHTML = 'Várias OPs: ' + list.map(o => '<button type="button" class="kb-pick" data-n="' + o.op_number + '">' + o.op_number + '</button>').join(' ');
+        return;
+      }
+      const op = list[0];
+      findMsg.textContent = '';
+      const card = document.querySelector('.kb-card[data-op="' + op.id + '"]');
+      const target = { dataset: { op: String(op.id), status: op.status, num: op.op_number } };
+      if (card) {
+        card.classList.add('is-found');
+        card.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+        setTimeout(() => showMenu(target, card.querySelector('[data-kb-move]') || card), 350);
+      } else showMenu(target, findInput);
+    });
+    findMsg.addEventListener('click', e => { const b = e.target.closest('.kb-pick'); if (b) { findInput.value = b.dataset.n; findForm.requestSubmit(); } });
+    if (!matchMedia('(pointer: coarse)').matches) findInput.focus();
+    dlg.addEventListener('close', () => { findInput.value = ''; });
     document.addEventListener('click', e => {
       const btn = e.target.closest('[data-kb-move]');
       if (btn) {
         e.preventDefault(); e.stopPropagation();
-        menuCard = btn.closest('.kb-card');
-        const r = btn.getBoundingClientRect();
-        menu.hidden = false;
-        menu.querySelectorAll('[data-kb-to]').forEach(b => { b.hidden = b.dataset.kbTo === menuCard.dataset.status; });
-        menu.style.top = (window.scrollY + r.bottom + 4) + 'px';
-        menu.style.left = Math.max(8, Math.min(window.scrollX + r.right - 200, window.scrollX + document.documentElement.clientWidth - 208)) + 'px';
+        const card = btn.closest('.kb-card');
+        showMenu(card, btn);
         return;
       }
+      if (e.target.closest('#kb-find')) return;
       const to = e.target.closest('[data-kb-to]');
       if (to && menuCard) { menu.hidden = true; openMove(menuCard.dataset.op, to.dataset.kbTo); menuCard = null; return; }
       if (!e.target.closest('#kb-menu')) menu.hidden = true;
@@ -13944,6 +13985,15 @@ const server = http.createServer(async (req, res) => {
       const opOccurrenceMatch = pathname.match(/^\/ops\/(\d+)\/occurrences$/);
       if (req.method === 'POST' && opOccurrenceMatch) return handleOpenOccurrence(Number(opOccurrenceMatch[1]), kanbanBody(res, await parseBody(req)), res);
 
+      if (req.method === 'GET' && pathname === '/ops/localizar') {
+        const n = String(query.n || '').trim().replace(/^OP\s*/i, '');
+        if (!n) return sendJson(res, []);
+        const found = db.prepare(`SELECT id, op_number, status_color AS status FROM ops WHERE is_reversed = 0
+          AND (op_number = ? OR COALESCE(barcode, '') = ? OR op_number LIKE ? OR REPLACE(op_number, '-', '') = ?)
+          ORDER BY (op_number = ? OR COALESCE(barcode, '') = ?) DESC, id DESC LIMIT 6`).all(n, n, `${n}-%`, n.replace(/-/g, ''), n, n);
+        const exact = found.filter(o => o.op_number === n);
+        return sendJson(res, exact.length === 1 ? exact : found);
+      }
       const opMoveMatch = pathname.match(/^\/ops\/(\d+)\/mover$/);
       if (req.method === 'GET' && opMoveMatch) {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
