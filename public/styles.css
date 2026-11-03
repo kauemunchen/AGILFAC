@@ -529,3 +529,29 @@ a.hourly-row:hover { background: #eef2ff; }
   .kb-col { scroll-snap-align:start; }
   .kb-cards { max-height:none; }
 }
+
+/* ===== Quadro de OPs: mover arrastando ===== */
+:root { --kb-verde:#22c55e; --kb-rosa:#ec4899; --kb-amarelo:#eab308; --kb-azul:#3b82f6; --kb-vermelho:#ef4444; }
+.kb-help { margin:0 0 8px; }
+.kb-card[draggable=true] { cursor:grab; }
+.kb-card.is-dragging { opacity:.45; }
+.kb-col.is-over { background:#e8efff; outline:2px dashed #3b6fe0; outline-offset:-4px; }
+body.kb-dragging .kb-col { transition:background .1s; }
+.kb-top { align-items:flex-start; }
+.kb-move { margin-left:auto; border:1px solid #e3e7ef; background:#fff; border-radius:7px; width:28px; height:26px; line-height:1; font-size:15px; cursor:pointer; color:#334155; flex:none; }
+.kb-type + .kb-move { margin-left:4px; }
+.kb-move:hover { background:#eef2ff; }
+.kb-menu { position:absolute; z-index:60; width:200px; background:#fff; border:1px solid #d9dee8; border-radius:10px; box-shadow:0 10px 30px rgba(15,23,42,.18); padding:6px; display:flex; flex-direction:column; }
+.kb-menu[hidden] { display:none; }
+.kb-menu button { display:flex; align-items:center; gap:8px; border:0; background:none; text-align:left; padding:8px 10px; border-radius:7px; font-size:14px; cursor:pointer; }
+.kb-menu button:hover { background:#f1f5f9; }
+.mv-dialog { border:0; border-radius:14px; padding:0; width:min(520px, 94vw); max-height:88vh; box-shadow:0 24px 60px rgba(15,23,42,.3); }
+.mv-dialog::backdrop { background:rgba(15,23,42,.45); }
+.mv-head { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; padding:16px 18px; border-bottom:1px solid #e3e7ef; }
+.mv-close { border:0; background:none; font-size:18px; cursor:pointer; color:#64748b; }
+.mv-body { padding:14px 18px; display:flex; flex-direction:column; gap:12px; }
+.mv-body .stack-form { margin:0; }
+.mv-box { border:1px solid #e3e7ef; border-radius:10px; padding:10px; }
+.mv-info { margin:0; color:#334155; }
+.mv-more summary { cursor:pointer; color:#1f4fd1; font-weight:600; padding:4px 0; }
+.mv-foot { padding:10px 18px 16px; font-size:14px; }

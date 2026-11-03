@@ -1535,6 +1535,11 @@ function parseBody(req, maxBytes = 1_000_000) {
 }
 
 function redirect(res, location) {
+  // Movimentação feita pelo quadro de OPs: volta para o quadro com o aviso
+  if (res._kanbanReturn && typeof location === 'string') {
+    const m = location.match(/^\/ops\/\d+\?((?:notice|error)=.*)$/);
+    if (m) location = `${res._kanbanReturn}${res._kanbanReturn.includes('?') ? '&' : '?'}${m[1]}`;
+  }
   res.writeHead(302, { Location: location });
   res.end();
 }
@@ -1632,7 +1637,7 @@ function isLancadorAllowed(method, pathname) {
   if (['GET', 'POST'].includes(method) && pathname === '/productions/hourly/quadro') return true;
   if (method === 'GET' && ['/productions/new', '/productions/hourly', '/ops', '/labels/entry', '/api/op-preview', '/conta/senha'].includes(pathname)) return true;
   if (method === 'POST' && ['/productions', '/productions/hourly', '/productions/hourly/validate', '/conta/senha', '/logout'].includes(pathname)) return true;
-  if (method === 'GET' && /^\/ops\/\d+$/.test(pathname)) return true;
+  if (method === 'GET' && /^\/ops\/\d+(\/mover)?$/.test(pathname)) return true;
   if (method === 'POST' && /^\/productions\/hourly\/(\d+\/fix|zero\/\d+\/delete)$/.test(pathname)) return true;
   if (method === 'POST' && /^\/ops\/\d+\/(occurrences|problem-items|cell\/send|cell\/return)$/.test(pathname)) return true;
   if (method === 'POST' && /^\/ops\/\d+\/occurrences\/\d+\/conclude$/.test(pathname)) return true;
@@ -12211,6 +12216,81 @@ const OP_KANBAN_COLUMNS = [
 ];
 const OP_KANBAN_LIMIT = 40;
 
+function kanbanBody(res, body) {
+  const target = String(body?.return_to || '');
+  if (/^\/ops\?[^\s]*$/.test(target) && !target.includes('//')) {
+    const u = new URL(target, 'http://x');
+    u.searchParams.delete('notice'); u.searchParams.delete('error');
+    res._kanbanReturn = `${u.pathname}?${u.searchParams.toString()}`;
+  }
+  return body;
+}
+
+// Formulário que abre ao arrastar a OP para outra coluna. Cada coluna exige o registro que muda o status de verdade.
+function renderOpMoveFragment(opId, target, returnTo, role) {
+  const detail = getOpDetail(Number(opId));
+  if (!detail) return '<p>OP não encontrada.</p>';
+  const { op, occurrences, openCellTransfers, cellBalance } = detail;
+  const col = OP_KANBAN_COLUMNS.find(c => c.status === target);
+  const from = OP_KANBAN_COLUMNS.find(c => c.status === op.status_color);
+  const rt = `<input type="hidden" name="return_to" value="${escapeHtml(returnTo)}" />`;
+  const free = Math.max(Number(op.remaining_quantity || 0) - Number(cellBalance.total_open || 0), 0);
+  const openOcc = occurrences.filter(o => !o.is_concluded);
+  const canCells = userCanManageCells(role);
+  const info = t => `<p class="mv-info">${t}</p>`;
+  const sendCellForm = () => canCells ? (free > 0 ? `<form method="post" action="/ops/${op.id}/cell/send" class="stack-form">${rt}
+      <label>Célula<select name="cell_id" required autofocus><option value="">Selecione</option>${getCellList().map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('')}</select></label>
+      <label>Quantidade para enviar<input type="number" inputmode="numeric" name="quantity_sent" min="1" max="${free}" value="${free}" required /></label>
+      <label>Data de envio<input type="date" name="sent_at" value="${escapeHtml(today())}" required /></label>
+      <label class="full">Observações<textarea name="sent_notes" rows="2" placeholder="Opcional"></textarea></label>
+      <button class="btn" type="submit">Enviar para célula</button></form>` : info('Não há saldo livre para enviar à célula.')) : info('Seu perfil não pode movimentar OP para célula.');
+  const returnCellForms = () => !openCellTransfers.length ? '' : (canCells ? openCellTransfers.map(t => `<form method="post" action="/ops/${op.id}/cell/return" class="stack-form mv-box">${rt}<input type="hidden" name="transfer_id" value="${t.id}" />
+      <div><strong>Retorno da ${escapeHtml(t.cell_name)}</strong> · enviada em ${escapeHtml(nowPt(t.sent_at))} · aberto ${getOpenQuantityFromCellTransfer(t)} pç</div>
+      <label>Quantidade retornada<input type="number" name="quantity_returned" min="1" max="${getOpenQuantityFromCellTransfer(t)}" value="${getOpenQuantityFromCellTransfer(t)}" required /></label>
+      <label>Data do retorno<input type="date" name="returned_at" value="${escapeHtml(today())}" required /></label>
+      <label class="full">Observações<textarea name="return_notes" rows="2" placeholder="Opcional"></textarea></label>
+      <button class="btn" type="submit">Registrar retorno</button></form>`).join('') : info('Seu perfil não pode registrar retorno de célula.'));
+  const concludeForms = () => openOcc.map(o => `<form method="post" action="/ops/${op.id}/occurrences/${o.id}/conclude" class="stack-form mv-box">${rt}
+      <div><strong>Ocorrência aberta</strong> · ${escapeHtml(nowPt(o.opened_at))}<br>${escapeHtml(o.description)}</div>
+      <label class="full">Justificativa de conclusão<input name="conclusion_reason" required /></label>
+      <button class="btn" type="submit">Concluir ocorrência</button></form>`).join('');
+  let body = '';
+  if (!col || op.status_color === target) body = info('A OP já está nesta coluna.');
+  else if (op.status_color === 'vermelho') body = info(`OP já embarcada. Para voltar, estorne o embarque em <a href="/estornos?record_type=shipment&q=${encodeURIComponent(op.op_number)}">Estornos</a>.`);
+  else if (target === 'rosa') body = sendCellForm();
+  else if (target === 'amarelo') body = `<form method="post" action="/ops/${op.id}/occurrences" class="stack-form">${rt}
+      <label class="full">Descreva a ocorrência<textarea name="description" rows="3" required autofocus placeholder="Ex.: faltou aviamento, aguardando corte"></textarea></label>
+      <button class="btn" type="submit">Registrar ocorrência</button></form>`;
+  else if (target === 'verde') {
+    if (op.status_color === 'azul') body = info(`OP finalizada (todas as peças contadas). Para reabrir, corrija o lançamento em <a href="/estornos?record_type=production&q=${encodeURIComponent(op.op_number)}">Estornos</a>.`);
+    else body = (openCellTransfers.length ? info('Para voltar para produção, registre o retorno da célula:') + returnCellForms() : '')
+      + (openOcc.length ? info('Para voltar para produção, conclua a ocorrência:') + concludeForms() : '')
+      || info('Nada a registrar para voltar a Em produção.');
+  } else if (target === 'azul') {
+    body = (openCellTransfers.length ? info('Primeiro, o retorno da célula:') + returnCellForms() : '')
+      + (free > 0 ? `${info(`A OP fica <strong>Finalizada</strong> quando o saldo chega a zero. Faltam <strong>${free}</strong> peça(s).`)}
+        <div class="actions"><a class="btn" href="/productions/new?op_number=${encodeURIComponent(op.op_number)}">Lançar produção desta OP</a></div>
+        <details class="mv-more"><summary>Peças com problema</summary><form method="post" action="/ops/${op.id}/problem-items" class="stack-form">${rt}
+          <label>Data<input type="date" name="problem_date" value="${escapeHtml(today())}" required /></label>
+          <label>Quantidade<input type="number" min="1" max="${free}" step="1" name="quantity" required /></label>
+          <label class="full">Motivo<input name="reason" required placeholder="Ex.: segunda qualidade" /></label>
+          <button class="btn secondary" type="submit">Registrar peça com problema</button></form></details>
+        <details class="mv-more"><summary>Devolver saldo (${free} pç) sem costurar</summary><form method="post" action="/ops/${op.id}/return-without-sewing" class="stack-form" onsubmit="return confirm('Confirmar devolução sem costura do saldo restante?')">${rt}
+          <label>Data<input type="date" name="problem_date" value="${escapeHtml(today())}" required /></label>
+          <label>Gera cobrança?<select name="billing_decision" required><option value="">Selecione</option><option value="bill">Sim, terá cobrança</option><option value="return">Não, deixar como devolvida</option></select></label>
+          <label class="full">Motivo obrigatório<textarea name="reason" rows="2" required></textarea></label>
+          <button class="btn secondary" type="submit">Devolver saldo sem costurar</button></form></details>` : (openCellTransfers.length ? '' : info('Sem saldo pendente: a OP será recalculada.')))
+      + (openOcc.length ? info('Ocorrência aberta (não impede finalizar, mas pode concluir aqui):') + concludeForms() : '');
+  } else if (target === 'vermelho') {
+    body = op.status_color === 'azul'
+      ? `${info('Embarque a OP pela tela de embarque (gera etiquetas e o número do embarque).')}<div class="actions"><a class="btn" href="/shipments/new?op_number=${encodeURIComponent(op.op_number)}">Abrir embarque com esta OP</a></div>`
+      : info(`Só OPs <strong>Finalizadas</strong> podem ser embarcadas. Saldo atual: ${fmtNum(Math.max(0, Number(op.remaining_quantity || 0)), 0)} peça(s).`);
+  }
+  return `<header class="mv-head"><div><strong>OP ${escapeHtml(op.op_number)}</strong> · ${escapeHtml(op.product_name || '')}<br><span class="hint">${escapeHtml(from ? from.title : op.status_color)} → <b>${escapeHtml(col ? col.title : target)}</b></span></div><button type="button" class="mv-close" data-mv-close aria-label="Fechar">✕</button></header>
+    <div class="mv-body">${body}</div>
+    <footer class="mv-foot"><a href="/ops/${op.id}">Abrir OP completa</a></footer>`;
+}
+
 function renderOpKanban(rows) {
   const since = addDaysIso(today(), -30);
   const byDelivery = (a, b) => String(a.delivery_date || '9999').localeCompare(String(b.delivery_date || '9999')) || String(a.op_number).localeCompare(String(b.op_number), 'pt-BR', { numeric: true });
@@ -12223,8 +12303,8 @@ function renderOpKanban(rows) {
     const shown = items.slice(0, OP_KANBAN_LIMIT);
     const cards = shown.map(op => {
       const late = op.status_color !== 'vermelho' && op.delivery_date && op.delivery_date < today() && isOpOpenForDelivery(op);
-      return `<a class="kb-card${late ? ' is-late' : ''}" href="/ops/${op.id}">
-        <div class="kb-top"><strong>OP ${escapeHtml(op.op_number)}</strong>${op.op_type === 'mostruario' ? '<span class="kb-type">mostruário</span>' : ''}</div>
+      return `<a class="kb-card${late ? ' is-late' : ''}" href="/ops/${op.id}" draggable="${col.status === 'vermelho' ? 'false' : 'true'}" data-op="${op.id}" data-status="${col.status}">
+        <div class="kb-top"><strong>OP ${escapeHtml(op.op_number)}</strong>${op.op_type === 'mostruario' ? '<span class="kb-type">mostruário</span>' : ''}${col.status === 'vermelho' ? '' : '<button type="button" class="kb-move" data-kb-move title="Mover OP">⇄</button>'}</div>
         <div class="kb-prod">${escapeHtml(op.product_name || '')}</div>
         <div class="kb-meta">${escapeHtml(op.brand || 'Sem marca')}${op.active_cell_name ? ` · 🧵 ${escapeHtml(op.active_cell_name)}` : ''}</div>
         <div class="kb-foot">
@@ -12234,7 +12314,7 @@ function renderOpKanban(rows) {
       </a>`;
     }).join('');
     const more = items.length - shown.length;
-    return `<section class="kb-col kb-${col.status}">
+    return `<section class="kb-col kb-${col.status}" data-col="${col.status}">
       <header><span class="kb-dot"></span><h3>${col.title}</h3><span class="kb-count">${items.length}</span></header>
       <p class="hint">${col.hint}</p>
       <div class="kb-cards">${cards || '<p class="hint kb-empty">Nenhuma OP.</p>'}
@@ -12242,7 +12322,60 @@ function renderOpKanban(rows) {
       </div>
     </section>`;
   }).join('');
-  return `<div class="kanban">${cols}</div>`;
+  const opts = OP_KANBAN_COLUMNS.map(c => `<button type="button" data-kb-to="${c.status}"><span class="kb-dot" style="background:var(--kb-${c.status})"></span>${c.title}</button>`).join('');
+  return `<p class="hint kb-help">Arraste a OP para outra coluna (ou toque em ⇄) para registrar a movimentação.</p>
+  <div class="kanban">${cols}</div>
+  <div class="kb-menu" id="kb-menu" hidden>${opts}</div>
+  <dialog class="mv-dialog" id="mv-dialog"><div id="mv-content"><p class="hint">Carregando…</p></div></dialog>
+  <script>
+  (() => {
+    const dlg = document.getElementById('mv-dialog');
+    const box = document.getElementById('mv-content');
+    const menu = document.getElementById('kb-menu');
+    const back = location.pathname + location.search;
+    let menuCard = null;
+    async function openMove(opId, to) {
+      box.innerHTML = '<p class="hint" style="padding:16px">Carregando…</p>';
+      if (!dlg.open) dlg.showModal();
+      try {
+        const r = await fetch('/ops/' + opId + '/mover?para=' + to + '&return_to=' + encodeURIComponent(back), { credentials: 'same-origin' });
+        box.innerHTML = await r.text();
+        const f = box.querySelector('[autofocus], input:not([type=hidden]), select, textarea');
+        if (f) f.focus();
+      } catch (e) { box.innerHTML = '<p style="padding:16px">Falha ao carregar. Tente de novo.</p>'; }
+    }
+    dlg.addEventListener('click', e => { if (e.target === dlg || e.target.closest('[data-mv-close]')) dlg.close(); });
+    document.querySelectorAll('.kb-card[draggable=true]').forEach(card => {
+      card.addEventListener('dragstart', e => { e.dataTransfer.setData('text/plain', card.dataset.op + '|' + card.dataset.status); e.dataTransfer.effectAllowed = 'move'; card.classList.add('is-dragging'); document.body.classList.add('kb-dragging'); });
+      card.addEventListener('dragend', () => { card.classList.remove('is-dragging'); document.body.classList.remove('kb-dragging'); document.querySelectorAll('.kb-col.is-over').forEach(c => c.classList.remove('is-over')); });
+    });
+    document.querySelectorAll('.kb-col').forEach(col => {
+      col.addEventListener('dragover', e => { e.preventDefault(); col.classList.add('is-over'); });
+      col.addEventListener('dragleave', e => { if (!col.contains(e.relatedTarget)) col.classList.remove('is-over'); });
+      col.addEventListener('drop', e => {
+        e.preventDefault(); col.classList.remove('is-over');
+        const [opId, from] = (e.dataTransfer.getData('text/plain') || '').split('|');
+        if (opId && from !== col.dataset.col) openMove(opId, col.dataset.col);
+      });
+    });
+    document.addEventListener('click', e => {
+      const btn = e.target.closest('[data-kb-move]');
+      if (btn) {
+        e.preventDefault(); e.stopPropagation();
+        menuCard = btn.closest('.kb-card');
+        const r = btn.getBoundingClientRect();
+        menu.hidden = false;
+        menu.querySelectorAll('[data-kb-to]').forEach(b => { b.hidden = b.dataset.kbTo === menuCard.dataset.status; });
+        menu.style.top = (window.scrollY + r.bottom + 4) + 'px';
+        menu.style.left = Math.max(8, Math.min(window.scrollX + r.right - 200, window.scrollX + document.documentElement.clientWidth - 208)) + 'px';
+        return;
+      }
+      const to = e.target.closest('[data-kb-to]');
+      if (to && menuCard) { menu.hidden = true; openMove(menuCard.dataset.op, to.dataset.kbTo); menuCard = null; return; }
+      if (!e.target.closest('#kb-menu')) menu.hidden = true;
+    });
+  })();
+  </script>`;
 }
 
 function nowIsoDate(value) {
@@ -12278,8 +12411,8 @@ function renderOpListPage(query = {}, role = 'adm') {
       <div><h2>Consulta de OPs</h2><p>Busca com status, saldo e acesso ao histórico detalhado.</p></div>
       <div class="header-actions">
         <nav class="view-toggle" aria-label="Visualização">
-          <a class="${view === 'lista' ? 'is-active' : ''}" href="/ops?${new URLSearchParams({ ...query, view: 'lista', notice: '' }).toString()}">☰ Lista</a>
-          <a class="${view === 'quadro' ? 'is-active' : ''}" href="/ops?${new URLSearchParams({ ...query, view: 'quadro', notice: '' }).toString()}">▦ Quadro</a>
+          <a class="${view === 'lista' ? 'is-active' : ''}" href="/ops?${new URLSearchParams(Object.fromEntries(Object.entries({ ...query, view: 'lista' }).filter(([k]) => k !== 'notice' && k !== 'error'))).toString()}">☰ Lista</a>
+          <a class="${view === 'quadro' ? 'is-active' : ''}" href="/ops?${new URLSearchParams(Object.fromEntries(Object.entries({ ...query, view: 'quadro' }).filter(([k]) => k !== 'notice' && k !== 'error'))).toString()}">▦ Quadro</a>
         </nav>
         <a class="btn" href="/ops/new">Nova OP</a>
       </div>
@@ -12348,7 +12481,7 @@ function renderOpListPage(query = {}, role = 'adm') {
       </table>
     </section>`}
   `;
-  return pageLayout({ title: 'OPs', content, notice: query.notice || '', role });
+  return pageLayout({ title: 'OPs', content, notice: query.notice || '', error: query.error || '', role });
 }
 
 function renderOpDetailPage(id, query = {}, role = 'adm') {
@@ -13809,24 +13942,30 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'GET' && opDetailMatch) return sendHtml(res, renderOpDetailPage(opDetailMatch[1], query, role));
 
       const opOccurrenceMatch = pathname.match(/^\/ops\/(\d+)\/occurrences$/);
-      if (req.method === 'POST' && opOccurrenceMatch) return handleOpenOccurrence(Number(opOccurrenceMatch[1]), await parseBody(req), res);
+      if (req.method === 'POST' && opOccurrenceMatch) return handleOpenOccurrence(Number(opOccurrenceMatch[1]), kanbanBody(res, await parseBody(req)), res);
+
+      const opMoveMatch = pathname.match(/^\/ops\/(\d+)\/mover$/);
+      if (req.method === 'GET' && opMoveMatch) {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+        return res.end(renderOpMoveFragment(opMoveMatch[1], String(query.para || ''), /^\/ops(\?|$)/.test(String(query.return_to || '')) ? String(query.return_to) : '/ops?view=quadro', role));
+      }
 
       const opProblemMatch = pathname.match(/^\/ops\/(\d+)\/problem-items$/);
-      if (req.method === 'POST' && opProblemMatch) return handleCreateOpProblemItem(Number(opProblemMatch[1]), await parseBody(req), res);
+      if (req.method === 'POST' && opProblemMatch) return handleCreateOpProblemItem(Number(opProblemMatch[1]), kanbanBody(res, await parseBody(req)), res);
 
       const returnWithoutSewingMatch = pathname.match(/^\/ops\/(\d+)\/return-without-sewing$/);
-      if (req.method === 'POST' && returnWithoutSewingMatch) return handleReturnRemainingWithoutSewing(Number(returnWithoutSewingMatch[1]), await parseBody(req), res, role);
+      if (req.method === 'POST' && returnWithoutSewingMatch) return handleReturnRemainingWithoutSewing(Number(returnWithoutSewingMatch[1]), kanbanBody(res, await parseBody(req)), res, role);
 
       const concludeOccurrenceMatch = pathname.match(/^\/ops\/(\d+)\/occurrences\/(\d+)\/conclude$/);
       if (req.method === 'POST' && concludeOccurrenceMatch) {
-        return handleConcludeOccurrence(Number(concludeOccurrenceMatch[1]), Number(concludeOccurrenceMatch[2]), await parseBody(req), res);
+        return handleConcludeOccurrence(Number(concludeOccurrenceMatch[1]), Number(concludeOccurrenceMatch[2]), kanbanBody(res, await parseBody(req)), res);
       }
 
       const sendCellMatch = pathname.match(/^\/ops\/(\d+)\/cell\/send$/);
-      if (req.method === 'POST' && sendCellMatch) return handleSendOpToCell(Number(sendCellMatch[1]), await parseBody(req), res, role);
+      if (req.method === 'POST' && sendCellMatch) return handleSendOpToCell(Number(sendCellMatch[1]), kanbanBody(res, await parseBody(req)), res, role);
 
       const returnCellMatch = pathname.match(/^\/ops\/(\d+)\/cell\/return$/);
-      if (req.method === 'POST' && returnCellMatch) return handleReturnOpFromCell(Number(returnCellMatch[1]), await parseBody(req), res, role);
+      if (req.method === 'POST' && returnCellMatch) return handleReturnOpFromCell(Number(returnCellMatch[1]), kanbanBody(res, await parseBody(req)), res, role);
 
       sendText(res, 'Not found', 404);
     });
