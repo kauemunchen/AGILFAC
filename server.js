@@ -2456,6 +2456,7 @@ function pageLayout({ title, content, notice = '', error = '', role = 'adm' }) {
         <nav>
           ${renderGroupedNav(navItems)}
         </nav>
+        <form method="post" action="/logout" class="sidebar-logout"><button type="submit">🚪 Sair</button></form>
       </aside>
       <main class="content app-content">
         <div class="top-bar">

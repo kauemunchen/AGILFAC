@@ -169,9 +169,65 @@
     topBar.prepend(b);
   }
 
+  // ---------- Celular: tabelas em cartões, filtros recolhidos, blocos longos recolhíveis ----------
+  const path = location.pathname;
+  const isMobile = matchMedia('(max-width: 760px)').matches;
+  if (isMobile) {
+    document.querySelectorAll('table').forEach(table => {
+      if (table.closest('.hour-grid, .no-cards, .fin-cal, .agil-help, dialog') || table.classList.contains('hour-grid') || table.classList.contains('no-cards')) return;
+      const heads = [...table.querySelectorAll('thead th')].map(th => th.textContent.trim());
+      if (!heads.length) return;
+      const span = [...table.querySelectorAll('thead th')].reduce((a, th) => a + (Number(th.colSpan) || 1), 0);
+      if (span <= 14) {
+        table.classList.add('m-cards');
+        table.querySelectorAll('tbody tr, tfoot tr').forEach(tr => {
+          const cells = [...tr.children];
+          if (cells.length === 1 || cells.some(c => Number(c.colSpan) > 2)) { tr.classList.add('m-full'); return; }
+          let i = 0;
+          cells.forEach(td => {
+            td.dataset.label = heads[i] || '';
+            i += Number(td.colSpan) || 1;
+            const txt = td.textContent.trim();
+            if ((txt === '' || txt === '-') && !td.querySelector('input, select, button, a, form')) td.classList.add('m-empty');
+          });
+        });
+      } else {
+        let wrap = table.parentElement;
+        if (!wrap.classList.contains('table-wrap')) { wrap = document.createElement('div'); wrap.className = 'table-wrap'; table.parentNode.insertBefore(wrap, table); wrap.appendChild(table); }
+        table.classList.add('m-wide');
+        const hint = document.createElement('p'); hint.className = 'm-swipe'; hint.textContent = '↔ Deslize a tabela para ver todas as colunas';
+        wrap.parentNode.insertBefore(hint, wrap);
+      }
+    });
+    // Filtros: viram um botão com o resumo do que está selecionado
+    document.querySelectorAll('form[method=get].inline-form, form[method=get].filters-form').forEach(form => {
+      if (form.closest('.page-header') || form.id === 'kb-find') return;
+      const labels = [...form.querySelectorAll('label')].filter(l => !l.hidden && l.offsetParent !== null);
+      if (labels.length < 3) return;
+      const parts = [];
+      form.querySelectorAll('select').forEach(sel => { if (sel.value && sel.closest('label') && !sel.closest('label').hidden) parts.push(sel.options[sel.selectedIndex]?.text || sel.value); });
+      form.querySelectorAll('input[type=date], input[type=text], input[type=search], input:not([type])').forEach(inp => { if (inp.value && inp.name && inp.type !== 'hidden') parts.push(/^\d{4}-\d{2}-\d{2}$/.test(inp.value) ? inp.value.split('-').reverse().join('/') : inp.value); });
+      const btn = document.createElement('button');
+      btn.type = 'button'; btn.className = 'm-filter-toggle';
+      const summary = parts.join(' · ');
+      btn.innerHTML = '<span>⚙ Filtros</span><small>' + esc(summary.length > 70 ? summary.slice(0, 70) + '…' : (summary || 'padrão')) + '</small><b>▾</b>';
+      form.parentNode.insertBefore(btn, form);
+      form.classList.add('m-collapsed');
+      btn.addEventListener('click', () => { form.classList.toggle('m-collapsed'); btn.classList.toggle('is-open'); });
+    });
+    // Blocos longos de análise começam fechados (toque no título para abrir)
+    if (path === '/' || /^\/ops\/\d+$/.test(path) || path === '/custos') {
+      document.querySelectorAll('.app-content .panel').forEach(panel => {
+        const h = panel.querySelector(':scope > h3, :scope > .panel-header');
+        if (!h || panel.classList.contains('op-timeline') || panel.offsetHeight < 520) return;
+        panel.classList.add('m-fold', 'm-closed');
+        h.addEventListener('click', e => { if (e.target.closest('a, button, input, select')) return; panel.classList.toggle('m-closed'); });
+      });
+    }
+  }
+
   // ---------- Filtros lembrados e visões salvas ----------
   const REMEMBER = ['/ops', '/shipments', '/acompanhamento/diario', '/premios/producao', '/closures', '/custos'];
-  const path = location.pathname;
   if (REMEMBER.includes(path)) {
     const key = 'agilfac-filters:' + path;
     const p = new URLSearchParams(location.search);
