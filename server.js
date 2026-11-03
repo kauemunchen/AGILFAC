@@ -2407,6 +2407,7 @@ function pageLayout({ title, content, notice = '', error = '', role = 'adm' }) {
       <main class="content app-content">
         <div class="top-bar">
           <button class="btn secondary menu-toggle" type="button" id="menu-toggle">☰ Menu</button>
+          ${getRequestAuth()?.user ? renderTopTools(role) : ''}
           <div class="top-meta top-meta-actions">
             <span class="role-badge">${escapeHtml(getRequestAuth()?.company?.name || 'AgilFac')} · ${escapeHtml(ROLE_LABELS[role] || role)}</span>
             <form method="post" action="/logout">
@@ -2436,7 +2437,11 @@ function pageLayout({ title, content, notice = '', error = '', role = 'adm' }) {
         document.querySelector('[data-open-menu]')?.addEventListener('click', openDrawer);
         document.getElementById('menu-backdrop')?.addEventListener('click', closeDrawer);
         document.querySelectorAll('#app-sidebar nav a').forEach(a => a.addEventListener('click', closeDrawer));
-        document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDrawer(); });
+        document.addEventListener('keydown', e => {
+          if (e.key === 'Escape') { closeDrawer(); document.querySelectorAll('.notice-bell[open]').forEach(d => d.removeAttribute('open')); }
+          if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); const s = document.getElementById('global-search'); if (s) { s.focus(); s.select(); } }
+        });
+        document.addEventListener('click', e => { document.querySelectorAll('.notice-bell[open]').forEach(d => { if (!d.contains(e.target)) d.removeAttribute('open'); }); });
       })();
     </script>
   </body>
@@ -6066,9 +6071,11 @@ function renderDashboard(query, role = 'adm') {
     <section class="page-header">
       <div>
         <h2>Dashboard</h2>
-        <p>Leitura em tempo real do que já foi lançado hoje por hora.</p>
+        <p>O essencial do dia em 3 blocos — clique em qualquer número para abrir a lista.</p>
       </div>
     </section>
+
+    ${renderDayPanel()}
 
     ${renderQueueForecastCard()}
 
@@ -10201,6 +10208,162 @@ function handleFinancePost(pathname, form, res) {
 }
 // ===============================================================
 
+// ===================== PAINEL DO DIA, BUSCA GLOBAL E AVISOS =====================
+// Situação do dia pelo quadro por hora: % até agora (horas lançadas) e % do dia (base cheia)
+function getHourlyCompanyNow(productionDate = today()) {
+  const employees = getGridEmployees(productionDate);
+  const rows = db.prepare('SELECT employee_id, hour_slot, produced_minutes FROM hourly_productions WHERE production_date = ? AND is_reversed = 0').all(productionDate);
+  const zeros = db.prepare('SELECT employee_id, hour_slot FROM hourly_zero_hours WHERE production_date = ? AND is_reversed = 0').all(productionDate);
+  const base = baseMinutesDay();
+  const nowMin = Number(BUSINESS_HOUR_FMT.format(new Date())) * 60 + new Date().getMinutes();
+  const isToday = productionDate === today();
+  let minutes = 0, elapsed = 0, launched = 0, pendingHours = 0;
+  const pendingByEmployee = [];
+  for (const emp of employees) {
+    const own = rows.filter(r => r.employee_id === emp.id);
+    const slots = new Set([...own.map(r => r.hour_slot), ...zeros.filter(z => z.employee_id === emp.id).map(z => z.hour_slot)]);
+    const blocks = getEmployeeHourBlocks(emp);
+    minutes += own.reduce((a, r) => a + Number(r.produced_minutes || 0), 0);
+    elapsed += blocks.filter(b => slots.has(b.slot)).reduce((a, b) => a + b.minutes, 0);
+    if (slots.size) launched += 1;
+    // Horas já encerradas (fim da hora passou) e ainda sem lançamento
+    if (isToday) {
+      const missing = blocks.filter(b => !slots.has(b.slot) && timeToMinutes(b.label) <= nowMin).length;
+      if (missing) { pendingHours += missing; pendingByEmployee.push({ emp, missing }); }
+    }
+  }
+  return {
+    employees: employees.length, launched, minutes, elapsed,
+    nowPct: elapsed > 0 ? (minutes / elapsed) * 100 : null,
+    dayPct: employees.length ? (minutes / (employees.length * base)) * 100 : 0,
+    pendingHours, pendingByEmployee
+  };
+}
+
+function getDeadlineCounts() {
+  const open = "is_reversed = 0 AND shipped_at IS NULL AND status_color <> 'vermelho' AND COALESCE(lifecycle_type, 'normal') = 'normal'";
+  const r = db.prepare(`SELECT
+      SUM(CASE WHEN delivery_date IS NOT NULL AND delivery_date <> '' AND delivery_date < ? THEN 1 ELSE 0 END) AS late,
+      SUM(CASE WHEN delivery_date BETWEEN ? AND ? THEN 1 ELSE 0 END) AS soon,
+      SUM(CASE WHEN status_color = 'azul' THEN 1 ELSE 0 END) AS ready
+    FROM ops WHERE ${open}`).get(today(), today(), addDaysIso(today(), 3));
+  const stuck = db.prepare('SELECT COUNT(DISTINCT op_id) AS n FROM op_cell_transfers WHERE quantity_sent > quantity_returned AND sent_at <= ?').get(addDaysIso(today(), -paramOf('cell_stuck'))).n;
+  const inCell = db.prepare("SELECT COUNT(*) AS n FROM ops WHERE is_reversed = 0 AND status_color = 'rosa'").get().n;
+  const occurrences = db.prepare("SELECT COUNT(*) AS n FROM op_occurrences oc JOIN ops o ON o.id = oc.op_id WHERE oc.is_concluded = 0 AND o.is_reversed = 0").get().n;
+  return { late: Number(r.late || 0), soon: Number(r.soon || 0), ready: Number(r.ready || 0), stuck: Number(stuck || 0), inCell: Number(inCell || 0), occurrences: Number(occurrences || 0) };
+}
+
+function renderDayPanel() {
+  const pctCls = p => p === null ? '' : (p >= targetPercent() ? 'perf-high' : (p >= 40 ? 'perf-mid' : 'perf-low'));
+  let now, dl, snap, absent, queue;
+  try { now = getHourlyCompanyNow(); } catch (_) { now = null; }
+  try { dl = getDeadlineCounts(); } catch (_) { dl = null; }
+  try { snap = getTargetSnapshot(); } catch (_) { snap = null; }
+  try { absent = getEmployeesWithoutLaunch(today()); } catch (_) { absent = null; }
+  try { queue = getQueueForecast(); } catch (_) { queue = null; }
+  const row = (href, label, value, cls = '', hint = '') => `<a class="day-row" href="${href}"><span>${label}${hint ? `<small>${hint}</small>` : ''}</span><strong class="${cls}">${value}</strong></a>`;
+  const below = snap ? snap.rows.filter(r => r.pct < r.target).length : 0;
+  return `<section class="day-panel">
+    <article class="day-block">
+      <h3>📍 Hoje</h3>
+      ${now ? row('/productions/hourly/quadro', 'Empresa até agora', now.nowPct === null ? '—' : `${fmtNum(now.nowPct, 1)}%`, pctCls(now.nowPct), `${fmtNum(now.minutes, 0)} min em ${fmtNum(now.elapsed, 0)} min lançados`) : ''}
+      ${now ? row('/productions/hourly/quadro', 'Resultado do dia', `${fmtNum(now.dayPct, 1)}%`, pctCls(now.dayPct), `base ${now.employees} × ${fmtNum(baseMinutesDay(), 0)} min`) : ''}
+      ${absent ? row('/#hourly-dashboard-panel', 'Sem lançamento hoje', `${absent.list.length} de ${absent.active}`, absent.list.length - absent.withAbsence > 0 ? 'perf-low' : 'perf-high', absent.withAbsence ? `${absent.withAbsence} com ausência registrada` : '') : ''}
+      ${now ? row('/productions/hourly/quadro', 'Horas pendentes no quadro', now.pendingHours, now.pendingHours ? 'perf-mid' : 'perf-high', now.pendingHours ? `${now.pendingByEmployee.length} costureira(s)` : 'tudo lançado até agora') : ''}
+    </article>
+    <article class="day-block">
+      <h3>🚚 Entregas e OPs</h3>
+      ${dl ? row('/ops?deadline=atrasadas', 'Entregas atrasadas', dl.late, dl.late ? 'perf-low' : 'perf-high') : ''}
+      ${dl ? row('/ops?deadline=vencem3', 'Vencem em até 3 dias', dl.soon, dl.soon ? 'perf-mid' : '') : ''}
+      ${dl ? row('/cells/report', 'Paradas em célula', dl.stuck, dl.stuck ? 'perf-low' : 'perf-high', `${paramOf('cell_stuck')}+ dias · ${dl.inCell} em célula`) : ''}
+      ${dl ? row('/ops?status=azul', 'Prontas para embarcar', dl.ready, '', dl.occurrences ? `${dl.occurrences} ocorrência(s) aberta(s)` : '') : ''}
+    </article>
+    <article class="day-block">
+      <h3>📊 Período</h3>
+      ${snap ? row('/acompanhamento/diario', 'Eficiência até o corte', `${fmtNum(snap.total.pct, 1)}%`, pctCls(snap.total.pct), `meta ${tp()}% · corte ${formatDatePtBr(snap.cutoff)}`) : ''}
+      ${snap ? row('/acompanhamento/diario', 'Abaixo da meta', `${below} de ${snap.rows.length}`, below ? 'perf-mid' : 'perf-high') : ''}
+      ${queue ? row('/ops', 'Fila', queue.queueDays === null ? '—' : `${fmtNum(queue.queueDays, 1)} dias`, '', queue.finishDate ? `término ${formatDatePtBr(queue.finishDate)}` : '') : ''}
+    </article>
+  </section>`;
+}
+
+// Avisos do sino (cache de 60 s por empresa e perfil para não pesar as telas)
+const noticeCache = new Map();
+function getTopNotices(role) {
+  const company = getRequestAuth()?.company?.slug || '';
+  const launcher = isLancadorRole(role) || isHourlyLauncherRole(role);
+  const key = `${company}|${launcher ? 'l' : 'g'}`;
+  const hit = noticeCache.get(key);
+  if (hit && Date.now() - hit.at < 60000) return hit.items;
+  const items = [];
+  try {
+    const now = getHourlyCompanyNow();
+    if (now.pendingHours) items.push({ level: 'mid', href: '/productions/hourly/quadro', text: `${now.pendingHours} hora(s) já encerrada(s) sem lançamento no quadro`, detail: now.pendingByEmployee.slice(0, 4).map(p => `${String(p.emp.full_name).split(' ')[0]} (${p.missing})`).join(', ') });
+    const absent = getEmployeesWithoutLaunch(today());
+    const unjustified = absent.list.filter(i => !i.absence).length;
+    if (unjustified && Number(BUSINESS_HOUR_FMT.format(new Date())) >= 9) items.push({ level: 'low', href: '/#hourly-dashboard-panel', text: `${unjustified} colaboradora(s) sem nenhum lançamento hoje` });
+    if (!launcher) {
+      const dl = getDeadlineCounts();
+      if (dl.late) items.push({ level: 'low', href: '/ops?deadline=atrasadas', text: `${dl.late} OP(s) com entrega atrasada` });
+      if (dl.soon) items.push({ level: 'mid', href: '/ops?deadline=vencem3', text: `${dl.soon} OP(s) vencem em até 3 dias` });
+      if (dl.stuck) items.push({ level: 'low', href: '/cells/report', text: `${dl.stuck} OP(s) parada(s) em célula há ${paramOf('cell_stuck')}+ dias` });
+      if (dl.occurrences) items.push({ level: 'mid', href: '/ops?status=amarelo', text: `${dl.occurrences} ocorrência(s) aberta(s)` });
+    }
+  } catch (error) {
+    console.error('Avisos do topo:', error.message);
+  }
+  noticeCache.set(key, { at: Date.now(), items });
+  return items;
+}
+
+function renderTopTools(role) {
+  const items = getTopNotices(role);
+  const canSeePeople = !isLancadorRole(role) && !isHourlyLauncherRole(role);
+  return `
+    <form class="global-search" method="get" action="/buscar" role="search">
+      <input name="q" id="global-search" autocomplete="off" placeholder="${canSeePeople ? 'Buscar OP ou colaboradora' : 'Buscar OP'} (Ctrl+K)" aria-label="Buscar" />
+    </form>
+    <details class="notice-bell">
+      <summary title="Avisos">🔔${items.length ? `<span class="notice-count">${items.length}</span>` : ''}</summary>
+      <div class="notice-list">
+        <strong>Avisos de agora</strong>
+        ${items.map(i => `<a class="notice-item is-${i.level}" href="${i.href}"><span>${escapeHtml(i.text)}</span>${i.detail ? `<small>${escapeHtml(i.detail)}</small>` : ''}</a>`).join('') || '<p class="hint">Nada pendente agora. ✅</p>'}
+      </div>
+    </details>`;
+}
+
+function renderSearchPage(query, role) {
+  const q = String(query.q || '').trim();
+  const canSeePeople = !isLancadorRole(role) && !isHourlyLauncherRole(role);
+  const like = `%${q.replace(/[%_]/g, '')}%`;
+  const ops = q ? db.prepare(`SELECT id, op_number, product_name, brand, status_color, delivery_date FROM ops WHERE is_reversed = 0 AND (op_number LIKE ? OR barcode LIKE ? OR product_name LIKE ? COLLATE NOCASE OR brand LIKE ? COLLATE NOCASE OR collection_name LIKE ? COLLATE NOCASE) ORDER BY (shipped_at IS NOT NULL), created_at DESC LIMIT 40`).all(like, like, like, like, like) : [];
+  const people = q && canSeePeople ? db.prepare('SELECT id, registration_code, full_name, job_role, termination_date FROM employees WHERE full_name LIKE ? COLLATE NOCASE OR registration_code LIKE ? ORDER BY (termination_date IS NOT NULL), full_name LIMIT 20').all(like, like) : [];
+  const content = `
+    <section class="page-header"><div><h2>Busca</h2><p>${q ? `Resultados para “${escapeHtml(q)}”` : 'Digite o número da OP, produto, marca ou nome da colaboradora.'}</p></div></section>
+    <section class="panel">
+      <h3>OPs (${ops.length})</h3>
+      <div class="table-wrap"><table><thead><tr><th>OP</th><th>Produto</th><th>Marca</th><th>Status</th><th>Entrega</th></tr></thead><tbody>
+        ${ops.map(o => `<tr><td><a href="/ops/${o.id}"><strong>${escapeHtml(o.op_number)}</strong></a></td><td>${escapeHtml(o.product_name || '-')}</td><td>${escapeHtml(o.brand || '-')}</td><td><span class="badge ${escapeHtml(o.status_color)}">${escapeHtml(o.status_color)}</span></td><td>${o.delivery_date ? formatDatePtBr(o.delivery_date) : '-'}</td></tr>`).join('') || '<tr><td colspan="5">Nenhuma OP encontrada.</td></tr>'}
+      </tbody></table></div>
+    </section>
+    ${canSeePeople ? `<section class="panel section-gap"><h3>Colaboradoras (${people.length})</h3>
+      <div class="table-wrap"><table><thead><tr><th>Nome</th><th>Função</th><th>Situação</th><th></th></tr></thead><tbody>
+        ${people.map(p => `<tr><td><strong>${escapeHtml(p.full_name)}</strong> <small class="hint">${escapeHtml(p.registration_code || '')}</small></td><td>${escapeHtml(p.job_role || '-')}</td><td>${p.termination_date ? 'Desligada' : 'Ativa'}</td><td class="search-links"><a href="/employees?q=${encodeURIComponent(p.full_name)}&status=todas">Cadastro</a><a href="/productions/hourly/quadro?employee_id=${p.id}">Quadro hoje</a><a href="/acompanhamento/diario?employee_id=${p.id}">Acompanhamento</a></td></tr>`).join('') || '<tr><td colspan="4">Nenhuma colaboradora encontrada.</td></tr>'}
+      </tbody></table></div></section>` : ''}`;
+  return pageLayout({ title: 'Busca', content, role });
+}
+
+function handleGlobalSearch(query, res, role) {
+  const q = String(query.q || '').trim();
+  if (q) {
+    // Número da OP ou código de barras bipado: abre direto
+    const op = getOpByNumber(q);
+    if (op) return redirect(res, `/ops/${op.id}`);
+  }
+  return sendHtml(res, renderSearchPage(query, role));
+}
+// ===============================================================
+
 // ===================== TELA PARÂMETROS =====================
 const ABSENCE_TYPE_LABELS = { falta: 'Falta', atestado: 'Atestado', ferias: 'Férias', folga: 'Folga', afastamento: 'Afastamento', outro: 'Outro' };
 
@@ -10211,6 +10374,8 @@ function renderParametersPage(query = {}, values = null, error = '', role = 'adm
   const num = (key, attrs = '') => `<input type="number" name="${key}" value="${escapeHtml(String(v[key] ?? ''))}" ${attrs} />`;
   const content = `
     <section class="page-header"><div><h2>Parâmetros</h2><p>Regras de cálculo desta empresa. Alterações valem para todas as telas (Dashboard, Acompanhamento, Fechamento e Prêmio) a partir de agora.</p></div></section>
+    <nav class="fin-tabs" data-ptabs><a href="#regras" data-ptab-link="regras">Regras e prêmio</a><a href="#alertas" data-ptab-link="alertas">Alertas Telegram</a><a href="#api" data-ptab-link="api">API e integrações</a></nav>
+    <div data-ptab="regras" id="regras">
     <form class="params-form" method="post" action="/parametros">
       <section class="panel">
         <h3>Base e meta</h3>
@@ -10269,8 +10434,21 @@ function renderParametersPage(query = {}, values = null, error = '', role = 'adm
         <div class="actions"><button class="btn" type="submit">Salvar parâmetros</button><a class="btn secondary" href="/parametros">Descartar alterações</a></div>
       </section>
     </form>
-    ${renderAlertsSection()}
-    ${renderApiSection()}`;
+    </div>
+    <div data-ptab="alertas">${renderAlertsSection()}</div>
+    <div data-ptab="api">${renderApiSection()}</div>
+    <script>
+      (() => {
+        const show = () => {
+          const h = (location.hash || '#regras').slice(1);
+          const key = ['alertas', 'api'].includes(h) ? h : 'regras';
+          document.querySelectorAll('[data-ptab]').forEach(el => { el.hidden = el.dataset.ptab !== key; });
+          document.querySelectorAll('[data-ptab-link]').forEach(a => a.classList.toggle('active', a.dataset.ptabLink === key));
+        };
+        window.addEventListener('hashchange', show);
+        show();
+      })();
+    </script>`;
   return pageLayout({ title: 'Parâmetros', content, notice: query.notice || '', error: error || query.error || '', role });
 }
 
@@ -13125,6 +13303,7 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && pathname === '/conta/senha') return handleChangePassword(await parseBody(req), res, auth);
       if (auth.user.must_change_password) return redirect(res, '/conta/senha');
 
+      if (req.method === 'GET' && pathname === '/buscar') return handleGlobalSearch(query, res, role);
       if (req.method === 'GET' && pathname === '/api/op-preview') {
         const preview = getOpQuickPreview(query.op_number || '');
         return sendJson(res, preview ? { found: true, ...preview } : { found: false }, preview ? 200 : 404);
