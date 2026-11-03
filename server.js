@@ -6073,6 +6073,7 @@ function renderDashboard(query, role = 'adm') {
         <h2>Dashboard</h2>
         <p>O essencial do dia em 3 blocos — clique em qualquer número para abrir a lista.</p>
       </div>
+      <div class="header-actions"><a class="btn secondary" href="/tv" target="_blank">📺 Modo TV</a><a class="btn secondary" href="/ops?view=quadro">▦ Quadro de OPs</a></div>
     </section>
 
     ${renderDayPanel()}
@@ -8540,6 +8541,238 @@ async function handleReadApi(req, res, pathname, query) {
   });
 }
 
+// ===================== MODO TV (painel da produção) =====================
+// Tela cheia para a TV da fábrica: só resultado da equipe, sem ranking individual. Atualiza a cada 60 s.
+// Acesso: usuário logado em /tv, ou link fixo /tv/<empresa>?k=<token> gerado em Parâmetros (só leitura).
+function getTvData() {
+  const day = today();
+  const now = getHourlyCompanyNow(day);
+  const employees = getGridEmployees(day);
+  const rows = db.prepare('SELECT hour_slot, produced_minutes, produced_quantity FROM hourly_productions WHERE production_date = ? AND is_reversed = 0').all(day);
+  const zeros = db.prepare('SELECT employee_id, hour_slot FROM hourly_zero_hours WHERE production_date = ? AND is_reversed = 0').all(day);
+  const base = baseMinutesDay();
+  const goalRatio = targetPercent() / 100;
+  const nowMin = Number(BUSINESS_HOUR_FMT.format(new Date())) * 60 + new Date().getMinutes();
+  const slots = new Map();
+  for (const emp of employees) {
+    for (const b of getEmployeeHourBlocks(emp)) {
+      const it = slots.get(b.slot) || { slot: b.slot, label: b.label, cap: 0, minutes: 0, launchedCap: 0 };
+      it.cap += b.minutes;
+      if (timeToMinutes(b.label) > timeToMinutes(it.label)) it.label = b.label;
+      slots.set(b.slot, it);
+    }
+  }
+  const launchedKeys = new Set();
+  db.prepare('SELECT DISTINCT employee_id, hour_slot FROM hourly_productions WHERE production_date = ? AND is_reversed = 0').all(day).forEach(r => launchedKeys.add(`${r.employee_id}|${r.hour_slot}`));
+  zeros.forEach(z => launchedKeys.add(`${z.employee_id}|${z.hour_slot}`));
+  for (const emp of employees) {
+    for (const b of getEmployeeHourBlocks(emp)) if (launchedKeys.has(`${emp.id}|${b.slot}`)) slots.get(b.slot).launchedCap += b.minutes;
+  }
+  rows.forEach(r => { const it = slots.get(r.hour_slot); if (it) it.minutes += Number(r.produced_minutes || 0); });
+  const hours = [...slots.values()].sort((a, b) => a.slot.localeCompare(b.slot)).map(h => ({
+    ...h,
+    pct: h.launchedCap > 0 ? (h.minutes / h.launchedCap) * 100 : null,
+    closed: timeToMinutes(h.label) <= nowMin,
+    current: timeToMinutes(h.slot) <= nowMin && nowMin < timeToMinutes(h.label)
+  }));
+  const pieces = rows.reduce((a, r) => a + Number(r.produced_quantity || 0), 0);
+  const teamGoal = employees.length * base * goalRatio;
+  const counts = Object.fromEntries(db.prepare("SELECT status_color AS s, COUNT(*) AS n FROM ops WHERE is_reversed = 0 AND shipped_at IS NULL AND status_color <> 'vermelho' GROUP BY status_color").all().map(r => [r.s, r.n]));
+  const dueToday = db.prepare("SELECT COUNT(*) AS n FROM ops WHERE is_reversed = 0 AND shipped_at IS NULL AND status_color <> 'vermelho' AND COALESCE(lifecycle_type, 'normal') = 'normal' AND delivery_date = ?").get(day).n;
+  let dl = null, snap = null;
+  try { dl = getDeadlineCounts(); } catch (_) { dl = null; }
+  try { snap = getTargetSnapshot(); } catch (_) { snap = null; }
+  return { day, now, hours, pieces, teamGoal, base, counts, dueToday, dl, snap, employees: employees.length };
+}
+
+function renderTvPage(refreshUrl = '') {
+  const d = getTvData();
+  const goal = targetPercent();
+  const cls = p => p === null || p === undefined ? 'muted' : (p >= goal ? 'good' : (p >= 40 ? 'mid' : 'bad'));
+  const pctTxt = p => p === null || p === undefined ? '—' : `${fmtNum(p, 1)}%`;
+  const progress = d.teamGoal > 0 ? Math.min(100, (d.now.minutes / d.teamGoal) * 100) : 0;
+  const maxPct = Math.max(goal * 1.5, ...d.hours.map(h => h.pct || 0));
+  const bars = d.hours.map(h => {
+    const height = h.pct === null ? 0 : Math.max(2, (h.pct / maxPct) * 100);
+    return `<div class="bar ${h.current ? 'is-now' : ''} ${!h.closed && !h.current && h.pct === null ? 'is-future' : ''}">
+      <span class="v ${cls(h.pct)}">${h.pct === null ? (h.closed ? '?' : '') : `${fmtNum(h.pct, 0)}%`}</span>
+      <div class="track"><div class="fill ${cls(h.pct)}" style="height:${height}%"></div><div class="goal" style="bottom:${(goal / maxPct) * 100}%"></div></div>
+      <span class="l">${escapeHtml(h.label)}</span>
+    </div>`;
+  }).join('');
+  const op = (label, n, color) => `<div class="op"><span class="dot ${color}"></span><span>${label}</span><strong>${n || 0}</strong></div>`;
+  const company = escapeHtml(getCompanyName() || 'AgilFac');
+  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta http-equiv="refresh" content="60${refreshUrl ? `;url=${escapeHtml(refreshUrl)}` : ''}" />
+<meta name="robots" content="noindex" />
+<title>Modo TV · ${company}</title>
+<style>
+  :root { --bg:#0b1220; --card:#121b2e; --line:#22304d; --text:#e8eefc; --muted:#8a9bbd; --good:#22c55e; --mid:#f59e0b; --bad:#ef4444; --accent:#60a5fa; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  body { display:flex; flex-direction:column; padding:2.2vh 2.2vw; gap:2vh; overflow:hidden; }
+  header { display:flex; align-items:center; justify-content:space-between; gap:2vw; }
+  header h1 { margin:0; font-size:3.4vh; font-weight:700; letter-spacing:.02em; }
+  header h1 small { color:var(--muted); font-weight:500; margin-left:1vw; font-size:2.4vh; }
+  .clock { font-size:5vh; font-weight:700; font-variant-numeric:tabular-nums; }
+  .fs { background:none; border:1px solid var(--line); color:var(--muted); border-radius:8px; padding:.6vh 1vw; font-size:1.8vh; cursor:pointer; }
+  .kpis { display:grid; grid-template-columns:repeat(4,1fr); gap:1.6vw; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:2vh 1.6vw; }
+  .kpi .t { color:var(--muted); font-size:2.2vh; text-transform:uppercase; letter-spacing:.06em; }
+  .kpi .n { font-size:9vh; font-weight:800; line-height:1.05; font-variant-numeric:tabular-nums; }
+  .kpi .s { color:var(--muted); font-size:2vh; }
+  .good { color:var(--good); } .mid { color:var(--mid); } .bad { color:var(--bad); } .muted { color:var(--muted); }
+  .prog { height:1.6vh; background:#1c2742; border-radius:99px; overflow:hidden; margin:1vh 0 .6vh; }
+  .prog div { height:100%; background:linear-gradient(90deg,#3b82f6,#22c55e); border-radius:99px; }
+  .main { flex:1; display:grid; grid-template-columns:2.2fr 1fr; gap:1.6vw; min-height:0; }
+  .chart { display:flex; flex-direction:column; min-height:0; }
+  .chart h2, .side h2 { margin:0 0 1.4vh; font-size:2.4vh; color:var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:.06em; }
+  .bars { flex:1; display:flex; gap:.8vw; align-items:stretch; min-height:0; }
+  .bar { flex:1; display:flex; flex-direction:column; align-items:center; gap:.8vh; min-width:0; }
+  .bar .v { font-size:2.6vh; font-weight:700; height:3.2vh; }
+  .bar .l { font-size:2vh; color:var(--muted); font-variant-numeric:tabular-nums; }
+  .track { flex:1; width:100%; background:#18233b; border-radius:10px; position:relative; overflow:hidden; }
+  .fill { position:absolute; bottom:0; left:0; right:0; border-radius:10px 10px 0 0; }
+  .fill.good { background:var(--good); } .fill.mid { background:var(--mid); } .fill.bad { background:var(--bad); }
+  .goal { position:absolute; left:0; right:0; border-top:2px dashed rgba(255,255,255,.55); }
+  .bar.is-now .track { outline:3px solid var(--accent); }
+  .bar.is-now .l { color:var(--accent); font-weight:700; }
+  .bar.is-future { opacity:.35; }
+  .legend { color:var(--muted); font-size:1.8vh; margin-top:1vh; }
+  .side { display:flex; flex-direction:column; gap:1.6vw; min-height:0; }
+  .op { display:flex; align-items:center; gap:1vw; font-size:2.6vh; padding:.9vh 0; border-bottom:1px solid var(--line); }
+  .op:last-child { border-bottom:0; }
+  .op strong { margin-left:auto; font-size:3.4vh; font-variant-numeric:tabular-nums; }
+  .dot { width:1.8vh; height:1.8vh; border-radius:50%; flex:none; }
+  .dot.verde { background:#22c55e; } .dot.rosa { background:#ec4899; } .dot.amarelo { background:#eab308; } .dot.azul { background:#3b82f6; } .dot.vermelho { background:#ef4444; }
+  .alerts { display:grid; grid-template-columns:repeat(3,1fr); gap:1vw; text-align:center; }
+  .alerts div { background:#18233b; border-radius:12px; padding:1.4vh .6vw; }
+  .alerts strong { display:block; font-size:5.4vh; line-height:1.1; }
+  .alerts span { font-size:1.8vh; color:var(--muted); }
+  footer { color:var(--muted); font-size:1.7vh; display:flex; justify-content:space-between; }
+  @media (max-width: 900px), (orientation: portrait) {
+    body { overflow:auto; height:auto; padding:16px; gap:14px; }
+    .kpis { grid-template-columns:repeat(2,1fr); gap:12px; }
+    .main { grid-template-columns:1fr; gap:12px; }
+    .kpi .n { font-size:44px; } .kpi .t, .kpi .s { font-size:13px; }
+    .bars { height:260px; flex:none; }
+    header h1 { font-size:20px; } header h1 small { font-size:14px; } .clock { font-size:28px; }
+    .op { font-size:16px; } .op strong { font-size:20px; } .alerts strong { font-size:30px; } .alerts span, .bar .l, .legend, footer { font-size:12px; } .bar .v { font-size:13px; }
+    .chart h2, .side h2 { font-size:13px; }
+  }
+</style></head>
+<body>
+  <header>
+    <h1>${company}<small>Produção de hoje · ${escapeHtml(formatDatePtBr(d.day))}</small></h1>
+    <div style="display:flex;align-items:center;gap:1.4vw"><button class="fs" type="button" onclick="document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen()">⛶ Tela cheia</button><div class="clock" id="clock">--:--</div></div>
+  </header>
+  <section class="kpis">
+    <div class="card kpi"><div class="t">Equipe até agora</div><div class="n ${cls(d.now.nowPct)}">${pctTxt(d.now.nowPct)}</div><div class="s">meta ${fmtNum(goal, 0)}% · ${fmtNum(d.now.minutes, 0)} min em ${fmtNum(d.now.elapsed, 0)} lançados</div></div>
+    <div class="card kpi"><div class="t">Resultado do dia</div><div class="n ${cls(d.now.dayPct)}">${pctTxt(d.now.dayPct)}</div><div class="s">${d.employees} costureiras × ${fmtNum(d.base, 0)} min</div></div>
+    <div class="card kpi"><div class="t">Minutos da equipe</div><div class="n">${fmtNum(d.now.minutes, 0)}</div><div class="prog"><div style="width:${fmtNum(progress, 1).replace(',', '.')}%"></div></div><div class="s">${fmtNum(progress, 0)}% da meta do dia (${fmtNum(d.teamGoal, 0)} min)</div></div>
+    <div class="card kpi"><div class="t">Peças hoje</div><div class="n">${fmtNum(d.pieces, 0)}</div><div class="s">${d.snap ? `período até ${escapeHtml(formatDatePtBr(d.snap.cutoff))}: <b class="${cls(d.snap.total.pct)}">${pctTxt(d.snap.total.pct)}</b>` : 'lançadas no quadro por hora'}</div></div>
+  </section>
+  <section class="main">
+    <div class="card chart">
+      <h2>Equipe hora a hora</h2>
+      <div class="bars">${bars || '<p class="muted">Nenhuma jornada cadastrada.</p>'}</div>
+      <div class="legend">Barra = minutos produzidos ÷ minutos das horas lançadas · linha tracejada = meta ${fmtNum(goal, 0)}% · contorno azul = hora atual</div>
+    </div>
+    <div class="side">
+      <div class="card">
+        <h2>OPs na fábrica</h2>
+        ${op('Em produção', d.counts.verde, 'verde')}
+        ${op('Em célula', d.counts.rosa, 'rosa')}
+        ${op('Ocorrência', d.counts.amarelo, 'amarelo')}
+        ${op('Prontas p/ embarcar', d.counts.azul, 'azul')}
+      </div>
+      <div class="card">
+        <h2>Entregas</h2>
+        <div class="alerts">
+          <div><strong class="${d.dl && d.dl.late ? 'bad' : 'good'}">${d.dl ? d.dl.late : '—'}</strong><span>atrasadas</span></div>
+          <div><strong class="${d.dueToday ? 'mid' : ''}">${d.dueToday}</strong><span>vencem hoje</span></div>
+          <div><strong>${d.dl ? d.dl.soon : '—'}</strong><span>até 3 dias</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+  <footer><span>Atualiza sozinho a cada minuto · última atualização ${escapeHtml(new Intl.DateTimeFormat('pt-BR', { timeZone: BUSINESS_TZ, hour: '2-digit', minute: '2-digit' }).format(new Date()))}</span><span>AgilFac · Modo TV</span></footer>
+<script>
+  (function () {
+    var el = document.getElementById('clock');
+    var fmt = new Intl.DateTimeFormat('pt-BR', { timeZone: '${BUSINESS_TZ}', hour: '2-digit', minute: '2-digit' });
+    function tick() { el.textContent = fmt.format(new Date()); }
+    tick(); setInterval(tick, 5000);
+    try { if ('wakeLock' in navigator) navigator.wakeLock.request('screen').catch(function () {}); } catch (e) {}
+  })();
+</script>
+</body></html>`;
+}
+
+function sendTvHtml(res, html) {
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex', 'Referrer-Policy': 'no-referrer' });
+  res.end(html);
+}
+
+function handlePublicTv(req, res, pathname, query) {
+  const slug = decodeURIComponent(pathname.slice(4)).toLowerCase().replace(/\/$/, '');
+  const token = String(query.k || '');
+  const deny = () => { res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end('Link do Modo TV inválido ou revogado.'); };
+  if (!/^[a-z0-9-]+$/.test(slug) || !/^[a-f0-9]{40}$/.test(token)) return deny();
+  const company = masterDb.prepare('SELECT * FROM companies WHERE LOWER(slug) = ? AND is_active = 1').get(slug);
+  if (!company) return deny();
+  let tenantDb;
+  try { tenantDb = getTenantDbForCompany(company); } catch (_) { return deny(); }
+  return requestContext.run({ tenantDb, auth: { company, user: null, role: 'tv' } }, () => {
+    const stored = getAlertSetting('tv_token');
+    if (!stored || stored.length !== token.length || !crypto.timingSafeEqual(Buffer.from(stored), Buffer.from(token))) return deny();
+    try {
+      return sendTvHtml(res, renderTvPage());
+    } catch (error) {
+      console.error(`Modo TV (${slug}):`, error.message);
+      res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8', 'Refresh': '60' });
+      return res.end('Falha ao montar o painel. Nova tentativa em 1 minuto.');
+    }
+  });
+}
+
+function renderTvSection() {
+  const token = getAlertSetting('tv_token');
+  const slug = String(getRequestAuth()?.company?.slug || '').toLowerCase();
+  const link = token ? `${APP_BASE_URL}/tv/${slug}?k=${token}` : '';
+  return `
+    <section class="panel" id="tv">
+      <h3>📺 Modo TV</h3>
+      <p class="hint">Painel em tela cheia para a TV da produção: resultado da equipe, hora a hora, OPs e entregas. Sem nomes nem ranking individual. Atualiza sozinho a cada minuto.</p>
+      <p>Para abrir num computador já logado: <a href="/tv" target="_blank">abrir Modo TV</a>.</p>
+      <form method="post" action="/parametros/tv" class="alerts-form">
+        ${link ? `<p>Link fixo para a TV (não pede login, só mostra o painel):</p>
+        <p><input type="text" readonly value="${escapeHtml(link)}" style="width:100%;font-family:monospace" onclick="this.select()" /></p>
+        <p class="hint">Quem tiver este link vê o painel. Se ele vazar, gere outro: o anterior para de funcionar.</p>` : '<p class="hint">Nenhum link fixo criado. Gere um para deixar a TV aberta sem login.</p>'}
+        <div class="actions">
+          ${link ? `<button class="btn secondary" type="button" onclick="navigator.clipboard.writeText('${escapeHtml(link)}');this.textContent='Copiado'">Copiar link</button>` : ''}
+          <button class="btn" type="submit" name="action" value="generate" ${link ? 'onclick="return confirm(\'Gerar novo link? O atual para de funcionar.\')"' : ''}>${link ? 'Gerar novo link' : 'Gerar link para TV'}</button>
+          ${link ? '<button class="btn secondary" type="submit" name="action" value="revoke" onclick="return confirm(\'Revogar o link da TV?\')">Revogar</button>' : ''}
+        </div>
+      </form>
+    </section>`;
+}
+
+function handleSaveTv(form, res, role) {
+  if (!isAdminRole(role)) return requireAdmin(null, res, role);
+  if (form.action === 'revoke') {
+    setAlertSetting('tv_token', '');
+    return redirect(res, `/parametros?notice=${encodeURIComponent('Link do Modo TV revogado.')}#tv`);
+  }
+  if (form.action === 'generate') {
+    setAlertSetting('tv_token', crypto.randomBytes(20).toString('hex'));
+    return redirect(res, `/parametros?notice=${encodeURIComponent('Link do Modo TV gerado.')}#tv`);
+  }
+  return redirect(res, '/parametros#tv');
+}
+// ===============================================================
+
 function renderApiSection(slug) {
   const hint = getAlertSetting('api_key_hint');
   return `
@@ -10374,7 +10607,7 @@ function renderParametersPage(query = {}, values = null, error = '', role = 'adm
   const num = (key, attrs = '') => `<input type="number" name="${key}" value="${escapeHtml(String(v[key] ?? ''))}" ${attrs} />`;
   const content = `
     <section class="page-header"><div><h2>Parâmetros</h2><p>Regras de cálculo desta empresa. Alterações valem para todas as telas (Dashboard, Acompanhamento, Fechamento e Prêmio) a partir de agora.</p></div></section>
-    <nav class="fin-tabs" data-ptabs><a href="#regras" data-ptab-link="regras">Regras e prêmio</a><a href="#alertas" data-ptab-link="alertas">Alertas Telegram</a><a href="#api" data-ptab-link="api">API e integrações</a></nav>
+    <nav class="fin-tabs" data-ptabs><a href="#regras" data-ptab-link="regras">Regras e prêmio</a><a href="#alertas" data-ptab-link="alertas">Alertas Telegram</a><a href="#api" data-ptab-link="api">API, TV e integrações</a></nav>
     <div data-ptab="regras" id="regras">
     <form class="params-form" method="post" action="/parametros">
       <section class="panel">
@@ -10436,12 +10669,12 @@ function renderParametersPage(query = {}, values = null, error = '', role = 'adm
     </form>
     </div>
     <div data-ptab="alertas">${renderAlertsSection()}</div>
-    <div data-ptab="api">${renderApiSection()}</div>
+    <div data-ptab="api">${renderApiSection()}${renderTvSection()}</div>
     <script>
       (() => {
         const show = () => {
           const h = (location.hash || '#regras').slice(1);
-          const key = ['alertas', 'api'].includes(h) ? h : 'regras';
+          const key = h === 'tv' ? 'api' : (['alertas', 'api'].includes(h) ? h : 'regras');
           document.querySelectorAll('[data-ptab]').forEach(el => { el.hidden = el.dataset.ptab !== key; });
           document.querySelectorAll('[data-ptab-link]').forEach(a => a.classList.toggle('active', a.dataset.ptabLink === key));
         };
@@ -11968,6 +12201,56 @@ function renderProductionForm(values = {}, error = '', notice = '', role = getRe
   return pageLayout({ title: 'Novo lançamento', content, error, notice, role });
 }
 
+// Quadro de OPs por status (kanban). Ordena por entrega; embarcadas só dos últimos 30 dias.
+const OP_KANBAN_COLUMNS = [
+  { status: 'verde', title: 'Em produção', hint: 'liberadas na fábrica' },
+  { status: 'rosa', title: 'Em célula', hint: 'saldo fora, em célula' },
+  { status: 'amarelo', title: 'Ocorrência', hint: 'com problema aberto' },
+  { status: 'azul', title: 'Finalizada', hint: 'prontas para embarcar' },
+  { status: 'vermelho', title: 'Embarcada', hint: 'últimos 30 dias' }
+];
+const OP_KANBAN_LIMIT = 40;
+
+function renderOpKanban(rows) {
+  const since = addDaysIso(today(), -30);
+  const byDelivery = (a, b) => String(a.delivery_date || '9999').localeCompare(String(b.delivery_date || '9999')) || String(a.op_number).localeCompare(String(b.op_number), 'pt-BR', { numeric: true });
+  const cols = OP_KANBAN_COLUMNS.map(col => {
+    let items = rows.filter(op => op.status_color === col.status);
+    if (col.status === 'vermelho') {
+      items = items.filter(op => !op.shipped_at || nowIsoDate(op.shipped_at) >= since)
+        .sort((a, b) => String(b.shipped_at || '').localeCompare(String(a.shipped_at || '')));
+    } else items.sort(byDelivery);
+    const shown = items.slice(0, OP_KANBAN_LIMIT);
+    const cards = shown.map(op => {
+      const late = op.status_color !== 'vermelho' && op.delivery_date && op.delivery_date < today() && isOpOpenForDelivery(op);
+      return `<a class="kb-card${late ? ' is-late' : ''}" href="/ops/${op.id}">
+        <div class="kb-top"><strong>OP ${escapeHtml(op.op_number)}</strong>${op.op_type === 'mostruario' ? '<span class="kb-type">mostruário</span>' : ''}</div>
+        <div class="kb-prod">${escapeHtml(op.product_name || '')}</div>
+        <div class="kb-meta">${escapeHtml(op.brand || 'Sem marca')}${op.active_cell_name ? ` · 🧵 ${escapeHtml(op.active_cell_name)}` : ''}</div>
+        <div class="kb-foot">
+          <span>${col.status === 'vermelho' ? `${fmtNum(op.total_pieces, 0)} pç · ${escapeHtml(nowPt(op.shipped_at))}` : `saldo <b>${fmtNum(Math.max(0, Number(op.remaining_quantity || 0)), 0)}</b> de ${fmtNum(op.total_pieces, 0)}`}</span>
+          ${col.status === 'vermelho' || !op.delivery_date ? '' : `<span>📅 ${deliveryBadge(op)}</span>`}
+        </div>
+      </a>`;
+    }).join('');
+    const more = items.length - shown.length;
+    return `<section class="kb-col kb-${col.status}">
+      <header><span class="kb-dot"></span><h3>${col.title}</h3><span class="kb-count">${items.length}</span></header>
+      <p class="hint">${col.hint}</p>
+      <div class="kb-cards">${cards || '<p class="hint kb-empty">Nenhuma OP.</p>'}
+        ${more > 0 ? `<a class="kb-more" href="/ops?status=${col.status}">+ ${more} — ver na lista</a>` : ''}
+      </div>
+    </section>`;
+  }).join('');
+  return `<div class="kanban">${cols}</div>`;
+}
+
+function nowIsoDate(value) {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return String(value || '').slice(0, 10);
+  return new Intl.DateTimeFormat('en-CA', { timeZone: BUSINESS_TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+}
+
 function renderOpListPage(query = {}, role = 'adm') {
   const availableBrands = getBrandList().map(item => item.name);
   const availableCollections = getCollectionList().map(item => item.name);
@@ -11981,7 +12264,8 @@ function renderOpListPage(query = {}, role = 'adm') {
     deadline: query.deadline || '',
     sort: query.sort || ''
   };
-  const rows = getOpList(filters);
+  const view = query.view === 'quadro' ? 'quadro' : 'lista';
+  const rows = getOpList(view === 'quadro' ? { ...filters, status: '' } : filters);
   const deadlineCounts = db.prepare(`
     SELECT
       SUM(CASE WHEN delivery_date IS NOT NULL AND delivery_date <> '' AND delivery_date < ? THEN 1 ELSE 0 END) AS late,
@@ -11992,15 +12276,22 @@ function renderOpListPage(query = {}, role = 'adm') {
   const content = `
     <section class="page-header">
       <div><h2>Consulta de OPs</h2><p>Busca com status, saldo e acesso ao histórico detalhado.</p></div>
-      <a class="btn" href="/ops/new">Nova OP</a>
+      <div class="header-actions">
+        <nav class="view-toggle" aria-label="Visualização">
+          <a class="${view === 'lista' ? 'is-active' : ''}" href="/ops?${new URLSearchParams({ ...query, view: 'lista', notice: '' }).toString()}">☰ Lista</a>
+          <a class="${view === 'quadro' ? 'is-active' : ''}" href="/ops?${new URLSearchParams({ ...query, view: 'quadro', notice: '' }).toString()}">▦ Quadro</a>
+        </nav>
+        <a class="btn" href="/ops/new">Nova OP</a>
+      </div>
     </section>
     ${Number(deadlineCounts.late || 0) || Number(deadlineCounts.soon || 0) ? `<div class="deadline-alerts">
       ${Number(deadlineCounts.late || 0) ? `<a class="delivery-tag late" href="/ops?deadline=atrasadas">${deadlineCounts.late} OP(s) atrasada(s)</a>` : ''}
       ${Number(deadlineCounts.soon || 0) ? `<a class="delivery-tag soon" href="/ops?deadline=vencem3">${deadlineCounts.soon} vencem em até 3 dias</a>` : ''}
     </div>` : ''}
     <form class="panel inline-form" method="get" action="/ops">
+      ${view === 'quadro' ? '<input type="hidden" name="view" value="quadro" />' : ''}
       <label>Buscar<input name="q" value="${escapeHtml(filters.q)}" placeholder="OP, código de barras, produto ou marca" /></label>
-      <label>Status
+      <label ${view === 'quadro' ? 'hidden' : ''}>Status
         <select name="status">
           <option value="">Todos</option>
           <option value="verde" ${filters.status === 'verde' ? 'selected' : ''}>Verde</option>
@@ -12048,14 +12339,14 @@ function renderOpListPage(query = {}, role = 'adm') {
       <button class="btn" type="submit">Filtrar</button>
       <a class="btn secondary" href="/labels/entry?${new URLSearchParams({ q: filters.q, status: filters.status, op_type: filters.opType, brand: filters.brand, collection_name: filters.collectionName }).toString()}" target="_blank">Gerar etiquetas de entrada</a>
     </form>
-    <section class="panel">
+    ${view === 'quadro' ? renderOpKanban(rows) : `<section class="panel">
       <table>
         <thead><tr><th>OP</th><th>Produto</th><th>Tipo</th><th>Marca</th><th>Coleção</th><th>Total</th><th>Produzido</th><th>Saldo</th><th><a href="/ops?${new URLSearchParams({ ...query, sort: 'entrega' }).toString()}" title="Ordenar por data de entrega">Entrega ↑</a></th><th>Embarque</th><th>Status</th>${isLancadorRole(role) ? '' : '<th>Cobrança</th>'}<th>Ações</th></tr></thead>
         <tbody>
           ${rows.map(op => `<tr><td>${escapeHtml(op.op_number)}</td><td>${escapeHtml(op.product_name)}</td><td>${escapeHtml(op.op_type)}</td><td>${escapeHtml(op.brand || '-')}</td><td>${escapeHtml(op.collection_name || '-')}</td><td>${op.total_pieces}</td><td>${op.produced_quantity}</td><td>${op.remaining_quantity}</td><td>${deliveryBadge(op)}</td><td>${escapeHtml(nowPt(op.shipped_at))}</td><td>${statusBadge(op.status_color)} ${lifecycleBadge(op.lifecycle_type)}</td>${isLancadorRole(role) ? '' : `<td>${billingStatusLabel(op)}</td>`}<td><a href="/ops/${op.id}">Detalhar</a></td></tr>`).join('') || '<tr><td colspan="13">Nenhuma OP encontrada.</td></tr>'}
         </tbody>
       </table>
-    </section>
+    </section>`}
   `;
   return pageLayout({ title: 'OPs', content, notice: query.notice || '', role });
 }
@@ -13255,6 +13546,7 @@ const server = http.createServer(async (req, res) => {
 
     if (pathname.startsWith('/public/')) return serveStatic(pathname, res);
     if (pathname === '/api/v1' || pathname.startsWith('/api/v1/')) return handleReadApi(req, res, pathname, query);
+    if (req.method === 'GET' && pathname.startsWith('/tv/') && pathname.length > 4) return handlePublicTv(req, res, pathname, query);
     // T1.6 — app instalável (PWA): manifest e service worker na raiz para valer em todo o site
     if (req.method === 'GET' && pathname === '/manifest.webmanifest') return serveStatic('/public/manifest.webmanifest', res);
     if (req.method === 'GET' && pathname === '/sw.js') {
@@ -13304,6 +13596,7 @@ const server = http.createServer(async (req, res) => {
       if (auth.user.must_change_password) return redirect(res, '/conta/senha');
 
       if (req.method === 'GET' && pathname === '/buscar') return handleGlobalSearch(query, res, role);
+      if (req.method === 'GET' && pathname === '/tv') return sendTvHtml(res, renderTvPage());
       if (req.method === 'GET' && pathname === '/api/op-preview') {
         const preview = getOpQuickPreview(query.op_number || '');
         return sendJson(res, preview ? { found: true, ...preview } : { found: false }, preview ? 200 : 404);
@@ -13376,6 +13669,7 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && pathname === '/parametros') return handleSaveParameters(await parseBody(req), res, role);
       if (req.method === 'POST' && pathname === '/parametros/alertas') return handleSaveAlerts(await parseBody(req), res, role);
       if (req.method === 'POST' && pathname === '/parametros/api') return handleSaveApi(await parseBody(req), res, role);
+      if (req.method === 'POST' && pathname === '/parametros/tv') return handleSaveTv(await parseBody(req), res, role);
       const workScheduleToggleMatch = pathname.match(/^\/work-schedules\/(\d+)\/toggle$/);
       if (req.method === 'POST' && workScheduleToggleMatch) return handleToggleWorkSchedule(Number(workScheduleToggleMatch[1]), res, role);
       const workScheduleUpdateMatch = pathname.match(/^\/work-schedules\/(\d+)$/);

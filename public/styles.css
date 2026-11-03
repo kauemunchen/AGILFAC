@@ -498,3 +498,34 @@ a.hourly-row:hover { background: #eef2ff; }
   .role-badge { display: none !important; }
   .notice-list { position: fixed; left: 12px; right: 12px; top: 64px; width: auto; }
 }
+
+/* ===== Quadro de OPs (kanban) ===== */
+.view-toggle { display:inline-flex; border:1px solid var(--border, #d9dee8); border-radius:10px; overflow:hidden; }
+.view-toggle a { padding:7px 12px; text-decoration:none; color:inherit; font-size:14px; }
+.view-toggle a.is-active { background:var(--primary, #1f4fd1); color:#fff; }
+.kanban { display:grid; grid-template-columns:repeat(5, minmax(196px, 1fr)); gap:10px; overflow-x:auto; padding-bottom:8px; align-items:start; }
+.kb-col { background:#f4f6fa; border:1px solid #e3e7ef; border-radius:12px; padding:10px; min-width:0; }
+.kb-col header { display:flex; align-items:center; gap:8px; }
+.kb-col h3 { margin:0; font-size:15px; }
+.kb-col > .hint { margin:2px 0 8px; font-size:12px; }
+.kb-count { margin-left:auto; background:#fff; border:1px solid #e3e7ef; border-radius:99px; padding:1px 9px; font-size:13px; font-weight:700; }
+.kb-dot { width:10px; height:10px; border-radius:50%; }
+.kb-verde .kb-dot { background:#22c55e; } .kb-rosa .kb-dot { background:#ec4899; } .kb-amarelo .kb-dot { background:#eab308; } .kb-azul .kb-dot { background:#3b82f6; } .kb-vermelho .kb-dot { background:#ef4444; }
+.kb-verde { border-top:3px solid #22c55e; } .kb-rosa { border-top:3px solid #ec4899; } .kb-amarelo { border-top:3px solid #eab308; } .kb-azul { border-top:3px solid #3b82f6; } .kb-vermelho { border-top:3px solid #ef4444; }
+.kb-cards { display:flex; flex-direction:column; gap:8px; max-height:70vh; overflow-y:auto; }
+.kb-card { display:block; background:#fff; border:1px solid #e3e7ef; border-radius:10px; padding:9px 10px; text-decoration:none; color:inherit; box-shadow:0 1px 2px rgba(15,23,42,.05); }
+.kb-card:hover { border-color:#9fb4e8; }
+.kb-card.is-late { border-left:4px solid #ef4444; }
+.kb-top { display:flex; justify-content:space-between; gap:6px; font-size:14px; }
+.kb-type { white-space:nowrap; align-self:flex-start; font-size:11px; background:#eef2ff; color:#3730a3; border-radius:6px; padding:1px 6px; }
+.kb-prod { font-size:13px; margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.kb-meta { font-size:12px; color:#64748b; margin-top:2px; }
+.kb-foot { display:flex; justify-content:space-between; align-items:center; gap:6px; flex-wrap:wrap; font-size:12px; margin-top:6px; color:#475569; }
+.kb-foot .delivery-tag { font-size:11px; }
+.kb-more { text-align:center; font-size:13px; padding:6px; }
+.kb-empty { text-align:center; padding:12px 0; }
+@media (max-width: 760px) {
+  .kanban { grid-template-columns:repeat(5, 82vw); scroll-snap-type:x mandatory; }
+  .kb-col { scroll-snap-align:start; }
+  .kb-cards { max-height:none; }
+}
