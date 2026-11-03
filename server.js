@@ -9074,6 +9074,25 @@ function renderExtraLaunchPage(values = {}, error = '', notice = '', role = 'adm
       <p class="hint">Hora extra em mais de uma OP: lance cada OP separada e divida o tempo trabalhado entre elas.</p>
     </section>
 
+    ${(() => {
+      ensureFinanceTables(getActiveDb());
+      const staff = db.prepare('SELECT * FROM indirect_staff WHERE end_date IS NULL OR end_date >= ? ORDER BY full_name').all(addDaysIso(today(), -60));
+      const list = db.prepare('SELECT io.*, st.full_name, st.job_role FROM indirect_overtime io JOIN indirect_staff st ON st.id = io.staff_id WHERE io.is_deleted = 0 AND io.work_date BETWEEN ? AND ? ORDER BY io.work_date DESC, io.id DESC').all(rStart, rEnd);
+      return `<section class="panel" style="margin-top:14px" id="indiretos-extra">
+        <h3>Indiretos em hora extra</h3>
+        <p class="hint">Quem não produz (supervisão, revisão, expedição…) mas trabalhou na hora extra junto com as operadoras. Entra só no custo da hora extra.${staff.length ? '' : ' Cadastre os indiretos em Custos e receitas → Colaboradoras.'}</p>
+        ${staff.length ? `<form class="form-grid" method="post" action="/productions/extra/indireto">
+          <label>Indireto<select name="staff_id" required><option value="">Selecione</option>${staff.map(st => `<option value="${st.id}">${escapeHtml(st.full_name)}${st.job_role ? ` — ${escapeHtml(st.job_role)}` : ''}</option>`).join('')}</select></label>
+          <label>Data<input type="date" name="work_date" required max="${today()}" value="${escapeHtml(values.production_date || today())}" /></label>
+          <label>Tempo trabalhado<input name="worked_time" required inputmode="numeric" placeholder="Ex.: 2:00 ou 120" /></label>
+          <label>Observação<input name="notes" placeholder="Opcional" /></label>
+          <div class="actions" style="align-self:flex-end"><button class="btn" type="submit">Lançar</button></div>
+        </form>` : ''}
+        ${list.length ? `<div class="table-wrap"><table style="margin-top:10px"><thead><tr><th>Data</th><th>Indireto</th><th>Tempo</th><th>Observação</th><th></th></tr></thead><tbody>
+          ${list.map(r => `<tr><td>${formatDatePtBr(r.work_date)}</td><td>${escapeHtml(r.full_name)}${r.job_role ? ` <small class="hint">${escapeHtml(r.job_role)}</small>` : ''}</td><td>${fmtHoursMinutes(r.worked_minutes)}</td><td>${escapeHtml(r.notes || '-')}</td><td><form method="post" action="/productions/extra/indireto/${r.id}/excluir" onsubmit="return confirm('Excluir este lançamento?')"><button class="btn secondary" type="submit">Excluir</button></form></td></tr>`).join('')}
+        </tbody><tfoot><tr><th colspan="2">Total no período</th><th>${fmtHoursMinutes(list.reduce((a, r) => a + Number(r.worked_minutes || 0), 0))}</th><th colspan="2"></th></tr></tfoot></table></div>` : ''}
+      </section>`;
+    })()}
     <section class="panel" style="margin-top:14px" id="relatorio">
       <h3>Eficiência em hora extra</h3>
       <form class="inline-form" method="get" action="/productions/extra#relatorio">
@@ -9090,6 +9109,16 @@ function renderExtraLaunchPage(values = {}, error = '', notice = '', role = 'adm
         <div class="mini-card"><span>Minutos produzidos</span><strong>${fmtNum(report.total.produced, 0)}</strong></div>
         <div class="mini-card"><span>Lançamentos · peças</span><strong>${report.total.launches} · ${fmtNum(report.total.pieces, 0)}</strong></div>
       </div>
+      ${(() => {
+        const eco = getOvertimeEconomics(rStart, rEnd, rEmp);
+        if (!eco.hasRates && !eco.cost) return '<p class="hint">Para ver receita, custo e resultado da hora extra, informe o valor do minuto e os salários em Custos e receitas.</p>';
+        return `<div class="cards" style="margin-top:8px">
+          <div class="mini-card"><span>Receita da hora extra</span><strong class="fin-pos">${fmtMoney(eco.revenue)}</strong></div>
+          <div class="mini-card"><span>Custo operadoras</span><strong class="fin-neg">${fmtMoney(eco.costOperators)}</strong>${eco.missingSalary ? `<small class="hint">${eco.missingSalary} lançamento(s) sem salário cadastrado</small>` : ''}</div>
+          <div class="mini-card"><span>Custo indiretos${eco.indirectMinutes ? ` (${fmtHoursMinutes(eco.indirectMinutes)})` : ''}</span><strong class="fin-neg">${rEmp ? '—' : fmtMoney(eco.costIndirect)}</strong></div>
+          <div class="mini-card"><span>Resultado da hora extra</span><strong class="${eco.result >= 0 ? 'fin-pos' : 'fin-neg'}">${fmtMoney(eco.result)}</strong></div>
+        </div>`;
+      })()}
       ${rEmp ? '' : `
       <div class="table-wrap"><table>
         <thead><tr><th>Colaboradora</th><th>Dias</th><th>Peças</th><th>Trabalhado</th><th>Min produzidos</th><th>Eficiência</th><th>Conta / não conta (min)</th><th></th></tr></thead>
@@ -9592,6 +9621,15 @@ function ensureFinanceTables(tenantDb) {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+    CREATE TABLE IF NOT EXISTS indirect_overtime (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      staff_id INTEGER NOT NULL REFERENCES indirect_staff(id),
+      work_date TEXT NOT NULL,
+      worked_minutes REAL NOT NULL,
+      notes TEXT,
+      is_deleted INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
     CREATE TABLE IF NOT EXISTS payroll_incidents (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       employee_id INTEGER NOT NULL REFERENCES employees(id),
@@ -9621,6 +9659,40 @@ function finSetting(key) {
   const row = db.prepare('SELECT value FROM app_settings WHERE key = ?').get(key);
   const n = Number(String(row?.value ?? FIN_DEFAULTS[key] ?? '0').replace(',', '.'));
   return Number.isFinite(n) ? n : 0;
+}
+
+// Adicional de hora extra pelo dia: semana, sábado, domingo/feriado
+function finOvertimeRate(day) {
+  const wd = new Date(`${day}T12:00:00Z`).getUTCDay();
+  if (wd === 0 || getHolidayDateSet().has(day)) return finSetting('fin_overtime_sunday_percent') / 100;
+  if (wd === 6) return finSetting('fin_overtime_saturday_percent') / 100;
+  return finSetting('fin_overtime_percent') / 100;
+}
+
+// Receita e custo da hora extra no período (operadoras + indiretos). employeeId filtra só uma operadora.
+function getOvertimeEconomics(start, end, employeeId = '') {
+  ensureFinanceTables(getActiveDb());
+  const monthlyHours = finSetting('fin_monthly_hours') || 220;
+  const params = [start, end];
+  let where = "p.launch_kind = 'hora_extra' AND p.is_reversed = 0 AND p.production_date BETWEEN ? AND ?";
+  if (employeeId) { where += ' AND p.employee_id = ?'; params.push(Number(employeeId)); }
+  const rows = db.prepare(`SELECT p.production_date, p.produced_minutes, COALESCE(p.worked_minutes, 0) AS worked, o.op_type, COALESCE(c.salary, 0) AS salary
+    FROM op_daily_productions p JOIN ops o ON o.id = p.op_id LEFT JOIN employee_costs c ON c.employee_id = p.employee_id WHERE ${where}`).all(...params);
+  let revenue = 0, costOperators = 0, missingSalary = 0;
+  for (const r of rows) {
+    revenue += Number(r.produced_minutes || 0) * finRate(r.op_type);
+    if (!Number(r.salary)) missingSalary += 1;
+    costOperators += (Number(r.worked) / 60) * (Number(r.salary) / monthlyHours) * (1 + finOvertimeRate(r.production_date));
+  }
+  let costIndirect = 0, indirectMinutes = 0;
+  if (!employeeId) {
+    for (const r of db.prepare('SELECT io.work_date, io.worked_minutes, st.salary FROM indirect_overtime io JOIN indirect_staff st ON st.id = io.staff_id WHERE io.is_deleted = 0 AND io.work_date BETWEEN ? AND ?').all(start, end)) {
+      indirectMinutes += Number(r.worked_minutes || 0);
+      costIndirect += (Number(r.worked_minutes || 0) / 60) * (Number(r.salary || 0) / monthlyHours) * (1 + finOvertimeRate(r.work_date));
+    }
+  }
+  const cost = costOperators + costIndirect;
+  return { revenue, costOperators, costIndirect, cost, result: revenue - cost, indirectMinutes, missingSalary, hasRates: finSetting('fin_rate_producao') > 0 || finSetting('fin_rate_mostruario') > 0 };
 }
 
 function finRate(opType) { return opType === 'mostruario' ? finSetting('fin_rate_mostruario') : finSetting('fin_rate_producao'); }
@@ -9675,12 +9747,7 @@ function getFinanceData(start, end) {
   // Folha por colaboradora
   const charges = finSetting('fin_charges_percent') / 100;
   // Adicional de hora extra pelo dia: semana, sábado, domingo/feriado
-  const overtimeRate = day => {
-    const wd = new Date(`${day}T12:00:00Z`).getUTCDay();
-    if (wd === 0 || getHolidayDateSet().has(day)) return finSetting('fin_overtime_sunday_percent') / 100;
-    if (wd === 6) return finSetting('fin_overtime_saturday_percent') / 100;
-    return finSetting('fin_overtime_percent') / 100;
-  };
+  const overtimeRate = finOvertimeRate;
   const monthlyHours = finSetting('fin_monthly_hours') || 220;
   const includePrize = finSetting('fin_include_prize') === 1;
   const periodBusinessDays = enumerateDates(start, end).filter(isBusinessDay).length || 1;
@@ -9749,12 +9816,23 @@ function getFinanceData(start, end) {
     const chargesValue = salary * chargePct;
     const benefits = Number(st.benefits || 0) * factor;
     const fixedBonus = Number(st.fixed_bonus || 0) * factor;
-    const cost = salary + chargesValue + benefits + fixedBonus;
+    // Hora extra do indireto (lançada em Hora extra)
+    let otWorked = 0, otSat = 0, otSun = 0, overtimeValue = 0;
+    const hourValueInd = Number(st.salary || 0) / monthlyHours;
+    for (const r of db.prepare('SELECT work_date, worked_minutes FROM indirect_overtime WHERE staff_id = ? AND is_deleted = 0 AND work_date BETWEEN ? AND ?').all(st.id, start, end)) {
+      const w = Number(r.worked_minutes || 0);
+      const wd = new Date(`${r.work_date}T12:00:00Z`).getUTCDay();
+      const v = (w / 60) * hourValueInd * (1 + overtimeRate(r.work_date));
+      otWorked += w; overtimeValue += v;
+      if (wd === 6) otSat += w; else if (wd === 0 || getHolidayDateSet().has(r.work_date)) otSun += w;
+      dayOf(r.work_date).overtimeCost += v;
+    }
+    const cost = salary + chargesValue + benefits + fixedBonus + overtimeValue;
     const dailyFixed = (Number(st.salary || 0) * (1 + chargePct) + Number(st.benefits || 0) + Number(st.fixed_bonus || 0)) / periodBusinessDays;
     if (dailyFixed > 0) for (const day of activeDaysList) dayOf(day).payroll += dailyFixed;
     people.push({
       emp: { id: `ind-${st.id}`, full_name: st.full_name }, indirect: true, role: st.job_role || '', group: 'Indiretos', activeDays: activeDaysList.length, factor, hasSalary: Number(st.salary || 0) > 0,
-      salary, chargesValue, benefits, fixedBonus, overtimeMinutes: 0, overtimeSaturday: 0, overtimeSunday: 0, overtimeValue: 0, prize: 0, incident: 0, cost,
+      salary, chargesValue, benefits, fixedBonus, overtimeMinutes: otWorked, overtimeSaturday: otSat, overtimeSunday: otSun, overtimeValue, prize: 0, incident: 0, cost,
       minutes: 0, pieces: 0, revenue: 0, result: -cost, costPerMinute: null
     });
   }
@@ -13184,6 +13262,24 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && pathname === '/productions/extra') return handleCreateExtraLaunch(await parseBody(req), res, role);
       if (req.method === 'POST' && pathname === '/productions/extra/worked') return handleUpdateWorkedTime(await parseBody(req), res, role);
       if (req.method === 'POST' && pathname === '/productions/extra/worked-bulk') return handleBulkWorkedTime(await parseBody(req), res, role);
+      if (req.method === 'POST' && pathname === '/productions/extra/indireto') {
+        ensureFinanceTables(getActiveDb());
+        const form = await parseBody(req);
+        const minutes = parseWorkedMinutes(form.worked_time);
+        const staff = db.prepare('SELECT * FROM indirect_staff WHERE id = ?').get(Number(form.staff_id));
+        const date = String(form.work_date || '');
+        const back = (msg, isError) => redirect(res, `/productions/extra?${isError ? 'error' : 'notice'}=${encodeURIComponent(msg)}#indiretos-extra`);
+        if (!staff || !/^\d{4}-\d{2}-\d{2}$/.test(date) || date > today()) return back('Escolha o indireto e uma data válida.', true);
+        if (!(minutes > 0) || minutes > 16 * 60) return back('Informe o tempo trabalhado (ex.: 2:00 ou 120 minutos).', true);
+        db.prepare('INSERT INTO indirect_overtime (staff_id, work_date, worked_minutes, notes) VALUES (?, ?, ?, ?)').run(staff.id, date, minutes, String(form.notes || '').trim().slice(0, 200) || null);
+        return back(`Hora extra de ${staff.full_name}: ${fmtHoursMinutes(minutes)} em ${formatDatePtBr(date)}.`);
+      }
+      const indOtDel = pathname.match(/^\/productions\/extra\/indireto\/(\d+)\/excluir$/);
+      if (req.method === 'POST' && indOtDel) {
+        ensureFinanceTables(getActiveDb());
+        db.prepare('UPDATE indirect_overtime SET is_deleted = 1 WHERE id = ?').run(Number(indOtDel[1]));
+        return redirect(res, `/productions/extra?notice=${encodeURIComponent('Lançamento excluído.')}#indiretos-extra`);
+      }
 
       if (req.method === 'GET' && pathname === '/labels/entry') return sendHtml(res, renderEntryLabelsPage(query, role));
       if (req.method === 'GET' && pathname === '/labels/shipment') return sendHtml(res, renderShipmentLabelsPage(query, role));
