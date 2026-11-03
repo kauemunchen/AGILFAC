@@ -1729,7 +1729,9 @@ function handleLogin(form, res, req = null) {
   const session = createSession(company, user);
   setSessionCookie(res, session.token, session.expiresAt, req);
   if (Number(user.must_change_password || 0) === 1) return redirect(res, '/conta/senha');
-  const safeReturn = returnTo.startsWith('/') && !returnTo.startsWith('//') ? returnTo : '/';
+  let safeReturn = returnTo.startsWith('/') && !returnTo.startsWith('//') ? returnTo : '/';
+  // Lançador e apontamento abrem direto no Quadro hora
+  if (safeReturn === '/' && ['lancador', 'apontamento'].includes(user.role)) safeReturn = '/productions/hourly/quadro';
   redirect(res, safeReturn);
 }
 
@@ -2276,7 +2278,7 @@ function renderRoleSwitcher(role) {
 
 // T1.7 — Menu agrupado (Produção, Expedição, Financeiro, Pessoas, Configurações), grupos recolhíveis
 const NAV_GROUPS = [
-  { key: 'producao', label: 'Produção', hrefs: ['/', '/acompanhamento/diario', '/productions/hourly', '/productions/hourly/quadro', '/productions/new', '/productions/extra', '/ops/new', '/ops', '/labels/entry', '/op-extra-times'] },
+  { key: 'producao', label: 'Produção', hrefs: ['/', '/acompanhamento/diario', '/productions/hourly/quadro', '/ops/new', '/ops', '/labels/entry', '/op-extra-times'] },
   { key: 'expedicao', label: 'Expedição', hrefs: ['/shipments/new', '/shipments', '/labels/shipment'] },
   { key: 'financeiro', label: 'Financeiro', hrefs: ['/custos', '/billing-reconciliation', '/closures', '/ausencias/importar', '/premios/producao', '/cells/report', '/cells/closures'] },
   { key: 'pessoas', label: 'Pessoas', hrefs: ['/employees'] },
@@ -2284,7 +2286,7 @@ const NAV_GROUPS = [
 ];
 
 function renderNavLink(item) {
-  return `<a href="${item.href}" ${item.active ? 'class="active"' : ''}><span class="nav-icon">${item.icon}</span><span class="nav-label">${escapeHtml(item.label)}</span></a>`;
+  return `<a href="${item.href}" title="${escapeHtml(item.label)}" ${item.active ? 'class="active"' : ''}><span class="nav-icon">${item.icon}</span><span class="nav-label">${escapeHtml(item.label)}</span></a>`;
 }
 
 function renderGroupedNav(navItems) {
@@ -2314,52 +2316,70 @@ function renderGroupedNav(navItems) {
   </script>`;
 }
 
-function pageLayout({ title, content, notice = '', error = '', role = 'adm' }) {
-  const navItems = isLancadorRole(role)
-    ? [
-        { href: '/productions/new', label: 'Lançamentos', icon: '🧵', active: title === 'Novo lançamento' },
-        { href: '/productions/hourly', label: 'Lanç. hora', icon: '⏰', active: title === 'Lançamento por hora' },
-        { href: '/productions/hourly/quadro', label: 'Quadro hora', icon: '🗓️', active: title === 'Quadro por hora' },
-        { href: '/ops', label: 'Consulta OP', icon: '📦', active: title.startsWith('OPs') || title.startsWith('OP ') },
-        { href: '/labels/entry', label: 'Etiq. entrada', icon: '🏷️', active: title.startsWith('Etiquetas de entrada') }
-      ]
-    : isHourlyLauncherRole(role)
-    ? [
-        { href: '/', label: 'Dashboard', icon: '🏠', active: title === 'Dashboard' },
-        { href: '/productions/hourly', label: 'Lanç. hora', icon: '⏰', active: title === 'Lançamento por hora' },
-        { href: '/productions/hourly/quadro', label: 'Quadro hora', icon: '🗓️', active: title === 'Quadro por hora' }
-      ]
-    : [
-        { href: '/', label: 'Dashboard', icon: '🏠', active: title === 'Dashboard' },
-        { href: '/acompanhamento/diario', label: 'Acomp. diário', icon: '📈', active: title.startsWith('Acompanhamento diário') },
-        { href: '/productions/hourly', label: 'Lanç. hora', icon: '⏰', active: title === 'Lançamento por hora' },
-        { href: '/productions/hourly/quadro', label: 'Quadro hora', icon: '🗓️', active: title === 'Quadro por hora' },
-        { href: '/productions/new', label: 'Lançamentos', icon: '🧵', active: title === 'Novo lançamento' },
-        { href: '/productions/extra', label: 'Hora extra', icon: '🌙', active: title === 'Lançamento hora extra' },
-        { href: '/ops/new', label: 'Cadastro OP', icon: '📝', active: title === 'Nova OP' },
-        { href: '/labels/entry', label: 'Etiq. entrada', icon: '🏷️', active: title.startsWith('Etiquetas de entrada') },
-        { href: '/ops', label: 'Consulta OP', icon: '📦', active: title.startsWith('OPs') },
-        { href: '/billing-reconciliation', label: 'Cobrança', icon: '💵', active: title.startsWith('Conciliação de cobrança') },
-        { href: '/shipments/new', label: 'Embarque', icon: '🚚', active: title === 'Novo embarque' },
-        { href: '/shipments', label: 'Consulta emb.', icon: '📋', active: title.startsWith('Embarques') },
-        { href: '/labels/shipment', label: 'Etiq. emb.', icon: '🧾', active: title.startsWith('Etiquetas de embarque') },
-        { href: '/employees', label: 'Colaboradores', icon: '👥', active: title === 'Novo colaborador' || title.startsWith('Colaboradores') },
-        { href: '/closures', label: 'Fechamento', icon: '📊', active: title.startsWith('Fechamento') || title === 'Importar ausências' },
-        { href: '/premios/producao', label: 'Prêmio prod.', icon: '💰', active: title.startsWith('Prêmio de produção') },
-        { href: '/cells/report', label: 'Célula', icon: '🩷', active: title.startsWith('Célula') },
-        { href: '/cells/closures', label: 'Fech. células', icon: '🧮', active: title.startsWith('Fechamento de células') }
-      ];
+const LAUNCH_TITLES = new Set(['Quadro por hora', 'Lançamento por hora', 'Novo lançamento', 'Lançamento hora extra']);
 
+// Abas da tela única "Lançar"
+function renderLaunchTabs(title, role) {
+  const tabs = [
+    { href: '/productions/hourly/quadro', label: '🗓️ Quadro hora', title: 'Quadro por hora' },
+    { href: '/productions/hourly', label: '⏰ Por hora', title: 'Lançamento por hora' }
+  ];
+  if (!isHourlyLauncherRole(role)) tabs.push({ href: '/productions/new', label: '🧵 Rápido', title: 'Novo lançamento' });
+  if (isAdminRole(role)) tabs.push({ href: '/productions/extra', label: '🌙 Hora extra', title: 'Lançamento hora extra' });
+  return `<nav class="launch-tabs">${tabs.map(t => `<a class="${t.title === title ? 'active' : ''}" href="${t.href}">${t.label}</a>`).join('')}</nav>`;
+}
+
+function getNavItems(title, role) {
+  const launch = { href: '/productions/hourly/quadro', label: 'Lançar', icon: '✍️', active: LAUNCH_TITLES.has(title) };
+  const opsItem = { href: '/ops', label: 'Consulta OP', icon: '📦', active: title.startsWith('OPs') || title.startsWith('OP ') };
+  if (isLancadorRole(role)) {
+    return [launch, opsItem, { href: '/labels/entry', label: 'Etiq. entrada', icon: '🏷️', active: title.startsWith('Etiquetas de entrada') }];
+  }
+  if (isHourlyLauncherRole(role)) {
+    return [launch, { href: '/', label: 'Dashboard', icon: '🏠', active: title === 'Dashboard' }];
+  }
+  const items = [
+    { href: '/', label: 'Dashboard', icon: '🏠', active: title === 'Dashboard' },
+    { href: '/acompanhamento/diario', label: 'Acompanhamento', icon: '📈', active: title.startsWith('Acompanhamento diário') },
+    launch,
+    { href: '/ops/new', label: 'Cadastro OP', icon: '📝', active: title === 'Nova OP' },
+    opsItem,
+    { href: '/labels/entry', label: 'Etiq. entrada', icon: '🏷️', active: title.startsWith('Etiquetas de entrada') },
+    { href: '/shipments/new', label: 'Embarque', icon: '🚚', active: title === 'Novo embarque' },
+    { href: '/shipments', label: 'Consulta embarques', icon: '📋', active: title.startsWith('Embarques') },
+    { href: '/labels/shipment', label: 'Etiq. embarque', icon: '🧾', active: title.startsWith('Etiquetas de embarque') },
+    { href: '/billing-reconciliation', label: 'Cobrança', icon: '💵', active: title.startsWith('Conciliação de cobrança') },
+    { href: '/closures', label: 'Fechamento', icon: '📊', active: title.startsWith('Fechamento') || title === 'Importar ausências' },
+    { href: '/premios/producao', label: 'Prêmio produção', icon: '💰', active: title.startsWith('Prêmio de produção') },
+    { href: '/cells/report', label: 'Células', icon: '🩷', active: title.startsWith('Célula') },
+    { href: '/cells/closures', label: 'Fech. células', icon: '🧮', active: title.startsWith('Fechamento de células') },
+    { href: '/employees', label: 'Colaboradores', icon: '👥', active: title === 'Novo colaborador' || title.startsWith('Colaboradores') }
+  ];
   if (canAccessCadastros(role)) {
-    navItems.push({ href: '/op-extra-times', label: 'Tempo extra', icon: '⏱️', active: title.startsWith('Tempo extra de OP') });
-    navItems.push({ href: '/cadastros', label: 'Cadastros', icon: '⚙️', active: title.startsWith('Cadastros') });
+    items.push({ href: '/op-extra-times', label: 'Tempo extra OP', icon: '⏱️', active: title.startsWith('Tempo extra de OP') });
+    items.push({ href: '/cadastros', label: 'Cadastros', icon: '⚙️', active: title.startsWith('Cadastros') });
   }
   if (isAdminRole(role)) {
-    navItems.push({ href: '/custos', label: 'Custos e receitas', icon: '📈', active: title === 'Custos e receitas' });
-    navItems.push({ href: '/parametros', label: 'Parâmetros', icon: '🎛️', active: title === 'Parâmetros' });
-    navItems.push({ href: '/admin/access', label: 'Acessos', icon: '🔐', active: title.startsWith('Usuários e acessos') });
-    navItems.push({ href: '/estornos', label: 'Estornos', icon: '↩️', active: title.startsWith('Estornos') });
+    items.push({ href: '/custos', label: 'Custos e receitas', icon: '📈', active: title === 'Custos e receitas' });
+    items.push({ href: '/parametros', label: 'Parâmetros', icon: '🎛️', active: title === 'Parâmetros' });
+    items.push({ href: '/admin/access', label: 'Acessos', icon: '🔐', active: title.startsWith('Usuários e acessos') });
+    items.push({ href: '/estornos', label: 'Estornos', icon: '↩️', active: title.startsWith('Estornos') });
   }
+  return items;
+}
+
+// Barra inferior no celular: 3 atalhos do perfil + "Menu"
+function renderBottomBar(navItems, role) {
+  const pick = isLancadorRole(role) ? ['/productions/hourly/quadro', '/ops', '/labels/entry']
+    : isHourlyLauncherRole(role) ? ['/productions/hourly/quadro', '/']
+    : ['/', '/productions/hourly/quadro', '/ops'];
+  const items = pick.map(h => navItems.find(i => i.href === h)).filter(Boolean);
+  return `<nav class="bottom-bar">${items.map(i => `<a href="${i.href}" class="${i.active ? 'active' : ''}"><span>${i.icon}</span><small>${escapeHtml(i.label.replace('Consulta OP', 'OPs').replace('Etiq. entrada', 'Etiquetas'))}</small></a>`).join('')}<button type="button" data-open-menu><span>☰</span><small>Menu</small></button></nav>`;
+}
+
+function pageLayout({ title, content, notice = '', error = '', role = 'adm' }) {
+  const navItems = getNavItems(title, role);
+  if (LAUNCH_TITLES.has(title)) content = renderLaunchTabs(title, role) + content;
 
   return `<!doctype html>
   <html lang="pt-BR">
@@ -2376,10 +2396,10 @@ function pageLayout({ title, content, notice = '', error = '', role = 'adm' }) {
     <link rel="apple-touch-icon" href="/public/icons/apple-touch-icon.png" />
     <script>if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));</script>
   </head>
-  <body class="sidebar-collapsed">
+  <body class="app-body">
     <div class="layout app-layout">
       <aside class="sidebar app-sidebar" id="app-sidebar">
-        <div class="sidebar-brand">AgilFac</div>
+        <div class="sidebar-head"><div class="sidebar-brand">AgilFac</div><button type="button" class="sidebar-pin" id="sidebar-mini" title="Recolher/expandir menu">⇤</button></div>
         <nav>
           ${renderGroupedNav(navItems)}
         </nav>
@@ -2399,41 +2419,24 @@ function pageLayout({ title, content, notice = '', error = '', role = 'adm' }) {
         ${content}
       </main>
     </div>
+    <div class="menu-backdrop" id="menu-backdrop"></div>
+    ${renderBottomBar(navItems, role)}
     <script>
       (() => {
-        const storageKey = 'agilfac-sidebar-hidden';
-        const mobileBreakpoint = 1100;
+        // Computador: menu fixo, pode recolher para só ícones. Celular: gaveta (Menu) + barra inferior.
         const body = document.body;
-        const toggle = document.getElementById('menu-toggle');
-        const navLinks = Array.from(document.querySelectorAll('#app-sidebar nav a'));
-        if (!toggle) return;
-
-        const applyState = hidden => {
-          body.classList.toggle('sidebar-collapsed', hidden);
-          toggle.textContent = hidden ? '☰ Menu' : '✕ Fechar';
-          toggle.setAttribute('aria-expanded', hidden ? 'false' : 'true');
-        };
-
-        const saveState = hidden => {
-          localStorage.setItem(storageKey, hidden ? 'true' : 'false');
-          applyState(hidden);
-        };
-
-        const saved = localStorage.getItem(storageKey);
-        applyState(saved !== 'false');
-
-        toggle.addEventListener('click', () => {
-          const hidden = !body.classList.contains('sidebar-collapsed');
-          saveState(hidden);
-        });
-
-        navLinks.forEach(link => {
-          link.addEventListener('click', () => {
-            if (window.innerWidth <= mobileBreakpoint) {
-              saveState(true);
-            }
-          });
-        });
+        const mobile = () => window.innerWidth <= 900;
+        const get = k => { try { return localStorage.getItem(k); } catch (_) { return null; } };
+        const set = (k, v) => { try { localStorage.setItem(k, v); } catch (_) {} };
+        if (get('agilfac-sidebar-mini') === '1') body.classList.add('sidebar-mini');
+        const openDrawer = () => body.classList.add('menu-open');
+        const closeDrawer = () => body.classList.remove('menu-open');
+        document.getElementById('menu-toggle')?.addEventListener('click', () => mobile() ? (body.classList.contains('menu-open') ? closeDrawer() : openDrawer()) : (body.classList.toggle('sidebar-mini'), set('agilfac-sidebar-mini', body.classList.contains('sidebar-mini') ? '1' : '0')));
+        document.getElementById('sidebar-mini')?.addEventListener('click', () => { if (mobile()) return closeDrawer(); body.classList.toggle('sidebar-mini'); set('agilfac-sidebar-mini', body.classList.contains('sidebar-mini') ? '1' : '0'); });
+        document.querySelector('[data-open-menu]')?.addEventListener('click', openDrawer);
+        document.getElementById('menu-backdrop')?.addEventListener('click', closeDrawer);
+        document.querySelectorAll('#app-sidebar nav a').forEach(a => a.addEventListener('click', closeDrawer));
+        document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDrawer(); });
       })();
     </script>
   </body>
@@ -11420,7 +11423,6 @@ function renderHourlyProductionPage(values = {}, error = '', notice = '', role =
           <h3>Digitação rápida por costureira</h3>
           <p>Selecione a costureira, confirme data/hora atual, informe OP e quantidade, e salve rápido.</p>
         </div>
-        <a class="btn secondary" href="/productions/new">Abrir lançamento diário antigo</a>
       </div>
       <form class="form-grid quick-launch-form" method="post" action="/productions/hourly" data-hourly-launch>
         <label>Costureira
@@ -11639,7 +11641,7 @@ function renderProductionForm(values = {}, error = '', notice = '', role = getRe
           <h3>Lançamento rápido</h3>
           <p>Bipe a etiqueta (leitor ou câmera) ou digite a OP. Enter avança para a quantidade.</p>
         </div>
-        <a class="btn secondary" href="/productions/new?mode=lista">Modo lista</a>
+
       </div>
       <form class="form-grid quick-launch-form" method="post" action="/productions" data-quick-launch>
         <input type="hidden" name="mode" value="quick" />
@@ -13129,11 +13131,11 @@ const server = http.createServer(async (req, res) => {
       }
 
       if (isLancadorRole(role)) {
-        if (req.method === 'GET' && pathname === '/') return redirect(res, '/productions/new');
+        if (req.method === 'GET' && pathname === '/') return redirect(res, '/productions/hourly/quadro');
         if (!isLancadorAllowed(req.method, pathname)) {
           return sendHtml(res, pageLayout({
             title: 'Acesso restrito',
-            content: '<section class="panel"><p>O perfil Lançador acessa lançamentos, consulta de OPs, célula, ocorrências e etiquetas de entrada.</p><p><a class="btn" href="/productions/new">Ir para lançamentos</a></p></section>',
+            content: '<section class="panel"><p>O perfil Lançador acessa lançamentos, consulta de OPs, célula, ocorrências e etiquetas de entrada.</p><p><a class="btn" href="/productions/hourly/quadro">Ir para lançamentos</a></p></section>',
             error: 'Acesso não permitido para este perfil.',
             role
           }), 403);
