@@ -12834,6 +12834,244 @@ function nowIsoDate(value) {
   return new Intl.DateTimeFormat('en-CA', { timeZone: BUSINESS_TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
 }
 
+// ===================== CONFERÊNCIA DA LISTA DO FORNECEDOR =====================
+// O fornecedor manda a lista de OPs (Excel/CSV ou números colados). Cruzamos com o AgilFac:
+// embarcada (data), pronta, em produção, em célula, ocorrência, ou não lançada (pode estar no caminhão).
+const supplierCheckSessions = new Map();
+const SUPPLIER_STATUS = {
+  embarcada: { label: 'Embarcada', cls: 'vermelho', order: 1 },
+  pronta: { label: 'Pronta p/ embarcar', cls: 'azul', order: 2 },
+  ocorrencia: { label: 'Com ocorrência', cls: 'amarelo', order: 3 },
+  celula: { label: 'Em célula', cls: 'rosa', order: 4 },
+  producao: { label: 'Em produção', cls: 'verde', order: 5 },
+  aguardando: { label: 'Recebida, sem produção', cls: 'verde', order: 6 },
+  nao_lancada: { label: 'Não lançada', cls: 'neutral', order: 7 }
+};
+
+function parseSupplierOpRows(rows) {
+  const items = [];
+  const seen = new Set();
+  for (const row of rows) {
+    const cells = (Array.isArray(row) ? row : [row]).map(cellToText).filter(Boolean);
+    if (!cells.length) continue;
+    const opCell = cells.find(c => /^\d{7}(-\d{3})?$/.test(c.replace(/\s/g, '')) || /^\d{7}-\d{3}\b/.test(c));
+    if (!opCell) continue;
+    const op_number = normalizeOpNumberInput(opCell.replace(/\s/g, '').match(/\d{7}(-\d{3})?/)[0]);
+    if (seen.has(op_number)) continue;
+    seen.add(op_number);
+    const rest = cells.filter(c => c !== opCell);
+    const ref = rest.find(c => /^\d{6,13}(-\d)?$/.test(c)) || '';
+    const collection = rest.find(c => /\d{4}\.\d/.test(c) || /\bINV\b|\bVER\b|\bALTO\b/i.test(c)) || '';
+    const description = rest.find(c => /[A-Za-zÀ-ú]{3}/.test(c) && c !== collection && !/^costura|^corte|^lavanderia|^estamparia|^bordado/i.test(c) && !/ltda|eireli|\bme\b|s\/a/i.test(c)) || '';
+    items.push({ op_number, ref, refDigits: ref.replace(/-\d$/, '').replace(/^0+/, ''), description, collection });
+  }
+  return items;
+}
+
+function getSupplierCheckRow(item) {
+  const found = getOpByNumber(item.op_number);
+  if (!found) return { ...item, status: 'nao_lancada', detail: 'Não está no AgilFac (pode não ter chegado)', warnings: [] };
+  const d = getOpDetail(found.id);
+  const op = d.op;
+  const ship = d.shipmentHistory[0] || null;
+  const openOcc = d.occurrences.filter(o => !o.is_concluded);
+  const warnings = [];
+  if (op.op_type !== 'mostruario') warnings.push('cadastrada como produção');
+  const sysRef = String(op.product_name || '').replace(/^0+/, '');
+  if (item.refDigits && /^\d+$/.test(sysRef) && sysRef !== item.refDigits) warnings.push(`referência no sistema ${op.product_name}`);
+  let status, detail;
+  if (op.shipped_at || ship) {
+    status = 'embarcada';
+    detail = `Embarcada em ${formatDatePtBr(ship ? ship.shipment_date : nowIsoDate(op.shipped_at))}${ship ? ` · embarque ${ship.shipment_number}` : ''}`;
+  } else if (op.status_color === 'azul') {
+    status = 'pronta'; detail = 'Finalizada, aguardando embarque';
+  } else if (openOcc.length || op.status_color === 'amarelo') {
+    status = 'ocorrencia'; detail = openOcc.map(o => o.description).join(' / ') || 'Ocorrência aberta';
+  } else if (op.status_color === 'rosa') {
+    status = 'celula'; detail = d.activeCellTransfer ? `Na ${d.activeCellTransfer.cell_name} desde ${formatDatePtBr(String(d.activeCellTransfer.sent_at).slice(0, 10))}` : 'Em célula';
+  } else if (Number(op.produced_quantity || 0) > 0) {
+    status = 'producao'; detail = `${fmtNum(op.produced_quantity, 0)} de ${fmtNum(op.total_pieces, 0)} peças produzidas`;
+  } else {
+    status = 'aguardando'; detail = 'Chegou, ainda sem produção lançada';
+  }
+  return {
+    ...item, status, detail, warnings, id: op.id,
+    entry_date: op.entry_date ? String(op.entry_date).slice(0, 10) : '',
+    shipment_date: ship ? ship.shipment_date : (op.shipped_at ? nowIsoDate(op.shipped_at) : ''),
+    shipment_number: ship ? ship.shipment_number : '',
+    delivery_date: op.delivery_date || '',
+    total: Number(op.total_pieces || 0), produced: Number(op.produced_quantity || 0), remaining: Math.max(0, Number(op.remaining_quantity || 0)),
+    system_ref: op.product_name || '', brand: op.brand || ''
+  };
+}
+
+function buildSupplierCheck(items) {
+  const rows = items.map(getSupplierCheckRow).sort((a, b) => SUPPLIER_STATUS[a.status].order - SUPPLIER_STATUS[b.status].order || a.op_number.localeCompare(b.op_number));
+  const inList = new Set(rows.filter(r => r.id).map(r => r.id));
+  // Mostruário em aberto no AgilFac que não veio na lista do fornecedor
+  const extra = db.prepare("SELECT id, op_number, product_name, brand, entry_date, status_color FROM ops WHERE is_reversed = 0 AND op_type = 'mostruario' AND shipped_at IS NULL AND status_color <> 'vermelho' ORDER BY entry_date").all().filter(o => !inList.has(o.id));
+  const counts = Object.fromEntries(Object.keys(SUPPLIER_STATUS).map(k => [k, rows.filter(r => r.status === k).length]));
+  return { rows, counts, extra, at: today() };
+}
+
+function supplierCheckMessage(check) {
+  const d = v => v ? formatDatePtBr(v).slice(0, 5) : '';
+  const group = (keys, title, fmt) => {
+    const list = check.rows.filter(r => keys.includes(r.status));
+    return list.length ? `*${title} (${list.length})*\n${list.map(fmt).join('\n')}` : '';
+  };
+  return [
+    `Conferência das OPs de mostruário · ${formatDatePtBr(check.at)}`,
+    group(['embarcada'], 'Embarcadas', r => `• ${r.op_number} – embarcada ${d(r.shipment_date)}`),
+    group(['pronta'], 'Prontas, aguardando embarque', r => `• ${r.op_number} – chegou ${d(r.entry_date)}`),
+    group(['ocorrencia'], 'Com ocorrência', r => `• ${r.op_number} – ${r.detail}`),
+    group(['celula', 'producao', 'aguardando'], 'Em produção', r => `• ${r.op_number} – chegou ${d(r.entry_date)} – ${r.status === 'aguardando' ? 'aguardando produção' : (r.status === 'celula' ? 'em célula' : `${r.produced}/${r.total} pç`)}`),
+    group(['nao_lancada'], 'Não recebidas aqui (confirmar envio)', r => `• ${r.op_number}${r.description ? ` – ${r.description}` : ''}`)
+  ].filter(Boolean).join('\n\n');
+}
+
+function renderSupplierCheckUpload(role, error = '') {
+  const content = `
+    <section class="page-header"><div><h2>Conferir lista do fornecedor</h2><p>Envie a planilha de OPs do fornecedor (ou cole os números). O AgilFac mostra o que já embarcou, o que está em produção, ocorrências e o que ainda não foi lançado.</p></div><a class="btn secondary" href="/ops">Voltar</a></section>
+    <section class="panel">
+      <form method="post" action="/ops/conferencia" id="sc-form" class="stack-form">
+        <input type="hidden" name="file_b64" id="sc_b64" /><input type="hidden" name="file_name" id="sc_name" />
+        <label class="full">Planilha do fornecedor (.xlsx, .xls ou .csv)<input type="file" id="sc_file" accept=".xlsx,.xls,.csv,text/csv" /></label>
+        <label class="full">ou cole os números das OPs (um por linha)<textarea name="pasted" rows="5" placeholder="1799903-001&#10;1800181-001"></textarea></label>
+        <div class="actions"><button class="btn" type="submit" id="sc_btn">Conferir</button></div>
+        <p class="hint">A planilha pode vir sem cabeçalho: o AgilFac acha sozinho a coluna com o número da OP (1234567-001), a referência, a descrição e a coleção.</p>
+      </form>
+    </section>
+    <script>
+      (function () {
+        const form = document.getElementById('sc-form');
+        form.addEventListener('submit', function (e) {
+          const file = document.getElementById('sc_file').files[0];
+          if (!file) return;
+          e.preventDefault();
+          if (file.size > 8 * 1024 * 1024) { alert('Arquivo maior que 8 MB.'); return; }
+          const reader = new FileReader();
+          reader.onload = function () {
+            document.getElementById('sc_b64').value = String(reader.result).split(',')[1] || '';
+            document.getElementById('sc_name').value = file.name;
+            const b = document.getElementById('sc_btn'); b.disabled = true; b.textContent = 'Conferindo…';
+            form.submit();
+          };
+          reader.readAsDataURL(file);
+        });
+      })();
+    </script>`;
+  return pageLayout({ title: 'Conferir lista do fornecedor', content, error, role });
+}
+
+async function handleSupplierCheck(req, res, role) {
+  const form = await parseBody(req, 12 * 1024 * 1024);
+  let rows = [];
+  try {
+    const buffer = Buffer.from(String(form.file_b64 || ''), 'base64');
+    if (buffer.length) rows = readSpreadsheetRows(buffer, String(form.file_name || ''));
+  } catch (error) {
+    return sendHtml(res, renderSupplierCheckUpload(role, `Não consegui ler o arquivo: ${error.message}`));
+  }
+  String(form.pasted || '').split(/[\n,;\t ]+/).forEach(v => { if (v.trim()) rows.push([v.trim()]); });
+  const items = parseSupplierOpRows(rows).slice(0, 2000);
+  if (!items.length) return sendHtml(res, renderSupplierCheckUpload(role, 'Nenhum número de OP encontrado (formato 1234567-001).'));
+  const check = buildSupplierCheck(items);
+  const slug = String(getRequestAuth()?.company?.slug || '');
+  for (const [k, v] of supplierCheckSessions) if (Date.now() - v.createdAt > 3600000) supplierCheckSessions.delete(k);
+  const id = crypto.randomBytes(10).toString('hex');
+  supplierCheckSessions.set(id, { slug, check, fileName: String(form.file_name || 'lista'), createdAt: Date.now() });
+  return sendHtml(res, renderSupplierCheckResult(id, check, String(form.file_name || ''), role));
+}
+
+function renderSupplierCheckResult(id, check, fileName, role) {
+  const { rows, counts, extra } = check;
+  const d = v => v ? escapeHtml(formatDatePtBr(v)) : '-';
+  const msg = supplierCheckMessage(check);
+  const card = (key, label, n, cls) => `<button type="button" class="sc-card ${cls}" data-sc-filter="${key}"><span>${label}</span><strong>${n}</strong></button>`;
+  const inProd = counts.producao + counts.celula + counts.aguardando;
+  const content = `
+    <section class="page-header"><div><h2>Conferência da lista do fornecedor</h2><p>${escapeHtml(fileName || 'Números colados')} · ${rows.length} OP(s) · ${d(check.at)}</p></div>
+      <div class="header-actions"><a class="btn secondary" href="/ops/conferencia">Nova conferência</a><a class="btn secondary" href="/ops/conferencia/excel?s=${id}">⬇ Baixar Excel</a></div></section>
+    <section class="sc-cards">
+      ${card('all', 'Na lista', rows.length, '')}
+      ${card('embarcada', 'Embarcadas', counts.embarcada, 'is-ship')}
+      ${card('pronta', 'Prontas p/ embarcar', counts.pronta, 'is-ready')}
+      ${card('prod', 'Em produção', inProd, 'is-prod')}
+      ${card('ocorrencia', 'Com ocorrência', counts.ocorrencia, 'is-occ')}
+      ${card('nao_lancada', 'Não lançadas', counts.nao_lancada, 'is-missing')}
+    </section>
+    <section class="panel">
+      <div class="panel-header"><h3>OPs da lista</h3><span class="hint">Toque num número acima para filtrar.</span></div>
+      <div class="table-wrap"><table class="sc-table">
+        <thead><tr><th>OP</th><th>Situação</th><th>Detalhe</th><th>Chegada</th><th>Embarque</th><th>Saldo</th><th>Referência</th><th>Descrição</th><th>Coleção</th><th>Ação</th></tr></thead>
+        <tbody>
+          ${rows.map(r => `<tr data-sc="${r.status}">
+            <td><strong>${escapeHtml(r.op_number)}</strong></td>
+            <td><span class="badge ${SUPPLIER_STATUS[r.status].cls === 'neutral' ? 'badge-neutral' : SUPPLIER_STATUS[r.status].cls}">${SUPPLIER_STATUS[r.status].label}</span></td>
+            <td>${escapeHtml(r.detail)}${r.warnings.length ? `<br><small class="sc-warn">⚠ ${escapeHtml(r.warnings.join(' · '))}</small>` : ''}</td>
+            <td>${d(r.entry_date)}</td>
+            <td>${r.shipment_date ? `${d(r.shipment_date)}${r.shipment_number ? `<br><small>${escapeHtml(r.shipment_number)}</small>` : ''}` : '-'}</td>
+            <td>${r.id ? (r.status === 'embarcada' ? '-' : fmtNum(r.remaining, 0)) : '-'}</td>
+            <td>${escapeHtml(r.ref || '-')}</td>
+            <td>${escapeHtml(r.description || '-')}</td>
+            <td>${escapeHtml(r.collection || '-')}</td>
+            <td>${r.id ? `<a href="/ops/${r.id}">Abrir</a>` : `<a href="/ops/new?${new URLSearchParams({ op_number: r.op_number, product_name: r.refDigits || r.description, op_type: 'mostruario', collection_name: r.collection }).toString()}">Cadastrar</a>`}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table></div>
+    </section>
+    <section class="panel">
+      <div class="panel-header"><h3>Mensagem para o fornecedor</h3><div class="actions"><button class="btn" type="button" id="sc-copy">Copiar</button><a class="btn secondary" target="_blank" rel="noopener" href="https://wa.me/?text=${encodeURIComponent(msg)}">Enviar no WhatsApp</a></div></div>
+      <textarea id="sc-msg" rows="12" style="width:100%;font-family:inherit">${escapeHtml(msg)}</textarea>
+    </section>
+    ${extra.length ? `<section class="panel">
+      <h3>Mostruário em aberto aqui que não veio na lista (${extra.length})</h3>
+      <p class="hint">Estão no AgilFac sem embarque, mas o fornecedor não listou. Vale confirmar com ele.</p>
+      <div class="table-wrap"><table><thead><tr><th>OP</th><th>Referência</th><th>Marca</th><th>Chegada</th><th>Status</th></tr></thead><tbody>
+        ${extra.map(o => `<tr><td><a href="/ops/${o.id}">${escapeHtml(o.op_number)}</a></td><td>${escapeHtml(o.product_name || '-')}</td><td>${escapeHtml(o.brand || '-')}</td><td>${d(o.entry_date ? String(o.entry_date).slice(0, 10) : '')}</td><td>${statusBadge(o.status_color)}</td></tr>`).join('')}
+      </tbody></table></div>
+    </section>` : ''}
+    <script>
+      (function () {
+        document.getElementById('sc-copy').addEventListener('click', function () { navigator.clipboard.writeText(document.getElementById('sc-msg').value); this.textContent = 'Copiada'; });
+        const groups = { prod: ['producao', 'celula', 'aguardando'] };
+        document.querySelectorAll('[data-sc-filter]').forEach(function (b) {
+          b.addEventListener('click', function () {
+            const f = b.dataset.scFilter;
+            document.querySelectorAll('[data-sc-filter]').forEach(x => x.classList.toggle('is-active', x === b && f !== 'all'));
+            document.querySelectorAll('tr[data-sc]').forEach(function (tr) { tr.hidden = !(f === 'all' || tr.dataset.sc === f || (groups[f] || []).includes(tr.dataset.sc)); });
+          });
+        });
+      })();
+    </script>`;
+  return pageLayout({ title: 'Conferir lista do fornecedor', content, role });
+}
+
+function handleSupplierCheckExcel(query, res) {
+  const session = supplierCheckSessions.get(String(query.s || ''));
+  if (!session || session.slug !== String(getRequestAuth()?.company?.slug || '')) return redirect(res, `/ops/conferencia?error=${encodeURIComponent('A conferência expirou. Envie a lista de novo.')}`);
+  const XLSX = require('xlsx');
+  const { rows, extra, at } = session.check;
+  const br = v => v ? formatDatePtBr(v) : '';
+  const sheet = [['OP', 'Situação', 'Detalhe', 'Chegada', 'Data do embarque', 'Nº embarque', 'Total', 'Produzido', 'Saldo', 'Referência (fornecedor)', 'Referência (AgilFac)', 'Descrição', 'Coleção', 'Avisos']]
+    .concat(rows.map(r => [r.op_number, SUPPLIER_STATUS[r.status].label, r.detail, br(r.entry_date), br(r.shipment_date), r.shipment_number || '', r.id ? r.total : '', r.id ? r.produced : '', r.id && r.status !== 'embarcada' ? r.remaining : '', r.ref, r.system_ref || '', r.description, r.collection, r.warnings.join('; ')]));
+  const book = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(sheet);
+  ws['!cols'] = [12, 22, 40, 11, 14, 14, 8, 10, 8, 18, 14, 22, 26, 30].map(w => ({ wch: w }));
+  ws['!autofilter'] = { ref: `A1:N${sheet.length}` };
+  XLSX.utils.book_append_sheet(book, ws, 'Conferência');
+  if (extra.length) {
+    const ws2 = XLSX.utils.aoa_to_sheet([['OP', 'Referência', 'Marca', 'Chegada', 'Status']].concat(extra.map(o => [o.op_number, o.product_name || '', o.brand || '', br(o.entry_date ? String(o.entry_date).slice(0, 10) : ''), o.status_color])));
+    ws2['!cols'] = [12, 14, 14, 11, 10].map(w => ({ wch: w }));
+    XLSX.utils.book_append_sheet(book, ws2, 'Fora da lista');
+  }
+  const buffer = XLSX.write(book, { type: 'buffer', bookType: 'xlsx' });
+  res.writeHead(200, { 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'Content-Disposition': `attachment; filename="Conferencia_OPs_${at}.xlsx"`, 'Cache-Control': 'no-store' });
+  return res.end(buffer);
+}
+// ===============================================================
+
 function renderOpListPage(query = {}, role = 'adm') {
   const availableBrands = getBrandList().map(item => item.name);
   const availableCollections = getCollectionList().map(item => item.name);
@@ -12872,6 +13110,7 @@ function renderOpListPage(query = {}, role = 'adm') {
           <a class="${view === 'lista' ? 'is-active' : ''}" href="/ops?${new URLSearchParams(Object.fromEntries(Object.entries({ ...query, view: 'lista' }).filter(([k]) => k !== 'notice' && k !== 'error'))).toString()}">☰ Lista</a>
           <a class="${view === 'quadro' ? 'is-active' : ''}" href="/ops?${new URLSearchParams(Object.fromEntries(Object.entries({ ...query, view: 'quadro' }).filter(([k]) => k !== 'notice' && k !== 'error'))).toString()}">▦ Quadro</a>
         </nav>
+        <a class="btn secondary" href="/ops/conferencia" title="Comparar a lista de OPs do fornecedor com o AgilFac">📋 Conferir lista</a>
         <a class="btn" href="/ops/new">Nova OP</a>
       </div>
     </section>
@@ -14274,7 +14513,17 @@ const server = http.createServer(async (req, res) => {
 
       if (req.method === 'GET' && pathname === '/') return sendHtml(res, renderDashboard(query, role));
       if (req.method === 'GET' && pathname === '/ops') return sendHtml(res, renderOpListPage(query, role));
-      if (req.method === 'GET' && pathname === '/ops/new') return sendHtml(res, renderOpForm({}, '', role));
+      if (req.method === 'GET' && pathname === '/ops/new') {
+        const pre = {};
+        ['op_number', 'barcode', 'product_name', 'op_type', 'brand', 'collection_name'].forEach(k => { if (query[k]) pre[k] = String(query[k]).slice(0, 120); });
+        return sendHtml(res, renderOpForm(pre, '', role));
+      }
+      if (pathname === '/ops/conferencia' || pathname === '/ops/conferencia/excel') {
+        if (isLancadorRole(role) || isHourlyLauncherRole(role)) return requireAdmin(req, res, role);
+        if (req.method === 'GET' && pathname === '/ops/conferencia') return sendHtml(res, renderSupplierCheckUpload(role, String(query.error || '')));
+        if (req.method === 'POST' && pathname === '/ops/conferencia') return handleSupplierCheck(req, res, role);
+        if (req.method === 'GET') return handleSupplierCheckExcel(query, res);
+      }
       if (req.method === 'POST' && pathname === '/ops') return handleCreateOp({ ...(await parseBody(req)), _role: role }, res);
 
       if (req.method === 'GET' && pathname === '/billing-reconciliation') return sendHtml(res, renderBillingReconciliationPage(query, query.error || '', null, role));
