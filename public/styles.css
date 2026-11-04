@@ -706,3 +706,6 @@ body.kb-selecting .kb-col header::after { content:'tudo'; font-size:11px; color:
   .sc-table td:nth-child(3) { white-space:normal; min-width:220px; }
   .sc-table .badge { white-space:nowrap; }
 }
+.sc-card small { display:block; color:#475569; font-size:12px; font-weight:600; margin-top:2px; }
+.sc-totals { margin:-4px 0 14px; color:#334155; font-size:14px; }
+.sc-table tfoot th { background:#f8fafc; font-size:13px; color:#0f172a; }

@@ -12901,6 +12901,8 @@ function getSupplierCheckRow(item) {
     shipment_number: ship ? ship.shipment_number : '',
     delivery_date: op.delivery_date || '',
     total: Number(op.total_pieces || 0), produced: Number(op.produced_quantity || 0), remaining: Math.max(0, Number(op.remaining_quantity || 0)),
+    minutes: round2(ship && Number(ship.total_minutes) > 0 ? Number(ship.total_minutes) : Number(op.total_shipment_minutes || 0)),
+    remaining_minutes: status === 'embarcada' ? 0 : round2(Math.max(0, Number(op.remaining_quantity || 0)) * Number(op.minutes_f21 || 0)),
     system_ref: op.product_name || '', brand: op.brand || ''
   };
 }
@@ -12911,22 +12913,27 @@ function buildSupplierCheck(items) {
   // Mostruário em aberto no AgilFac que não veio na lista do fornecedor
   const extra = db.prepare("SELECT id, op_number, product_name, brand, entry_date, status_color FROM ops WHERE is_reversed = 0 AND op_type = 'mostruario' AND shipped_at IS NULL AND status_color <> 'vermelho' ORDER BY entry_date").all().filter(o => !inList.has(o.id));
   const counts = Object.fromEntries(Object.keys(SUPPLIER_STATUS).map(k => [k, rows.filter(r => r.status === k).length]));
-  return { rows, counts, extra, at: today() };
+  const minutes = Object.fromEntries(Object.keys(SUPPLIER_STATUS).map(k => [k, round2(rows.filter(r => r.status === k).reduce((a, r) => a + Number(r.minutes || 0), 0))]));
+  const remaining = round2(rows.reduce((a, r) => a + Number(r.remaining_minutes || 0), 0));
+  minutes.all = round2(rows.reduce((a, r) => a + Number(r.minutes || 0), 0));
+  return { rows, counts, minutes, remaining, extra, at: today() };
 }
 
 function supplierCheckMessage(check) {
   const d = v => v ? formatDatePtBr(v).slice(0, 5) : '';
-  const group = (keys, title, fmt) => {
+  const m = v => `${fmtNum(v, 0)} min`;
+  const group = (keys, title, fmt, withMin = true) => {
     const list = check.rows.filter(r => keys.includes(r.status));
-    return list.length ? `*${title} (${list.length})*\n${list.map(fmt).join('\n')}` : '';
+    const tot = list.reduce((a, r) => a + Number(r.minutes || 0), 0);
+    return list.length ? `*${title} (${list.length}${withMin ? ` · ${m(tot)}` : ''})*\n${list.map(fmt).join('\n')}` : '';
   };
   return [
-    `Conferência das OPs de mostruário · ${formatDatePtBr(check.at)}`,
-    group(['embarcada'], 'Embarcadas', r => `• ${r.op_number} – embarcada ${d(r.shipment_date)}`),
+    `Conferência das OPs de mostruário · ${formatDatePtBr(check.at)}\nTotal recebido: ${m(check.minutes.all)} · embarcado: ${m(check.minutes.embarcada || 0)} · saldo a produzir: ${m(check.remaining)}`,
+    group(['embarcada'], 'Embarcadas', r => `• ${r.op_number} – embarcada ${d(r.shipment_date)} – ${m(r.minutes)}`),
     group(['pronta'], 'Prontas, aguardando embarque', r => `• ${r.op_number} – chegou ${d(r.entry_date)}`),
     group(['ocorrencia'], 'Com ocorrência', r => `• ${r.op_number} – ${r.detail}`),
     group(['celula', 'producao', 'aguardando'], 'Em produção', r => `• ${r.op_number} – chegou ${d(r.entry_date)} – ${r.status === 'aguardando' ? 'aguardando produção' : (r.status === 'celula' ? 'em célula' : `${r.produced}/${r.total} pç`)}`),
-    group(['nao_lancada'], 'Não recebidas aqui (confirmar envio)', r => `• ${r.op_number}${r.description ? ` – ${r.description}` : ''}`)
+    group(['nao_lancada'], 'Não recebidas aqui (confirmar envio)', r => `• ${r.op_number}${r.description ? ` – ${r.description}` : ''}`, false)
   ].filter(Boolean).join('\n\n');
 }
 
@@ -12988,23 +12995,26 @@ function renderSupplierCheckResult(id, check, fileName, role) {
   const { rows, counts, extra } = check;
   const d = v => v ? escapeHtml(formatDatePtBr(v)) : '-';
   const msg = supplierCheckMessage(check);
-  const card = (key, label, n, cls) => `<button type="button" class="sc-card ${cls}" data-sc-filter="${key}"><span>${label}</span><strong>${n}</strong></button>`;
+  const mins = check.minutes || {};
+  const card = (key, label, n, cls, min) => `<button type="button" class="sc-card ${cls}" data-sc-filter="${key}"><span>${label}</span><strong>${n}</strong>${min === null ? '<small>sem minutos</small>' : `<small>${fmtNum(min || 0, 0)} min</small>`}</button>`;
   const inProd = counts.producao + counts.celula + counts.aguardando;
+  const inProdMin = (mins.producao || 0) + (mins.celula || 0) + (mins.aguardando || 0);
   const content = `
     <section class="page-header"><div><h2>Conferência da lista do fornecedor</h2><p>${escapeHtml(fileName || 'Números colados')} · ${rows.length} OP(s) · ${d(check.at)}</p></div>
       <div class="header-actions"><a class="btn secondary" href="/ops/conferencia">Nova conferência</a><a class="btn secondary" href="/ops/conferencia/excel?s=${id}">⬇ Baixar Excel</a></div></section>
     <section class="sc-cards">
-      ${card('all', 'Na lista', rows.length, '')}
-      ${card('embarcada', 'Embarcadas', counts.embarcada, 'is-ship')}
-      ${card('pronta', 'Prontas p/ embarcar', counts.pronta, 'is-ready')}
-      ${card('prod', 'Em produção', inProd, 'is-prod')}
-      ${card('ocorrencia', 'Com ocorrência', counts.ocorrencia, 'is-occ')}
-      ${card('nao_lancada', 'Não lançadas', counts.nao_lancada, 'is-missing')}
+      ${card('all', 'Na lista', rows.length, '', mins.all)}
+      ${card('embarcada', 'Embarcadas', counts.embarcada, 'is-ship', mins.embarcada)}
+      ${card('pronta', 'Prontas p/ embarcar', counts.pronta, 'is-ready', mins.pronta)}
+      ${card('prod', 'Em produção', inProd, 'is-prod', inProdMin)}
+      ${card('ocorrencia', 'Com ocorrência', counts.ocorrencia, 'is-occ', mins.ocorrencia)}
+      ${card('nao_lancada', 'Não lançadas', counts.nao_lancada, 'is-missing', null)}
     </section>
+    <p class="sc-totals">Minutos das OPs recebidas: <strong>${fmtNum(mins.all || 0, 0)}</strong> · já embarcados: <strong>${fmtNum(mins.embarcada || 0, 0)}</strong> · saldo ainda a produzir: <strong>${fmtNum(check.remaining || 0, 0)}</strong></p>
     <section class="panel">
       <div class="panel-header"><h3>OPs da lista</h3><span class="hint">Toque num número acima para filtrar.</span></div>
       <div class="table-wrap"><table class="sc-table">
-        <thead><tr><th>OP</th><th>Situação</th><th>Detalhe</th><th>Chegada</th><th>Embarque</th><th>Saldo</th><th>Referência</th><th>Descrição</th><th>Coleção</th><th>Ação</th></tr></thead>
+        <thead><tr><th>OP</th><th>Situação</th><th>Detalhe</th><th>Chegada</th><th>Embarque</th><th>Saldo</th><th>Minutos</th><th>Min. saldo</th><th>Referência</th><th>Descrição</th><th>Coleção</th><th>Ação</th></tr></thead>
         <tbody>
           ${rows.map(r => `<tr data-sc="${r.status}">
             <td><strong>${escapeHtml(r.op_number)}</strong></td>
@@ -13013,12 +13023,15 @@ function renderSupplierCheckResult(id, check, fileName, role) {
             <td>${d(r.entry_date)}</td>
             <td>${r.shipment_date ? `${d(r.shipment_date)}${r.shipment_number ? `<br><small>${escapeHtml(r.shipment_number)}</small>` : ''}` : '-'}</td>
             <td>${r.id ? (r.status === 'embarcada' ? '-' : fmtNum(r.remaining, 0)) : '-'}</td>
+            <td data-min="${r.minutes || 0}">${r.id ? fmtNum(r.minutes, 0) : '-'}</td>
+            <td data-rmin="${r.remaining_minutes || 0}">${r.id && r.status !== 'embarcada' ? fmtNum(r.remaining_minutes, 0) : '-'}</td>
             <td>${escapeHtml(r.ref || '-')}</td>
             <td>${escapeHtml(r.description || '-')}</td>
             <td>${escapeHtml(r.collection || '-')}</td>
             <td>${r.id ? `<a href="/ops/${r.id}">Abrir</a>` : `<a href="/ops/new?${new URLSearchParams({ op_number: r.op_number, product_name: r.refDigits || r.description, op_type: 'mostruario', collection_name: r.collection }).toString()}">Cadastrar</a>`}</td>
           </tr>`).join('')}
         </tbody>
+        <tfoot><tr><th>Total</th><th colspan="5" data-foot-count>${rows.length} OP(s)</th><th data-foot-min>${fmtNum(mins.all || 0, 0)}</th><th data-foot-rmin>${fmtNum(check.remaining || 0, 0)}</th><th colspan="4"></th></tr></tfoot>
       </table></div>
     </section>
     <section class="panel">
@@ -13040,7 +13053,15 @@ function renderSupplierCheckResult(id, check, fileName, role) {
           b.addEventListener('click', function () {
             const f = b.dataset.scFilter;
             document.querySelectorAll('[data-sc-filter]').forEach(x => x.classList.toggle('is-active', x === b && f !== 'all'));
-            document.querySelectorAll('tr[data-sc]').forEach(function (tr) { tr.hidden = !(f === 'all' || tr.dataset.sc === f || (groups[f] || []).includes(tr.dataset.sc)); });
+            let n = 0, mn = 0, rm = 0;
+            document.querySelectorAll('tr[data-sc]').forEach(function (tr) {
+              tr.hidden = !(f === 'all' || tr.dataset.sc === f || (groups[f] || []).includes(tr.dataset.sc));
+              if (!tr.hidden) { n++; mn += Number(tr.querySelector('[data-min]').dataset.min); rm += Number(tr.querySelector('[data-rmin]').dataset.rmin); }
+            });
+            const fmt = v => Math.round(v).toLocaleString('pt-BR');
+            document.querySelector('[data-foot-count]').textContent = n + ' OP(s)';
+            document.querySelector('[data-foot-min]').textContent = fmt(mn);
+            document.querySelector('[data-foot-rmin]').textContent = fmt(rm);
           });
         });
       })();
@@ -13054,12 +13075,17 @@ function handleSupplierCheckExcel(query, res) {
   const XLSX = require('xlsx');
   const { rows, extra, at } = session.check;
   const br = v => v ? formatDatePtBr(v) : '';
-  const sheet = [['OP', 'Situação', 'Detalhe', 'Chegada', 'Data do embarque', 'Nº embarque', 'Total', 'Produzido', 'Saldo', 'Referência (fornecedor)', 'Referência (AgilFac)', 'Descrição', 'Coleção', 'Avisos']]
-    .concat(rows.map(r => [r.op_number, SUPPLIER_STATUS[r.status].label, r.detail, br(r.entry_date), br(r.shipment_date), r.shipment_number || '', r.id ? r.total : '', r.id ? r.produced : '', r.id && r.status !== 'embarcada' ? r.remaining : '', r.ref, r.system_ref || '', r.description, r.collection, r.warnings.join('; ')]));
+  const sheet = [['OP', 'Situação', 'Detalhe', 'Chegada', 'Data do embarque', 'Nº embarque', 'Total', 'Produzido', 'Saldo', 'Minutos da OP', 'Minutos do saldo', 'Referência (fornecedor)', 'Referência (AgilFac)', 'Descrição', 'Coleção', 'Avisos']]
+    .concat(rows.map(r => [r.op_number, SUPPLIER_STATUS[r.status].label, r.detail, br(r.entry_date), br(r.shipment_date), r.shipment_number || '', r.id ? r.total : '', r.id ? r.produced : '', r.id && r.status !== 'embarcada' ? r.remaining : '', r.id ? r.minutes : '', r.id && r.status !== 'embarcada' ? r.remaining_minutes : '', r.ref, r.system_ref || '', r.description, r.collection, r.warnings.join('; ')]));
+  const last = sheet.length;
+  sheet.push(['TOTAL', `${rows.length} OP(s)`, '', '', '', '', '', '', '', '', '']);
+  const summary = [[], ['Resumo', 'OPs', 'Minutos']].concat(Object.entries(SUPPLIER_STATUS).map(([k, v]) => [v.label, session.check.counts[k] || 0, k === 'nao_lancada' ? '' : (session.check.minutes?.[k] || 0)]));
   const book = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(sheet);
-  ws['!cols'] = [12, 22, 40, 11, 14, 14, 8, 10, 8, 18, 14, 22, 26, 30].map(w => ({ wch: w }));
-  ws['!autofilter'] = { ref: `A1:N${sheet.length}` };
+  const ws = XLSX.utils.aoa_to_sheet(sheet.concat(summary));
+  ws[`J${last + 1}`] = { t: 'n', f: `SUBTOTAL(9,J2:J${last})` };
+  ws[`K${last + 1}`] = { t: 'n', f: `SUBTOTAL(9,K2:K${last})` };
+  ws['!cols'] = [12, 22, 40, 11, 14, 14, 8, 10, 8, 13, 14, 18, 14, 22, 26, 30].map(w => ({ wch: w }));
+  ws['!autofilter'] = { ref: `A1:P${last}` };
   XLSX.utils.book_append_sheet(book, ws, 'Conferência');
   if (extra.length) {
     const ws2 = XLSX.utils.aoa_to_sheet([['OP', 'Referência', 'Marca', 'Chegada', 'Status']].concat(extra.map(o => [o.op_number, o.product_name || '', o.brand || '', br(o.entry_date ? String(o.entry_date).slice(0, 10) : ''), o.status_color])));
