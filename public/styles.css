@@ -709,3 +709,30 @@ body.kb-selecting .kb-col header::after { content:'tudo'; font-size:11px; color:
 .sc-card small { display:block; color:#475569; font-size:12px; font-weight:600; margin-top:2px; }
 .sc-totals { margin:-4px 0 14px; color:#334155; font-size:14px; }
 .sc-table tfoot th { background:#f8fafc; font-size:13px; color:#0f172a; }
+
+/* ===== Lançamento Cell ===== */
+.cl-head { display:flex; gap:10px; align-items:center; margin-bottom:10px; }
+.cl-head input { flex:1; font-size:16px; padding:10px 12px; border-radius:12px; }
+.cl-count { font-size:14px; color:#475569; white-space:nowrap; }
+.cl-count b { color:#b91c1c; }
+.cl-list { display:flex; flex-direction:column; gap:8px; max-width:640px; }
+.cl-item { display:flex; justify-content:space-between; align-items:center; gap:10px; background:#fff; border:1px solid #e3e7ef; border-left:5px solid #f59e0b; border-radius:12px; padding:14px 14px; text-decoration:none; color:inherit; min-height:56px; }
+.cl-item.is-done { border-left-color:#22c55e; }
+.cl-item[hidden] { display:none; }
+.cl-name { font-weight:700; font-size:15px; text-transform:uppercase; letter-spacing:.01em; }
+.cl-side { display:flex; flex-direction:column; align-items:flex-end; gap:2px; flex:none; }
+.cl-side small { color:#64748b; font-size:12px; }
+.cl-ok { color:#15803d; font-weight:700; font-size:14px; } .cl-zero { color:#b45309; font-size:13px; font-weight:600; } .cl-pend { color:#fff; background:#f59e0b; border-radius:99px; padding:2px 10px; font-size:13px; font-weight:700; }
+.cl-form { max-width:480px; background:#fff; border:1px solid #e3e7ef; border-radius:16px; padding:14px; }
+.cl-title { margin:0 0 10px; font-size:19px; text-transform:uppercase; }
+.cl-table { width:100%; border-collapse:collapse; display:table !important; }
+.cl-table th { width:30%; text-align:left; font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:#334155; padding:10px 8px; border:1px solid #e3e7ef; background:#f8fafc; }
+.cl-table td { padding:8px; border:1px solid #e3e7ef; font-size:16px; }
+.cl-table input { width:100%; font-size:18px; padding:10px 12px; border-radius:10px; text-align:center; min-height:46px; }
+.cl-table #cl-reason { text-align:left; font-size:16px; }
+.cl-table td small { display:block; font-size:12px; color:#64748b; margin-top:4px; text-align:center; }
+.cl-table td small.is-bad { color:#b91c1c; font-weight:600; }
+.cl-hour { text-align:center; } .cl-hour strong { font-size:20px; }
+#cl-min, #cl-pct { text-align:center; font-weight:700; }
+.cl-save { width:100%; margin-top:12px; min-height:52px; font-size:17px; }
+.cl-back { width:100%; margin-top:8px; text-align:center; }

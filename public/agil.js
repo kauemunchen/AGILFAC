@@ -173,6 +173,8 @@
   const path = location.pathname;
   const isMobile = matchMedia('(max-width: 760px)').matches;
   if (isMobile) {
+    // No celular, "Lançar" abre o Lançamento Cell
+    document.querySelectorAll('.bottom-bar a[href="/productions/hourly/quadro"]').forEach(a => { a.href = '/productions/hourly/cell'; });
     document.querySelectorAll('table').forEach(table => {
       if (table.closest('.hour-grid, .no-cards, .fin-cal, .agil-help, dialog') || table.classList.contains('hour-grid') || table.classList.contains('no-cards')) return;
       const heads = [...table.querySelectorAll('thead th')].map(th => th.textContent.trim());

@@ -1668,7 +1668,7 @@ function isLancadorRole(role) {
 }
 
 function isLancadorAllowed(method, pathname) {
-  if (['GET', 'POST'].includes(method) && pathname === '/productions/hourly/quadro') return true;
+  if (['GET', 'POST'].includes(method) && ['/productions/hourly/quadro', '/productions/hourly/cell'].includes(pathname)) return true;
   if (method === 'GET' && ['/productions/new', '/productions/hourly', '/ops', '/labels/entry', '/api/op-preview', '/conta/senha'].includes(pathname)) return true;
   if (method === 'POST' && ['/productions', '/productions/hourly', '/productions/hourly/validate', '/conta/senha', '/logout'].includes(pathname)) return true;
   if (method === 'GET' && (/^\/ops\/\d+(\/mover)?$/.test(pathname) || pathname === '/ops/localizar')) return true;
@@ -2368,11 +2368,12 @@ function renderGroupedNav(navItems) {
   </script>`;
 }
 
-const LAUNCH_TITLES = new Set(['Quadro por hora', 'Lançamento por hora', 'Novo lançamento', 'Lançamento hora extra']);
+const LAUNCH_TITLES = new Set(['Lançamento Cell', 'Quadro por hora', 'Lançamento por hora', 'Novo lançamento', 'Lançamento hora extra']);
 
 // Abas da tela única "Lançar"
 function renderLaunchTabs(title, role) {
   const tabs = [
+    { href: '/productions/hourly/cell', label: '📱 Cell', title: 'Lançamento Cell' },
     { href: '/productions/hourly/quadro', label: '🗓️ Quadro hora', title: 'Quadro por hora' },
     { href: '/productions/hourly', label: '⏰ Por hora', title: 'Lançamento por hora' }
   ];
@@ -10085,6 +10086,145 @@ function renderHourlyGridPage(query = {}, error = '', notice = '', role = getReq
   return pageLayout({ title: 'Quadro por hora', content, notice, error, role });
 }
 
+// ===================== LANÇAMENTO CELL (celular, só a hora do momento) =====================
+// Lista de costureiras → toque no nome → OP, peças e justificativa (se 0) da hora atual. Não volta nem avança hora.
+// Hora a lançar = o último bloco da jornada que termina até 10 min depois de agora (ex.: 07:55–08:59 → bloco que fecha às 08:00).
+const CELL_LAUNCH_TOLERANCE_MIN = 10;
+function businessNowMinutes() {
+  const parts = new Intl.DateTimeFormat('en-GB', { timeZone: BUSINESS_TZ, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date());
+  return Number(parts.find(p => p.type === 'hour').value) * 60 + Number(parts.find(p => p.type === 'minute').value);
+}
+function getCellLaunchBlock(employee, nowMin = businessNowMinutes()) {
+  const blocks = getEmployeeHourBlocks(employee);
+  if (!blocks.length) return null;
+  const done = blocks.filter(b => timeToMinutes(b.label) <= nowMin + CELL_LAUNCH_TOLERANCE_MIN);
+  return done.length ? done[done.length - 1] : blocks[0];
+}
+
+function renderCellLaunchList(role, query = {}) {
+  const day = today();
+  const employees = getGridEmployees(day);
+  const nowMin = businessNowMinutes();
+  const rows = db.prepare('SELECT hp.employee_id, hp.hour_slot, hp.produced_quantity, o.op_number FROM hourly_productions hp JOIN ops o ON o.id = hp.op_id WHERE hp.production_date = ? AND hp.is_reversed = 0').all(day);
+  const zeros = db.prepare('SELECT employee_id, hour_slot, reason FROM hourly_zero_hours WHERE production_date = ? AND is_reversed = 0').all(day);
+  let pending = 0;
+  const items = employees.map(emp => {
+    const b = getCellLaunchBlock(emp, nowMin);
+    const row = b && rows.find(r => r.employee_id === emp.id && r.hour_slot === b.slot);
+    const zero = b && zeros.find(z => z.employee_id === emp.id && z.hour_slot === b.slot);
+    if (!row && !zero) pending += 1;
+    const status = row ? `<span class="cl-ok">✓ ${fmtNum(row.produced_quantity, 0)} pç</span>` : zero ? `<span class="cl-zero">0 · ${escapeHtml(zero.reason)}</span>` : '<span class="cl-pend">lançar</span>';
+    return `<a class="cl-item${row || zero ? ' is-done' : ''}" href="/productions/hourly/cell?employee_id=${emp.id}" data-name="${escapeHtml(String(emp.full_name).toLowerCase())}">
+      <span class="cl-name">${escapeHtml(emp.full_name)}</span>
+      <span class="cl-side"><small>${b ? escapeHtml(b.label) : ''}</small>${status}</span>
+    </a>`;
+  }).join('');
+  const content = `
+    <section class="page-header"><div><h2>Lançamento Cell</h2></div></section>
+    <div class="cl-head">
+      <input type="search" id="cl-search" placeholder="Buscar colaboradora" autocomplete="off" />
+      <span class="cl-count">${pending ? `<b>${pending}</b> pendente(s)` : '✓ todas lançadas'}</span>
+    </div>
+    <div class="cl-list" id="cl-list">${items || '<p class="hint">Nenhuma costureira ativa.</p>'}</div>
+    <script>
+      (() => {
+        const s = document.getElementById('cl-search');
+        s.addEventListener('input', () => { const q = s.value.trim().toLowerCase(); document.querySelectorAll('.cl-item').forEach(a => { a.hidden = q && !a.dataset.name.includes(q); }); });
+      })();
+    </script>`;
+  return pageLayout({ title: 'Lançamento Cell', content, notice: query.notice || '', error: query.error || '', role });
+}
+
+function renderCellLaunchForm(role, employeeId, query = {}) {
+  const day = today();
+  const emp = getGridEmployees(day).find(e => e.id === Number(employeeId));
+  if (!emp) return null;
+  const b = getCellLaunchBlock(emp);
+  if (!b) return null;
+  const row = db.prepare('SELECT hp.*, o.op_number FROM hourly_productions hp JOIN ops o ON o.id = hp.op_id WHERE hp.employee_id = ? AND hp.production_date = ? AND hp.hour_slot = ? AND hp.is_reversed = 0').get(emp.id, day, b.slot);
+  const zero = db.prepare('SELECT * FROM hourly_zero_hours WHERE employee_id = ? AND production_date = ? AND hour_slot = ? AND is_reversed = 0').get(emp.id, day, b.slot);
+  const lastOp = row ? row.op_number : (getLastHourlyOpForEmployee(emp.id, day)?.op_number || '');
+  const qty = row ? row.produced_quantity : (zero ? 0 : '');
+  const locked = Boolean(row && row.is_validated);
+  const target = targetPercent();
+  const content = `
+    <form method="post" action="/productions/hourly/cell" class="cl-form" id="cl-form">
+      <input type="hidden" name="employee_id" value="${emp.id}" />
+      <input type="hidden" name="slot" value="${escapeHtml(b.slot)}" />
+      <h2 class="cl-title">${escapeHtml(emp.full_name)}</h2>
+      <table class="cl-table no-cards">
+        <tr><th>OP</th><td><input name="op" value="${escapeHtml(lastOp)}" placeholder="OP" inputmode="numeric" autocomplete="off" ${locked ? 'disabled' : ''} id="cl-op" /><small id="cl-op-info"></small></td></tr>
+        <tr><th>Hora</th><td class="cl-hour"><strong>${escapeHtml(b.label)}</strong><small>${escapeHtml(b.from)}–${escapeHtml(b.label)} · ${b.minutes} min</small></td></tr>
+        <tr><th>Peças</th><td><input name="qty" type="number" min="0" step="1" inputmode="numeric" value="${qty}" ${locked ? 'disabled' : ''} id="cl-qty" ${row || zero ? '' : 'autofocus'} /></td></tr>
+        <tr id="cl-reason-row" ${zero ? '' : 'hidden'}><th>Justificativa</th><td><input name="reason" list="zero-reasons" value="${escapeHtml(zero?.reason || '')}" placeholder="Motivo da hora zerada" id="cl-reason" autocomplete="off" /></td></tr>
+        <tr><th>Min</th><td id="cl-min">${row ? fmtNum(row.produced_minutes, 1) : ''}</td></tr>
+        <tr><th>%</th><td id="cl-pct"></td></tr>
+      </table>
+      <datalist id="zero-reasons">${ZERO_HOUR_REASONS.map(r => `<option value="${r}"></option>`).join('')}</datalist>
+      ${locked ? '<p class="hint">Hora já validada — não pode ser alterada aqui.</p>' : '<button class="btn cl-save" type="submit" id="cl-save">Salvar</button>'}
+      <a class="btn secondary cl-back" href="/productions/hourly/cell">Voltar à lista</a>
+    </form>
+    <script>
+      (() => {
+        const op = document.getElementById('cl-op'), qty = document.getElementById('cl-qty'), reasonRow = document.getElementById('cl-reason-row'), reason = document.getElementById('cl-reason');
+        const minCell = document.getElementById('cl-min'), pctCell = document.getElementById('cl-pct'), info = document.getElementById('cl-op-info');
+        const block = ${b.minutes}, target = ${target};
+        let perPiece = 0, timer;
+        const fmt = (n, d) => Number(n).toLocaleString('pt-BR', { minimumFractionDigits: d, maximumFractionDigits: d });
+        const calc = () => {
+          const q = qty.value.trim();
+          const isZero = q === '0';
+          reasonRow.hidden = !isZero; reason.required = isZero;
+          if (q === '' || !perPiece) { minCell.textContent = q === '0' ? '0' : ''; pctCell.textContent = q === '0' ? '0%' : ''; pctCell.className = ''; return; }
+          const m = Number(q) * perPiece, p = m / block * 100;
+          minCell.textContent = fmt(m, 1); pctCell.textContent = fmt(p, 0) + '%';
+          pctCell.className = p >= target ? 'perf-high' : (p >= 40 ? 'perf-mid' : 'perf-low');
+        };
+        const lookup = async () => {
+          const n = op.value.trim();
+          if (!n) { perPiece = 0; info.textContent = ''; return calc(); }
+          try {
+            const d = await (await fetch('/api/op-preview?op_number=' + encodeURIComponent(n), { headers: { Accept: 'application/json' } })).json();
+            if (!d.found) { perPiece = 0; info.textContent = 'OP não encontrada'; info.className = 'is-bad'; }
+            else { perPiece = Number(d.total_launch_minutes_per_piece || 0); info.textContent = (d.product_name || '') + ' · saldo ' + d.remaining_quantity + ' pç' + (d.is_in_cell ? ' · EM CÉLULA' : ''); info.className = d.is_in_cell || d.remaining_quantity <= 0 ? 'is-bad' : ''; }
+          } catch (_) { perPiece = 0; }
+          calc();
+        };
+        if (op) { op.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(lookup, 350); }); lookup(); }
+        if (qty) {
+          qty.addEventListener('input', () => { calc(); if (qty.value.trim() === '0') setTimeout(() => reason.focus(), 50); });
+          if (!qty.hasAttribute('autofocus') && document.activeElement === document.body) qty.focus();
+        }
+        document.getElementById('cl-form').addEventListener('submit', e => {
+          const q = qty ? qty.value.trim() : '';
+          if (q === '') { e.preventDefault(); qty.focus(); return; }
+          if (q === '0' && !reason.value.trim()) { e.preventDefault(); reasonRow.hidden = false; reason.focus(); return; }
+          if (q !== '0' && !op.value.trim()) { e.preventDefault(); op.focus(); return; }
+          const b = document.getElementById('cl-save'); if (b) { b.disabled = true; b.textContent = 'Salvando…'; }
+        });
+      })();
+    </script>`;
+  return pageLayout({ title: 'Lançamento Cell', content, notice: query.notice || '', error: query.error || '', role });
+}
+
+function handleCellLaunch(form, res, role) {
+  const day = today();
+  const emp = getGridEmployees(day).find(e => e.id === Number(form.employee_id));
+  if (!emp) return redirect(res, buildRedirectWithFlash('/productions/hourly/cell', 'Colaboradora não encontrada.', true));
+  const b = getCellLaunchBlock(emp);
+  if (!b || b.slot !== String(form.slot || '')) {
+    return redirect(res, buildRedirectWithFlash(`/productions/hourly/cell?employee_id=${emp.id}`, `A hora mudou: agora o lançamento é das ${b ? b.label : '-'}. Confira e salve de novo.`, true));
+  }
+  const qty = String(form.qty ?? '').trim();
+  if (qty === '') return redirect(res, buildRedirectWithFlash(`/productions/hourly/cell?employee_id=${emp.id}`, 'Informe a quantidade de peças.', true));
+  const gridForm = { production_date: day, employee_id: String(emp.id), _cell: true };
+  gridForm[`qty_${b.slot}`] = qty;
+  gridForm[`op_${b.slot}`] = String(form.op || '');
+  gridForm[`reason_${b.slot}`] = String(form.reason || '');
+  return handleSaveHourlyGrid(gridForm, res, role);
+}
+// ===============================================================
+
 function handleSaveHourlyGrid(form, res, role) {
   const productionDate = String(form.production_date || '').trim();
   const employeeId = Number(form.employee_id || 0);
@@ -10092,7 +10232,9 @@ function handleSaveHourlyGrid(form, res, role) {
   const ajax = form.ajax === '1';
   const back = (msg, isError) => ajax
     ? sendJson(res, { ok: !isError, message: msg }, 200)
-    : redirect(res, buildRedirectWithFlash(`/productions/hourly/quadro?production_date=${encodeURIComponent(productionDate)}${isError ? `&employee_id=${employeeId}` : ''}`, msg, isError));
+    : form._cell
+      ? redirect(res, buildRedirectWithFlash(`/productions/hourly/cell${isError ? `?employee_id=${employeeId}` : ''}`, msg, isError))
+      : redirect(res, buildRedirectWithFlash(`/productions/hourly/quadro?production_date=${encodeURIComponent(productionDate)}${isError ? `&employee_id=${employeeId}` : ''}`, msg, isError));
   const dateError = checkLaunchDate(productionDate, role);
   if (dateError) return back(dateError, true);
   const employee = db.prepare('SELECT * FROM employees WHERE id = ?').get(employeeId);
@@ -14503,6 +14645,13 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, preview ? { found: true, ...preview } : { found: false }, preview ? 200 : 404);
       }
 
+      if (pathname === '/productions/hourly/cell' && canAccessHourlyLauncher(role)) {
+        if (req.method === 'POST') return handleCellLaunch(await parseBody(req), res, role);
+        if (req.method === 'GET') {
+          if (query.employee_id) { const html = renderCellLaunchForm(role, query.employee_id, query); if (html) return sendHtml(res, html); }
+          return sendHtml(res, renderCellLaunchList(role, query));
+        }
+      }
       if (isLancadorRole(role)) {
         if (req.method === 'GET' && pathname === '/') return redirect(res, '/productions/hourly/quadro');
         if (!isLancadorAllowed(req.method, pathname)) {
@@ -14519,7 +14668,7 @@ const server = http.createServer(async (req, res) => {
         const allowed = (
           (req.method === 'GET' && pathname === '/') ||
           (req.method === 'GET' && pathname === '/productions/hourly') ||
-          (['GET', 'POST'].includes(req.method) && pathname === '/productions/hourly/quadro') ||
+          (['GET', 'POST'].includes(req.method) && ['/productions/hourly/quadro', '/productions/hourly/cell'].includes(pathname)) ||
           (req.method === 'GET' && pathname === '/api/op-preview') ||
           (req.method === 'POST' && pathname === '/productions/hourly') ||
           (req.method === 'POST' && pathname === '/productions/hourly/validate') ||
